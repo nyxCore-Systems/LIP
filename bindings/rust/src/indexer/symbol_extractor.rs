@@ -44,7 +44,8 @@ impl<'a> SymbolExtractor<'a> {
             Language::Rust       => self.rust_calls(node, caller, edges),
             Language::TypeScript => self.ts_calls(node, caller, edges),
             Language::Python     => self.py_calls(node, caller, edges),
-            _                    => {}
+            Language::Dart       => self.dart_calls(node, caller, edges),
+            Language::Unknown    => {}
         }
     }
 
@@ -89,7 +90,8 @@ impl<'a> SymbolExtractor<'a> {
             Language::Rust       => self.rust_occurrences(node, out),
             Language::TypeScript => self.ts_occurrences(node, out),
             Language::Python     => self.py_occurrences(node, out),
-            _                    => {}
+            Language::Dart       => self.dart_occurrences(node, out),
+            Language::Unknown    => {}
         }
     }
 
@@ -340,9 +342,128 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     // ─── Dart ────────────────────────────────────────────────────────────────
-    // Dart tree-sitter grammar not bundled in v0.1; stub that always returns empty.
 
-    fn dart_symbols(&self, _node: Node, _out: &mut Vec<OwnedSymbolInfo>) {}
+    fn dart_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        let (kind, name_field) = match node.kind() {
+            "function_declaration"  => (SymbolKind::Function,    "name"),
+            "method_declaration"    => (SymbolKind::Method,      "name"),
+            "class_declaration"     => (SymbolKind::Class,       "name"),
+            "constructor_declaration" => (SymbolKind::Constructor, "name"),
+            "getter_signature"      => (SymbolKind::Method,      "name"),
+            "setter_signature"      => (SymbolKind::Method,      "name"),
+            "mixin_declaration"     => (SymbolKind::Class,       "name"),
+            "extension_declaration" => (SymbolKind::Namespace,   "name"),
+            _ => {
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i) {
+                        self.dart_symbols(child, out);
+                    }
+                }
+                return;
+            }
+        };
+
+        if let Some(name_node) = node.child_by_field_name(name_field) {
+            let name = self.node_text(&name_node);
+            if !name.is_empty() {
+                out.push(OwnedSymbolInfo {
+                    uri:              self.lip_uri(name),
+                    display_name:     name.to_owned(),
+                    kind,
+                    confidence_score: 30,
+                    ..OwnedSymbolInfo::new("", "")
+                });
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.dart_symbols(child, out);
+            }
+        }
+    }
+
+    fn dart_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if node.kind() == "identifier" {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_decl = matches!(
+                        parent.kind(),
+                        "function_declaration"
+                        | "method_declaration"
+                        | "class_declaration"
+                        | "constructor_declaration"
+                        | "getter_signature"
+                        | "setter_signature"
+                        | "mixin_declaration"
+                        | "extension_declaration"
+                        | "variable_declarator"
+                    );
+                    let is_name = parent.child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri:       self.lip_uri(name),
+                    range:            Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc:     None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.dart_occurrences(child, out);
+            }
+        }
+    }
+
+    fn dart_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller: Option<String> = match node.kind() {
+            "function_declaration" | "method_declaration" | "constructor_declaration" => {
+                node.child_by_field_name("name")
+                    .map(|n| self.node_text(&n).to_owned())
+            }
+            _ => None,
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        // Dart: function invocations use `invocation_expression`; the function
+        // being called is the `function` field (an identifier or member access).
+        if node.kind() == "invocation_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee: &str = match func_node.kind() {
+                    "identifier" => self.node_text(&func_node),
+                    // selector_expression: `obj.method(...)` — use the rhs
+                    "selector_expression" => func_node
+                        .child_by_field_name("selector")
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri:   self.lip_uri(callee),
+                                kind:     EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.dart_calls(child, effective.clone(), edges);
+            }
+        }
+    }
 
     // ─── CPG call edge walkers ────────────────────────────────────────────
 

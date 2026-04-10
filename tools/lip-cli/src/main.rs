@@ -35,6 +35,8 @@ enum Commands {
     Lsp(cmd::lsp::LspArgs),
     /// Fetch a dependency slice from the LIP registry.
     Fetch(cmd::fetch::FetchArgs),
+    /// Publish a dependency slice to the LIP registry.
+    Push(cmd::push::PushArgs),
     /// Annotate a symbol with a key/value pair.
     Annotate(cmd::annotate::AnnotateArgs),
 }
@@ -56,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Export(args) => cmd::export::run(args).await,
         Commands::Lsp(args)    => cmd::lsp::run(args).await,
         Commands::Fetch(args)    => cmd::fetch::run(args).await,
+        Commands::Push(args)     => cmd::push::run(args).await,
         Commands::Annotate(args) => cmd::annotate::run(args).await,
     }
 }

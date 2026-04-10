@@ -7,11 +7,12 @@
 /// Salsa's proc-macro API has changed across versions; v0.1 implements the
 /// pattern manually. A v0.2 migration to the salsa crate is tracked in the
 /// roadmap.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
+use crate::schema::{EdgeKind};
 use crate::query_graph::types::{ApiSurface, BlastRadiusResult};
 use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
 
@@ -79,6 +80,11 @@ pub struct LipDatabase {
     workspace_root: Option<PathBuf>,
     /// Persistent annotations keyed by (symbol_uri, annotation_key).
     annotations: HashMap<String, HashMap<String, OwnedAnnotationEntry>>,
+    /// CPG reverse call graph: callee_uri → [caller_uris].
+    /// Populated eagerly in `upsert_file`; used by `blast_radius_for`.
+    callee_to_callers: HashMap<String, Vec<String>>,
+    /// Per-file call edge index for cleanup on re-upsert or remove.
+    file_call_edges: HashMap<String, Vec<(String, String)>>,
 }
 
 impl LipDatabase {
@@ -91,8 +97,10 @@ impl LipDatabase {
             api_cache:      HashMap::new(),
             def_index:      HashMap::new(),
             merkle_root:    None,
-            workspace_root: None,
-            annotations:    HashMap::new(),
+            workspace_root:    None,
+            annotations:       HashMap::new(),
+            callee_to_callers: HashMap::new(),
+            file_call_edges:   HashMap::new(),
         }
     }
 
@@ -120,6 +128,23 @@ impl LipDatabase {
         }
         // Cache the occurrences we just computed to avoid a redundant parse on first query.
         self.occ_cache.insert(uri.to_owned(), Cached::new(occs, rev));
+
+        // Eagerly rebuild the CPG call-edge reverse index for this file.
+        self.remove_file_call_edges(&uri);
+        if let Some(input) = self.file_inputs.get(&uri) {
+            let lang  = Language::detect(&uri, &input.language.clone());
+            let text  = input.text.clone();
+            let edges = Tier1Indexer::new().edges_for_source(&uri, &text, lang);
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for edge in edges.iter().filter(|e| e.kind == EdgeKind::Calls) {
+                self.callee_to_callers
+                    .entry(edge.to_uri.clone())
+                    .or_default()
+                    .push(edge.from_uri.clone());
+                pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
+            }
+            self.file_call_edges.insert(uri.clone(), pairs);
+        }
     }
 
     pub fn remove_file(&mut self, uri: &str) {
@@ -129,6 +154,17 @@ impl LipDatabase {
         self.occ_cache.remove(uri);
         self.api_cache.remove(uri);
         self.def_index.retain(|_, (furi, _)| furi.as_str() != uri);
+        self.remove_file_call_edges(uri);
+    }
+
+    fn remove_file_call_edges(&mut self, uri: &str) {
+        if let Some(pairs) = self.file_call_edges.remove(uri) {
+            for (from, to) in pairs {
+                if let Some(callers) = self.callee_to_callers.get_mut(&to) {
+                    callers.retain(|c| *c != from);
+                }
+            }
+        }
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -323,10 +359,30 @@ impl LipDatabase {
         };
 
         let direct = self.reverse_deps(&def_uri);
-        let mut transitive: std::collections::HashSet<String> = direct.iter().cloned().collect();
+        let mut transitive: HashSet<String> = direct.iter().cloned().collect();
         for dep in direct.clone() {
             for indirect in self.reverse_deps(&dep) {
                 transitive.insert(indirect);
+            }
+        }
+
+        // CPG augmentation: BFS over the reverse call graph to find all
+        // transitive callers of this symbol and map them to their defining files.
+        let mut cpg_queue: VecDeque<String> = VecDeque::new();
+        let mut cpg_visited: HashSet<String> = HashSet::new();
+        cpg_queue.push_back(symbol_uri.to_owned());
+        while let Some(callee) = cpg_queue.pop_front() {
+            if let Some(callers) = self.callee_to_callers.get(&callee).cloned() {
+                for caller in callers {
+                    if cpg_visited.insert(caller.clone()) {
+                        cpg_queue.push_back(caller);
+                    }
+                }
+            }
+        }
+        for caller_sym in &cpg_visited {
+            if let Some((file_uri, _)) = self.def_index.get(caller_sym) {
+                transitive.insert(file_uri.clone());
             }
         }
 
@@ -877,5 +933,66 @@ impl Greeter {
         db.upsert_file("lip://s/p@1/solo.rs".to_owned(), "pub fn solo() {}".to_owned(), "rust".to_owned());
         let deps = db.reverse_deps("lip://s/p@1/solo.rs");
         assert!(deps.is_empty(), "isolated file should have no reverse deps");
+    }
+
+    // ── blast_radius CPG augmentation ─────────────────────────────────────
+    //
+    // Tier 1 URIs are file-local (lip://local/<file>#<name>), so CPG edges
+    // only resolve within the same file in v0.1. Cross-file resolution requires
+    // a global name→file index (planned for v0.2).
+
+    #[test]
+    fn blast_radius_cpg_same_file_caller_included() {
+        let mut db = LipDatabase::new();
+        // Both helper and main are in the same file; main() calls helper().
+        // The CPG edge main→helper should surface in blast_radius_for(helper).
+        let uri = "file:///project/main.rs".to_owned();
+        db.upsert_file(
+            uri.clone(),
+            "pub fn helper() {} pub fn main() { helper(); }".to_owned(),
+            "rust".to_owned(),
+        );
+
+        let helper_sym = db.file_symbols(&uri)
+            .iter()
+            .find(|s| s.display_name == "helper")
+            .map(|s| s.uri.clone())
+            .expect("helper symbol not found");
+
+        let result = db.blast_radius_for(&helper_sym);
+        // The defining file appears because main (also in that file) calls helper.
+        assert!(
+            result.affected_files.contains(&uri),
+            "blast radius should include the calling file via CPG edges; got {:?}",
+            result.affected_files
+        );
+    }
+
+    #[test]
+    fn blast_radius_cpg_cleared_on_remove() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/main.rs".to_owned();
+        db.upsert_file(
+            uri.clone(),
+            "pub fn helper() {} pub fn main() { helper(); }".to_owned(),
+            "rust".to_owned(),
+        );
+
+        // Re-upsert with no callers — CPG edge should be removed.
+        db.upsert_file(uri.clone(), "pub fn helper() {}".to_owned(), "rust".to_owned());
+
+        // Re-fetch the helper sym URI (unchanged after re-upsert).
+        let helper_sym2 = db.file_symbols(&uri)
+            .iter().find(|s| s.display_name == "helper")
+            .map(|s| s.uri.clone()).expect("helper symbol not found after re-upsert");
+
+        // blast_radius_for should now report an empty affected_files because the
+        // caller was removed from the CPG index.
+        let result = db.blast_radius_for(&helper_sym2);
+        assert!(
+            result.affected_files.is_empty(),
+            "stale CPG edge should be purged on re-upsert; got {:?}",
+            result.affected_files
+        );
     }
 }

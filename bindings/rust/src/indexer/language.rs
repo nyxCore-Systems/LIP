@@ -44,7 +44,7 @@ impl Language {
             Language::Rust       => Some(tree_sitter_rust::language()),
             Language::TypeScript => Some(tree_sitter_typescript::language_typescript()),
             Language::Python     => Some(tree_sitter_python::language()),
-            Language::Dart       => None, // tree-sitter-dart not yet bundled in v0.1
+            Language::Dart       => Some(tree_sitter_dart::language()),
             Language::Unknown    => None,
         }
     }

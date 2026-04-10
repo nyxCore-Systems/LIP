@@ -77,4 +77,32 @@ impl RegistryClient {
 
         anyhow::bail!("slice {package_hash} not found in any registry")
     }
+
+    /// Publish a raw slice JSON blob to the first registry.
+    ///
+    /// The server verifies the SHA-256 of the body matches the URL path and the
+    /// `content_hash` field inside the JSON. Returns the content hash on success.
+    pub async fn push_slice(&self, raw: Vec<u8>) -> anyhow::Result<String> {
+        let hash = sha256_hex(&raw);
+        let base = self.base_urls.first()
+            .ok_or_else(|| anyhow::anyhow!("no registry URL configured"))?;
+        let url  = format!("{base}/slices/{hash}");
+
+        let resp = self.http
+            .put(&url)
+            .header("Content-Type", "application/json")
+            .body(raw)
+            .send()
+            .await?;
+
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "registry rejected push ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+
+        info!("pushed slice {hash} to {base}");
+        Ok(hash)
+    }
 }
