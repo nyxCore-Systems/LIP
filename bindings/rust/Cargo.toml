@@ -47,5 +47,9 @@ harness = false
 name    = "framing"
 harness = false
 
+[[bench]]
+name    = "journal"
+harness = false
+
 [build-dependencies]
 which = "6"
