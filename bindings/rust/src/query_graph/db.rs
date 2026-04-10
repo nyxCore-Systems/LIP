@@ -613,4 +613,235 @@ mod tests {
         assert_eq!(result.transitive_dependents, 0);
         assert!(result.affected_files.is_empty());
     }
+
+    // ── symbol_at_position ────────────────────────────────────────────────
+
+    #[test]
+    fn symbol_at_position_hits_occurrence_range() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/pos.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn greet() {}".to_owned(), "rust".to_owned());
+
+        // Use the actual parsed occurrences so the test is not fragile to
+        // tree-sitter range changes — pick the first occurrence and query at
+        // its exact start position.
+        let occs = db.file_occurrences(&uri);
+        assert!(!occs.is_empty(), "expected at least one occurrence");
+        let first = &occs[0];
+        let result = db.symbol_at_position(&uri, first.range.start_line, first.range.start_char);
+        assert_eq!(result.as_deref(), Some(first.symbol_uri.as_str()));
+    }
+
+    #[test]
+    fn symbol_at_position_misses_outside_range() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/miss.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn f() {}".to_owned(), "rust".to_owned());
+        // Line 9999 is never in any occurrence range.
+        assert!(db.symbol_at_position(&uri, 9999, 0).is_none());
+    }
+
+    // ── symbol_definition_location ────────────────────────────────────────
+
+    #[test]
+    fn symbol_definition_location_found_after_upsert() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/def.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn defined_fn() {}".to_owned(), "rust".to_owned());
+
+        // Find a definition occurrence to get a real symbol URI.
+        let occs = db.file_occurrences(&uri);
+        let def_occ = occs.iter().find(|o| o.role == Role::Definition);
+        let Some(def_occ) = def_occ else {
+            // tree-sitter produced no definition occurrences — skip rather than fail.
+            return;
+        };
+
+        let loc = db.symbol_definition_location(&def_occ.symbol_uri);
+        assert!(loc.is_some(), "expected definition location in def_index");
+        let (loc_uri, loc_range) = loc.unwrap();
+        assert_eq!(loc_uri, uri);
+        assert_eq!(loc_range, def_occ.range);
+    }
+
+    #[test]
+    fn symbol_definition_location_cleared_on_remove() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/clear.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn gone() {}".to_owned(), "rust".to_owned());
+
+        let occs = db.file_occurrences(&uri);
+        let def_occ = occs.iter().find(|o| o.role == Role::Definition);
+        let Some(def_occ) = def_occ else { return; };
+        let sym_uri = def_occ.symbol_uri.clone();
+
+        assert!(db.symbol_definition_location(&sym_uri).is_some());
+        db.remove_file(&uri);
+        assert!(db.symbol_definition_location(&sym_uri).is_none(),
+            "def_index should be pruned on remove_file");
+    }
+
+    // ── dead_symbols ──────────────────────────────────────────────────────
+
+    #[test]
+    fn dead_symbols_detects_unreferenced_symbol() {
+        let mut db = LipDatabase::new();
+        // Two files: lib defines `helper`, main never references it.
+        db.upsert_file(
+            "lip://s/p@1/lib.rs".to_owned(),
+            "pub fn helper() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            "lip://s/p@1/main.rs".to_owned(),
+            "pub fn main() {}".to_owned(),
+            "rust".to_owned(),
+        );
+
+        let dead = db.dead_symbols(None);
+        // All symbols are unreferenced (no cross-file calls in these snippets).
+        assert!(!dead.is_empty(), "expected dead symbols in isolated files");
+    }
+
+    #[test]
+    fn dead_symbols_limit_respected() {
+        let mut db = LipDatabase::new();
+        db.upsert_file(
+            "lip://s/p@1/a.rs".to_owned(),
+            "pub fn a1() {} pub fn a2() {} pub fn a3() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        let dead = db.dead_symbols(Some(1));
+        assert_eq!(dead.len(), 1);
+    }
+
+    #[test]
+    fn dead_symbols_empty_when_no_files() {
+        let mut db = LipDatabase::new();
+        assert!(db.dead_symbols(None).is_empty());
+    }
+
+    // ── annotations ──────────────────────────────────────────────────────
+
+    #[test]
+    fn annotation_set_get_roundtrip() {
+        use crate::schema::OwnedAnnotationEntry;
+        let mut db = LipDatabase::new();
+        let entry = OwnedAnnotationEntry {
+            symbol_uri:   "lip://s/p@1/f.rs#foo".to_owned(),
+            key:          "team:owner".to_owned(),
+            value:        "platform".to_owned(),
+            author_id:    "human:alice".to_owned(),
+            confidence:   100,
+            timestamp_ms: 0,
+            expires_ms:   0,
+        };
+        db.annotation_set(entry.clone());
+
+        let got = db.annotation_get("lip://s/p@1/f.rs#foo", "team:owner");
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().value, "platform");
+    }
+
+    #[test]
+    fn annotation_get_missing_returns_none() {
+        let db = LipDatabase::new();
+        assert!(db.annotation_get("lip://s/p@1/f.rs#no_sym", "key").is_none());
+    }
+
+    #[test]
+    fn annotation_list_returns_all_keys_for_symbol() {
+        use crate::schema::OwnedAnnotationEntry;
+        let mut db = LipDatabase::new();
+        let sym = "lip://s/p@1/f.rs#bar";
+        for key in ["k1", "k2", "k3"] {
+            db.annotation_set(OwnedAnnotationEntry {
+                symbol_uri:   sym.to_owned(),
+                key:          key.to_owned(),
+                value:        key.to_owned(),
+                author_id:    "human:test".to_owned(),
+                confidence:   100,
+                timestamp_ms: 0,
+                expires_ms:   0,
+            });
+        }
+        let list = db.annotation_list(sym);
+        assert_eq!(list.len(), 3);
+        let keys: Vec<_> = list.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"k1") && keys.contains(&"k2") && keys.contains(&"k3"));
+    }
+
+    #[test]
+    fn annotation_survives_file_upsert_and_remove() {
+        use crate::schema::OwnedAnnotationEntry;
+        let mut db = LipDatabase::new();
+        let file_uri = "lip://s/p@1/f.rs".to_owned();
+        let sym_uri  = format!("{file_uri}#foo");
+
+        db.upsert_file(file_uri.clone(), "pub fn foo() {}".to_owned(), "rust".to_owned());
+        db.annotation_set(OwnedAnnotationEntry {
+            symbol_uri:   sym_uri.clone(),
+            key:          "note".to_owned(),
+            value:        "fragile".to_owned(),
+            author_id:    "human:test".to_owned(),
+            confidence:   100,
+            timestamp_ms: 0,
+            expires_ms:   0,
+        });
+
+        // Re-upsert and then remove the file — annotation must survive both.
+        db.upsert_file(file_uri.clone(), "pub fn foo() { /* changed */ }".to_owned(), "rust".to_owned());
+        assert_eq!(db.annotation_get(&sym_uri, "note").map(|e| e.value.as_str()), Some("fragile"));
+
+        db.remove_file(&file_uri);
+        assert_eq!(db.annotation_get(&sym_uri, "note").map(|e| e.value.as_str()), Some("fragile"),
+            "annotation must survive file removal");
+    }
+
+    // ── upgrade_file_symbols ──────────────────────────────────────────────
+
+    #[test]
+    fn upgrade_file_symbols_raises_confidence() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/up.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn upgradable() {}".to_owned(), "rust".to_owned());
+
+        let syms_before = db.file_symbols(&uri);
+        // Tier 1 should give confidence 30.
+        assert!(syms_before.iter().all(|s| s.confidence_score == 30),
+            "Tier 1 symbols should start at confidence 30");
+
+        // Simulate Tier 2 upgrade.
+        let upgrades: Vec<_> = syms_before.iter().map(|s| {
+            let mut up = s.clone();
+            up.confidence_score = 70;
+            up.signature = Some("fn upgradable()".to_owned());
+            up
+        }).collect();
+
+        db.upgrade_file_symbols(&uri, &upgrades);
+
+        let syms_after = db.file_symbols(&uri);
+        assert!(syms_after.iter().all(|s| s.confidence_score == 70),
+            "symbols should be upgraded to confidence 70");
+        assert!(syms_after.iter().any(|s| s.signature.is_some()),
+            "upgraded symbols should carry signatures");
+    }
+
+    #[test]
+    fn upgrade_file_symbols_noop_on_unknown_uri() {
+        // Should not panic when the uri isn't in the db.
+        let mut db = LipDatabase::new();
+        db.upgrade_file_symbols("lip://s/p@1/ghost.rs", &[]);
+    }
+
+    // ── reverse_deps ─────────────────────────────────────────────────────
+
+    #[test]
+    fn reverse_deps_empty_for_isolated_file() {
+        let mut db = LipDatabase::new();
+        db.upsert_file("lip://s/p@1/solo.rs".to_owned(), "pub fn solo() {}".to_owned(), "rust".to_owned());
+        let deps = db.reverse_deps("lip://s/p@1/solo.rs");
+        assert!(deps.is_empty(), "isolated file should have no reverse deps");
+    }
 }

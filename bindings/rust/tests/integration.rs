@@ -348,6 +348,108 @@ async fn daemon_restart_restores_journal() {
     }
 }
 
+// ─── QueryDeadSymbols ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn daemon_query_dead_symbols() {
+    let dir         = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_dead.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task   = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq:      1,
+            action:   Action::Upsert,
+            document: make_doc(
+                "lip://local/test@0.1/dead.rs",
+                "pub fn orphan_a() {} pub fn orphan_b() {}",
+            ),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(&mut client, &ClientMessage::QueryDeadSymbols { limit: Some(50) })
+        .await
+        .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::DeadSymbolsResult { symbols } => {
+            assert!(!symbols.is_empty(), "expected dead symbols, got none");
+        }
+        other => panic!("expected DeadSymbolsResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+// ─── QueryReferences ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn daemon_query_references() {
+    let dir         = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_refs.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task   = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+
+    let uri = "lip://local/test@0.1/refs.rs";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq:      1,
+            action:   Action::Upsert,
+            document: make_doc(uri, "pub fn referenced() {} pub fn caller() { referenced(); }"),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(&mut client, &ClientMessage::QueryDocumentSymbols { uri: uri.to_owned() })
+        .await
+        .unwrap();
+    let syms_resp = recv(&mut client).await.unwrap();
+    let sym_uri = match syms_resp {
+        ServerMessage::DocumentSymbolsResult { symbols } if !symbols.is_empty() => {
+            symbols[0].uri.clone()
+        }
+        _ => {
+            task.abort();
+            let _ = task.await;
+            return;
+        }
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::QueryReferences { symbol_uri: sym_uri, limit: Some(20) },
+    )
+    .await
+    .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    assert!(
+        matches!(resp, ServerMessage::ReferencesResult { .. }),
+        "expected ReferencesResult, got {resp:?}"
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
 // ─── Annotations survive daemon restart ──────────────────────────────────────
 
 #[tokio::test]

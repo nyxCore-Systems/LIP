@@ -136,17 +136,28 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn rust_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
-        // Capture all identifier and type_identifier nodes.
-        // The previous uppercase-only filter silently dropped all lowercase
-        // function calls, variable references, and method invocations.
         if matches!(node.kind(), "identifier" | "type_identifier") {
             let name = self.node_text(&node);
             if !name.is_empty() {
+                // Identifiers that are the `name` field of a declaration node are
+                // definitions; all other identifier uses are references.
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_decl = matches!(
+                        parent.kind(),
+                        "function_item"    | "struct_item"   | "enum_item"  |
+                        "trait_item"       | "type_item"     | "mod_item"   |
+                        "macro_definition" | "field_declaration" | "variant"
+                    );
+                    let is_name = parent.child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                });
                 out.push(OwnedOccurrence {
                     symbol_uri:       self.lip_uri(name),
                     range:            Self::node_range(&node),
                     confidence_score: 20,
-                    role:             Role::Reference,
+                    role,
                     override_doc:     None,
                 });
             }
@@ -226,11 +237,23 @@ impl<'a> SymbolExtractor<'a> {
         if matches!(node.kind(), "identifier" | "type_identifier") {
             let name = self.node_text(&node);
             if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_decl = matches!(
+                        parent.kind(),
+                        "function_declaration" | "method_definition"   | "class_declaration"   |
+                        "interface_declaration"| "type_alias_declaration" | "enum_declaration"  |
+                        "variable_declarator"
+                    );
+                    let is_name = parent.child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                });
                 out.push(OwnedOccurrence {
                     symbol_uri:       self.lip_uri(name),
                     range:            Self::node_range(&node),
                     confidence_score: 20,
-                    role:             Role::Reference,
+                    role,
                     override_doc:     None,
                 });
             }
@@ -287,17 +310,24 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn py_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
-        // Python identifier nodes cover function calls, variable references, and
-        // attribute access. We emit all of them; the query graph will resolve them
-        // against the symbol table at query time.
         if node.kind() == "identifier" {
             let name = self.node_text(&node);
             if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_decl = matches!(
+                        parent.kind(),
+                        "function_definition" | "class_definition"
+                    );
+                    let is_name = parent.child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                });
                 out.push(OwnedOccurrence {
                     symbol_uri:       self.lip_uri(name),
                     range:            Self::node_range(&node),
                     confidence_score: 20,
-                    role:             Role::Reference,
+                    role,
                     override_doc:     None,
                 });
             }
