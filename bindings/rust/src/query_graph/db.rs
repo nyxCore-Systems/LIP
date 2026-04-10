@@ -303,7 +303,7 @@ impl LipDatabase {
             .filter(|other| other != uri)
             .filter(|other| {
                 let occs = self.file_occurrences(other);
-                occs.iter().any(|occ| target_uris.iter().any(|u| *u == occ.symbol_uri))
+                occs.iter().any(|occ| target_uris.contains(&occ.symbol_uri))
             })
             .collect()
     }

@@ -6,6 +6,7 @@ use prost::Message;
 use lip::schema::{OwnedDocument, OwnedSymbolInfo, Role, SymbolKind};
 
 // Generated from src/proto/scip.proto by prost-build.
+#[allow(clippy::all)]
 mod scip {
     include!(concat!(env!("OUT_DIR"), "/scip.rs"));
 }
@@ -87,13 +88,13 @@ fn convert_document(doc: OwnedDocument) -> scip::Document {
     let symbols: Vec<scip::SymbolInformation> = doc
         .symbols
         .iter()
-        .map(|s| convert_symbol_info(s))
+        .map(convert_symbol_info)
         .collect();
 
     let occurrences: Vec<scip::Occurrence> = doc
         .occurrences
         .iter()
-        .map(|o| convert_occurrence(o))
+        .map(convert_occurrence)
         .collect();
 
     // Note: scip::Document has no `text` field in the generated proto; source
@@ -104,7 +105,6 @@ fn convert_document(doc: OwnedDocument) -> scip::Document {
         relative_path: uri_to_relative_path(&doc.uri),
         occurrences,
         symbols,
-        ..Default::default()
     }
 }
 
@@ -131,7 +131,6 @@ fn convert_symbol_info(sym: &OwnedSymbolInfo) -> scip::SymbolInformation {
             .unwrap_or_default(),
         kind:          lip_kind_to_scip(sym.kind) as i32,
         relationships,
-        ..Default::default()
     }
 }
 

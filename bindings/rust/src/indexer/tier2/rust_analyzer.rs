@@ -11,7 +11,7 @@
 //! 5. Returns a [`VerificationResult`] with confidence scores upgraded to 70.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -74,7 +74,7 @@ impl RustAnalyzerBackend {
 
     // ── Private: LSP lifecycle ────────────────────────────────────────────────
 
-    async fn initialize(&mut self, workspace: &PathBuf) -> anyhow::Result<()> {
+    async fn initialize(&mut self, workspace: &Path) -> anyhow::Result<()> {
         let root_uri = format!("file://{}", workspace.display());
 
         let result = self.client.request("initialize", json!({

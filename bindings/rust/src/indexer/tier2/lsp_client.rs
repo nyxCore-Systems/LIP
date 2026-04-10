@@ -124,7 +124,7 @@ impl LspClient {
                 .read_line(&mut line)
                 .await
                 .context("rust-analyzer stdout closed unexpectedly")?;
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 break;
             }
@@ -135,6 +135,6 @@ impl LspClient {
         let len = content_length.context("LSP message missing Content-Length header")?;
         let mut body = vec![0u8; len];
         self.reader.read_exact(&mut body).await?;
-        Ok(serde_json::from_slice(&body).context("LSP message is not valid JSON")?)
+        serde_json::from_slice(&body).context("LSP message is not valid JSON")
     }
 }

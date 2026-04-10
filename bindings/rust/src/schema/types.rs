@@ -57,25 +57,25 @@ impl LipUri {
     /// The package name without version, e.g. `"react"`.
     pub fn package(&self) -> Option<&str> {
         let rest = self.0.strip_prefix("lip://")?;
-        rest.splitn(3, '/').nth(1)?.split('@').next()
+        rest.split('/').nth(1)?.split('@').next()
     }
 
     /// The semver string after `@`, e.g. `"18.0.0"`.
     pub fn version(&self) -> Option<&str> {
         let rest = self.0.strip_prefix("lip://")?;
-        rest.splitn(3, '/').nth(1)?.splitn(2, '@').nth(1)
+        rest.split('/').nth(1)?.split_once('@').map(|x| x.1)
     }
 
     /// The file path component before `#`, e.g. `"src/index.js"`.
     pub fn path(&self) -> Option<&str> {
         let rest = self.0.strip_prefix("lip://")?;
         let third = rest.splitn(3, '/').nth(2)?;
-        Some(third.splitn(2, '#').next().unwrap_or(third))
+        Some(third.split('#').next().unwrap_or(third))
     }
 
     /// The descriptor after `#`, e.g. `"createElement"`. `None` if absent.
     pub fn descriptor(&self) -> Option<&str> {
-        self.0.splitn(2, '#').nth(1)
+        self.0.split_once('#').map(|x| x.1)
     }
 }
 

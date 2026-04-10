@@ -289,6 +289,37 @@ impl Session {
 
 // ─── Framing ─────────────────────────────────────────────────────────────────
 
+/// Serialize `msg` as a `ClientMessage` JSON and write with a 4-byte big-endian length prefix.
+///
+/// The daemon reads this with `read_message` and deserializes as `ClientMessage`.
+pub async fn write_client_message(
+    stream: &mut UnixStream,
+    msg: &crate::query_graph::ClientMessage,
+) -> anyhow::Result<()> {
+    let body = serde_json::to_vec(msg)?;
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    stream.write_all(&body).await?;
+    Ok(())
+}
+
+/// Read a 4-byte big-endian length prefix, then that many bytes.
+pub async fn read_message(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+/// Serialize `msg` as JSON and write with a 4-byte big-endian length prefix.
+pub async fn write_message(stream: &mut UnixStream, msg: &ServerMessage) -> anyhow::Result<()> {
+    let body = serde_json::to_vec(msg)?;
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    stream.write_all(&body).await?;
+    Ok(())
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -370,35 +401,4 @@ mod tests {
         }
         write_task.await.unwrap();
     }
-}
-
-/// Serialize `msg` as a `ClientMessage` JSON and write with a 4-byte big-endian length prefix.
-///
-/// The daemon reads this with `read_message` and deserializes as `ClientMessage`.
-pub async fn write_client_message(
-    stream: &mut UnixStream,
-    msg: &crate::query_graph::ClientMessage,
-) -> anyhow::Result<()> {
-    let body = serde_json::to_vec(msg)?;
-    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
-    stream.write_all(&body).await?;
-    Ok(())
-}
-
-/// Read a 4-byte big-endian length prefix, then that many bytes.
-pub async fn read_message(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).await?;
-    Ok(body)
-}
-
-/// Serialize `msg` as JSON and write with a 4-byte big-endian length prefix.
-pub async fn write_message(stream: &mut UnixStream, msg: &ServerMessage) -> anyhow::Result<()> {
-    let body = serde_json::to_vec(msg)?;
-    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
-    stream.write_all(&body).await?;
-    Ok(())
 }

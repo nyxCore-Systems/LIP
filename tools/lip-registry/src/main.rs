@@ -19,7 +19,7 @@
 //! ```
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -27,7 +27,7 @@ use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, put};
+use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use serde_json::json;

@@ -11,6 +11,7 @@ use lip::schema::{
 use crate::output;
 
 // Generated from src/proto/scip.proto by prost-build.
+#[allow(clippy::all)]
 mod scip {
     include!(concat!(env!("OUT_DIR"), "/scip.rs"));
 }
@@ -45,7 +46,7 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     let mut deltas: Vec<OwnedDelta> = index
         .documents
         .into_iter()
-        .map(|doc| convert_document(doc))
+        .map(convert_document)
         .collect();
 
     // Also import external symbols as a synthetic document.
@@ -100,13 +101,13 @@ fn convert_document(doc: scip::Document) -> OwnedDelta {
     let symbols: Vec<OwnedSymbolInfo> = doc
         .symbols
         .iter()
-        .map(|sym| convert_symbol_info(sym))
+        .map(convert_symbol_info)
         .collect();
 
     let occurrences: Vec<OwnedOccurrence> = doc
         .occurrences
         .iter()
-        .filter_map(|occ| convert_occurrence(occ))
+        .filter_map(convert_occurrence)
         .collect();
 
     let lip_doc = OwnedDocument {
