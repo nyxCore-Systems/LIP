@@ -130,10 +130,12 @@ impl Session {
                     db.workspace_root().map(|p| p.to_owned())
                 };
 
-                // Enqueue Tier 2 verification for Rust files on upsert.
+                // Enqueue Tier 2 verification for supported languages on upsert.
                 if matches!(action, Action::Upsert) {
-                    let is_rust = lang == "rust" || uri.ends_with(".rs");
-                    if is_rust {
+                    let needs_tier2 = lang == "rust"       || uri.ends_with(".rs")
+                        || lang == "typescript" || uri.ends_with(".ts") || uri.ends_with(".tsx")
+                        || lang == "python"     || uri.ends_with(".py");
+                    if needs_tier2 {
                         if let (Some(tx), Some(source)) = (&self.tier2_tx, source_opt) {
                             let job = VerificationJob {
                                 uri:            uri.clone(),

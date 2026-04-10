@@ -420,6 +420,14 @@ impl LipDatabase {
             .unwrap_or_default()
     }
 
+    /// All annotations across every symbol URI — used by journal compaction.
+    pub fn all_annotations(&self) -> Vec<OwnedAnnotationEntry> {
+        self.annotations
+            .values()
+            .flat_map(|m| m.values().cloned())
+            .collect()
+    }
+
     /// Symbol search across all tracked files.
     pub fn workspace_symbols(&mut self, query: &str, limit: usize) -> Vec<OwnedSymbolInfo> {
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
@@ -833,6 +841,32 @@ mod tests {
         // Should not panic when the uri isn't in the db.
         let mut db = LipDatabase::new();
         db.upgrade_file_symbols("lip://s/p@1/ghost.rs", &[]);
+    }
+
+    // ── reverse_deps ─────────────────────────────────────────────────────
+
+    // ── impl block methods ────────────────────────────────────────────────
+
+    #[test]
+    fn impl_methods_extracted_as_symbols() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/impl.rs".to_owned();
+        db.upsert_file(
+            uri.clone(),
+            r#"
+pub struct Greeter;
+impl Greeter {
+    pub fn hello(&self) -> &str { "hello" }
+    fn private_method(&self) {}
+}
+"#.to_owned(),
+            "rust".to_owned(),
+        );
+        let syms = db.file_symbols(&uri);
+        let names: Vec<&str> = syms.iter().map(|s| s.display_name.as_str()).collect();
+        assert!(names.contains(&"Greeter"), "struct should be extracted; got: {names:?}");
+        assert!(names.contains(&"hello"),   "pub method should be extracted; got: {names:?}");
+        assert!(names.contains(&"private_method"), "private method should be extracted; got: {names:?}");
     }
 
     // ── reverse_deps ─────────────────────────────────────────────────────

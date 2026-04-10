@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::query_graph::LipDatabase;
 
-use super::journal::{self, Journal};
+use super::journal::{self, Journal, COMPACT_THRESHOLD as COMPACT_THR};
 use super::session::Session;
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
 
@@ -46,15 +46,25 @@ impl LipDaemon {
                 .into_owned();
             self.socket_path.with_file_name(format!("{name}.journal"))
         };
-        let (raw_journal, entries) = Journal::open(&journal_path)?;
+        let (_, entries) = Journal::open(&journal_path)?;
         // Replay persisted entries into the db before accepting connections.
         {
             let mut db = self.db.lock().await;
             journal::replay(&entries, &mut db);
+            if entries.len() >= COMPACT_THR {
+                match journal::compact(&journal_path, &db) {
+                    Ok(n) => info!(
+                        "compacted journal: {} entries → {} snapshot entries ({})",
+                        entries.len(), n, journal_path.display()
+                    ),
+                    Err(e) => warn!("journal compaction failed: {e}"),
+                }
+            } else if !entries.is_empty() {
+                info!("replayed {} journal entries from {}", entries.len(), journal_path.display());
+            }
         }
-        if !entries.is_empty() {
-            info!("replayed {} journal entries from {}", entries.len(), journal_path.display());
-        }
+        // Re-open for appending (post-compaction file or original if below threshold).
+        let raw_journal = Journal::open_append(&journal_path)?;
         let shared_journal = Arc::new(StdMutex::new(raw_journal));
 
         let listener = UnixListener::bind(&self.socket_path)?;

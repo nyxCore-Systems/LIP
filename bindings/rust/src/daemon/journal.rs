@@ -17,9 +17,16 @@
 //!
 //! Partial lines (from a crash mid-write) are skipped on replay with a warning;
 //! they cannot corrupt already-persisted state.
+//!
+//! ## Compaction
+//!
+//! After replay on startup, [`compact`] rewrites the journal as a minimal
+//! snapshot of current db state — one entry per live file, one per annotation.
+//! This prevents unbounded growth when files are repeatedly upserted. The
+//! rewrite is atomic (write to `.journal.tmp`, then `rename`).
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +34,10 @@ use tracing::warn;
 
 use crate::query_graph::LipDatabase;
 use crate::schema::OwnedAnnotationEntry;
+
+/// Compact the journal when it has accumulated this many entries.
+/// Below this threshold the overhead of compaction isn't worth it.
+pub const COMPACT_THRESHOLD: usize = 500;
 
 // ─── Entry types ─────────────────────────────────────────────────────────────
 
@@ -84,6 +95,18 @@ impl Journal {
         Ok((Self { file }, entries))
     }
 
+    /// Open (or create) `path` for appending only, without reading existing entries.
+    ///
+    /// Use this after [`compact`] has already rewritten the file — the entries
+    /// on disk are the current db state, no replay is needed.
+    pub fn open_append(path: &Path) -> anyhow::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self { file })
+    }
+
     /// Append a single entry. Flushes immediately so a crash between writes
     /// can only lose the in-flight entry, never corrupt earlier ones.
     pub fn append(&mut self, entry: &JournalEntry) -> anyhow::Result<()> {
@@ -93,6 +116,68 @@ impl Journal {
         self.file.flush()?;
         Ok(())
     }
+}
+
+// ─── Compaction ───────────────────────────────────────────────────────────────
+
+/// Rewrite `path` as a minimal snapshot of `db`'s current state.
+///
+/// The rewrite is atomic: entries are written to `<path>.tmp`, then that file
+/// is renamed over `path`. On success the journal is as short as possible —
+/// one `UpsertFile` per tracked file, one `AnnotationSet` per annotation, plus
+/// lifecycle entries. Pending in-flight appends will see the new file after the
+/// rename; no journal entries are lost.
+pub fn compact(path: &Path, db: &LipDatabase) -> anyhow::Result<usize> {
+    let tmp_path = {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        path.with_file_name(format!("{name}.tmp"))
+    };
+
+    let mut count = 0usize;
+    {
+        let tmp_file = File::create(&tmp_path)?;
+        let mut w    = BufWriter::new(tmp_file);
+
+        let mut write_entry = |entry: &JournalEntry| -> anyhow::Result<()> {
+            let mut line = serde_json::to_string(entry)?;
+            line.push('\n');
+            w.write_all(line.as_bytes())?;
+            count += 1;
+            Ok(())
+        };
+
+        // Lifecycle state.
+        if let Some(root) = db.current_merkle_root() {
+            write_entry(&JournalEntry::SetMerkleRoot { root: root.to_owned() })?;
+        }
+        if let Some(ws) = db.workspace_root() {
+            write_entry(&JournalEntry::SetWorkspaceRoot {
+                path: ws.to_string_lossy().into_owned(),
+            })?;
+        }
+
+        // One UpsertFile per tracked file.
+        for uri in db.tracked_uris() {
+            if let (Some(text), Some(lang)) = (db.file_text(&uri), db.file_language(&uri)) {
+                write_entry(&JournalEntry::UpsertFile {
+                    uri,
+                    text:     text.to_owned(),
+                    language: lang.to_owned(),
+                })?;
+            }
+        }
+
+        // All annotations.
+        for entry in db.all_annotations() {
+            write_entry(&JournalEntry::AnnotationSet { entry })?;
+        }
+
+        w.flush()?;
+    }
+
+    // Atomic rename — on POSIX this is guaranteed to be atomic.
+    std::fs::rename(&tmp_path, path)?;
+    Ok(count)
 }
 
 // ─── Replay ──────────────────────────────────────────────────────────────────
@@ -197,5 +282,53 @@ mod tests {
         assert_eq!(db.file_count(), 1);
         assert_eq!(db.current_merkle_root(), Some("cafebabe"));
         assert!(!db.file_symbols("lip://local/foo.rs").is_empty());
+    }
+
+    #[test]
+    fn compact_reduces_entry_count() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_owned();
+
+        // Write 5 upserts for the same file (simulates repeated edits).
+        let (mut j, _) = Journal::open(&path).unwrap();
+        for i in 0..5 {
+            j.append(&JournalEntry::UpsertFile {
+                uri:      "lip://local/a.rs".into(),
+                text:     format!("pub fn v{i}() {{}}"),
+                language: "rust".into(),
+            }).unwrap();
+        }
+        j.append(&JournalEntry::SetMerkleRoot { root: "abc".into() }).unwrap();
+        drop(j);
+
+        // Replay into a db then compact.
+        let (_, entries) = Journal::open(&path).unwrap();
+        assert_eq!(entries.len(), 6, "should have 6 raw entries before compaction");
+
+        let mut db = LipDatabase::new();
+        replay(&entries, &mut db);
+        let n = compact(&path, &db).unwrap();
+
+        // After compaction: 1 UpsertFile + 1 SetMerkleRoot = 2 entries.
+        assert_eq!(n, 2, "compacted journal should have 2 entries, got {n}");
+
+        // Re-open and replay the compacted journal — db state should be identical.
+        let (_, compacted_entries) = Journal::open(&path).unwrap();
+        assert_eq!(compacted_entries.len(), 2);
+
+        let mut db2 = LipDatabase::new();
+        replay(&compacted_entries, &mut db2);
+        assert_eq!(db2.file_count(), 1);
+        assert_eq!(db2.current_merkle_root(), Some("abc"));
+    }
+
+    #[test]
+    fn open_append_creates_file_if_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.journal");
+        assert!(!path.exists());
+        let mut j = Journal::open_append(&path).unwrap();
+        j.append(&JournalEntry::RemoveFile { uri: "lip://local/x.rs".into() }).unwrap();
+        assert!(path.exists());
     }
 }

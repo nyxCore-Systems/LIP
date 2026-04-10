@@ -3,4 +3,5 @@ resolver = "2"
 members  = [
     "bindings/rust",
     "tools/lip-cli",
+    "tools/lip-registry",
 ]
