@@ -1,0 +1,231 @@
+// lip.fbs — LIP FlatBuffers Schema
+// Version: 0.2.0-dev
+// License: Apache 2.0
+//
+// This is the canonical schema. All language bindings and protocol
+// documentation are derived from this file.
+
+namespace lip;
+
+// ─── Envelope ────────────────────────────────────────────────────────────────
+
+/// Top-level streaming envelope.
+/// A LIP stream is a sequence of EventStreams.
+/// Each EventStream carries one or more Deltas.
+table EventStream {
+  deltas:         [Delta];
+  schema_version: uint16 = 1;
+  emitter_id:     string;    // e.g. "lip-daemon/0.1.0"
+  timestamp_ms:   int64;
+}
+
+/// A single atomic change to the intelligence graph.
+table Delta {
+  /// Monotonically increasing client-side counter.
+  /// The daemon echoes this in DeltaAck.seq so the client can detect
+  /// dropped messages and recover deterministically (spec §6.5).
+  seq:         uint64 = 0;
+  action:      Action;
+  commit_hash: string;        // content hash of the triggering change
+  document:    Document;
+  symbol:      SymbolInfo;
+  slice:       DependencySlice;
+}
+
+enum Action : byte {
+  Upsert = 0,   // create or update
+  Delete = 1,   // remove from graph
+}
+
+// ─── Document ────────────────────────────────────────────────────────────────
+
+table Document {
+  uri:           string;       // file:///absolute/path
+  content_hash:  string;       // SHA-256 of raw source bytes
+  language:      string;       // "dart", "rust", "typescript", "python" …
+  occurrences:   [Occurrence];
+  symbols:       [SymbolInfo];
+  merkle_path:   string;       // path in repo Merkle tree
+  /// Raw UTF-8 source bytes. Present when the client sends a file update;
+  /// the daemon uses this to drive the Tier 1 indexer. Omitted in
+  /// registry slices and SCIP imports where symbols are pre-computed.
+  source_text:   string;
+  /// CPG edges originating from this file.
+  /// Absent (null) in Tier 1 documents; populated by Tier 2 verification.
+  edges:         [GraphEdge];
+}
+
+// ─── Occurrence ──────────────────────────────────────────────────────────────
+
+/// A single use of a symbol at a source location.
+/// Replaces SCIP's Occurrence, adding confidence_score.
+table Occurrence {
+  symbol_uri:       string;    // human-readable LIP URI
+  range:            Range;
+  confidence_score: uint8;     // 1–100, see three-tier model
+  role:             Role;
+  override_doc:     string;    // optional per-site doc override
+}
+
+/// All character offsets are UTF-8 byte offsets from the start of the line.
+/// This is a deliberate departure from LSP's UTF-16 code unit counting.
+/// UTF-8 byte offsets map to a pointer offset in O(1); UTF-16 requires O(n)
+/// decoding. Every language runtime LIP targets stores source as UTF-8 on disk.
+table Range {
+  start_line: int32;   // 0-based line number
+  start_char: int32;   // UTF-8 byte offset from start of line
+  end_line:   int32;   // 0-based (inclusive)
+  end_char:   int32;   // UTF-8 byte offset from start of line (exclusive)
+}
+
+enum Role : byte {
+  Definition      = 0,
+  Reference       = 1,
+  Implementation  = 2,
+  TypeBinding     = 3,
+  ReadAccess      = 4,
+  WriteAccess     = 5,
+}
+
+// ─── Symbol ──────────────────────────────────────────────────────────────────
+
+table SymbolInfo {
+  uri:              string;        // lip://scope/pkg@ver/path#descriptor
+  display_name:     string;
+  kind:             SymbolKind;
+  documentation:    string;        // markdown
+  signature:        string;        // type signature, language-specific
+  confidence_score: uint8;
+  relationships:    [Relationship];
+  // ── AI extension slots (zero-cost when unused) ──────────────────────────
+  runtime_p99_ms:   float32 = -1;  // -1 = not collected
+  call_rate_per_s:  float32 = -1;
+  taint_labels:     [string];      // ["PII", "UNSAFE_IO", "EXTERNAL_INPUT"]
+  blast_radius:     uint32 = 0;    // number of reverse deps
+}
+
+enum SymbolKind : byte {
+  Unknown       = 0,
+  Namespace     = 1,
+  Class         = 2,
+  Interface     = 3,
+  Method        = 4,
+  Field         = 5,
+  Variable      = 6,
+  Function      = 7,
+  TypeParameter = 8,
+  Parameter     = 9,
+  Macro         = 10,
+  Enum          = 11,
+  EnumMember    = 12,
+  Constructor   = 13,
+  TypeAlias     = 14,
+}
+
+table Relationship {
+  target_uri:          string;
+  is_implementation:   bool;
+  is_reference:        bool;
+  is_type_definition:  bool;
+  is_override:         bool;
+}
+
+// ─── Code Property Graph ──────────────────────────────────────────────────────
+
+/// Typed directed edge in the Code Property Graph (spec §4.1, §8.5).
+///
+/// Tier 1 documents contain only Calls edges (syntactic call sites).
+/// Tier 2 verification adds DataFlows and ControlFlows edges from the
+/// compiler IR. Both flavours power the same reachability engine used
+/// for blast-radius (§8.1) and taint tracking (§8.2).
+table GraphEdge {
+  from_uri:  string;
+  to_uri:    string;
+  kind:      EdgeKind;
+  /// Source location where the edge originates (call site, assignment, …).
+  at_range:  Range;
+}
+
+enum EdgeKind : byte {
+  Calls        = 0,   // function/method invocation
+  DataFlows    = 1,   // value flows from → to (assignment, return, argument)
+  ControlFlows = 2,   // control may pass from → to (branch, loop)
+  Instantiates = 3,   // from constructs an instance of to
+  Inherits     = 4,   // from extends / implements to
+  Imports      = 5,   // from file imports symbol to
+}
+
+// ─── Annotation Overlay ───────────────────────────────────────────────────────
+
+/// A persistent annotation attached to a symbol URI (spec §9.4).
+///
+/// Written by humans or AI agents; survives context resets, editor restarts,
+/// and CI runs. Key namespace determines interpretation.
+///
+/// Canonical key prefixes:
+///   lip:fragile   — treat changes with extra care
+///   lip:owner     — team or person responsible
+///   lip:deprecated — deprecated; migration target in value
+///   lip:taint     — manually asserted taint label
+///   agent:note    — agent-authored reasoning from a prior session
+///   agent:verified — agent has verified this symbol behaves as documented
+///   team:*        — team-specific, uninterpreted by daemon
+table AnnotationEntry {
+  symbol_uri:    string;
+  key:           string;
+  value:         string;   // markdown or JSON blob
+  author_id:     string;   // "human:<email>" | "agent:<model-id>"
+  confidence:    uint8;
+  timestamp_ms:  int64;
+  /// Unix ms after which this entry may be GC'd. 0 = permanent.
+  expires_ms:    int64 = 0;
+}
+
+// ─── Dependency Slice ────────────────────────────────────────────────────────
+
+/// A pre-built, immutable index fragment for an external package.
+/// Content-addressed by package_hash.
+table DependencySlice {
+  manager:       string;      // "npm" | "cargo" | "pub" | "pip" | "go"
+  package_name:  string;
+  version:       string;
+  package_hash:  string;      // SHA-256 of (manager + name + version + resolved_deps)
+  content_hash:  string;      // SHA-256 of the slice blob (integrity check)
+  symbols:       [SymbolInfo];
+  slice_url:     string;      // canonical registry URL this slice was fetched from
+  built_at_ms:   int64;
+}
+
+// ─── Protocol Lifecycle ──────────────────────────────────────────────────────
+
+enum IndexingState : byte {
+  Cold        = 0,
+  WarmPartial = 1,
+  WarmFull    = 2,
+}
+
+table ManifestRequest {
+  repo_root:     string;
+  merkle_root:   string;
+  dep_tree_hash: string;
+  lip_version:   string;
+}
+
+table ManifestResponse {
+  cached_merkle_root: string;
+  missing_slices:     [string];
+  indexing_state:     IndexingState;
+}
+
+/// Sent by the daemon immediately on receipt of a Delta, before analysis
+/// completes. Allows the client to detect dropped messages and recover.
+/// See spec §6.5 — Delta acknowledgment.
+table DeltaAck {
+  /// Mirrors Delta.seq from the corresponding client message.
+  seq:      uint64;
+  accepted: bool = true;
+  /// Set when accepted = false; describes why the delta was rejected.
+  error:    string;
+}
+
+root_type EventStream;

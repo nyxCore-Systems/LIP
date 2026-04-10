@@ -1,0 +1,51 @@
+[package]
+name        = "lip"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0"
+description = "LIP — Linked Incremental Protocol: Rust reference implementation"
+
+[dependencies]
+# Tree-sitter (Tier 1 indexer)
+tree-sitter            = "0.22"
+tree-sitter-rust       = "0.21"
+tree-sitter-python     = "0.21"
+tree-sitter-typescript = "0.21"
+# LSP bridge — use tower-lsp's bundled lsp-types to avoid version conflicts
+tower-lsp  = "0.20"
+# Async
+tokio      = { version = "1", features = ["full"] }
+# IPC
+memmap2    = "0.9"
+# Registry client
+reqwest    = { version = "0.12", features = ["json"] }
+# Utilities
+sha2       = "0.10"
+hex        = "0.4"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow     = "1"
+thiserror  = "1"
+dashmap    = "5"
+parking_lot = "0.12"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+criterion  = { version = "0.5", features = ["async_tokio"] }
+tempfile   = "3"
+
+[[bench]]
+name    = "tier1_indexer"
+harness = false
+
+[[bench]]
+name    = "query_graph"
+harness = false
+
+[[bench]]
+name    = "framing"
+harness = false
+
+[build-dependencies]
+which = "6"

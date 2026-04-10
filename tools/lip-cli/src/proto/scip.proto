@@ -1,0 +1,222 @@
+// SCIP — Symbolic Code Intelligence Protocol (minimal subset for LIP import).
+// Sourced from github.com/sourcegraph/scip (Apache 2.0).
+// Enum values prefixed to avoid proto3 package-scope naming conflicts.
+
+syntax = "proto3";
+package scip;
+
+message Index {
+  Metadata metadata = 1;
+  repeated Document documents = 2;
+  repeated SymbolInformation external_symbols = 3;
+}
+
+message Metadata {
+  ProtocolVersion version = 1;
+  ToolInfo tool_info = 2;
+  string project_root = 3;
+  TextEncoding text_document_encoding = 4;
+}
+
+enum ProtocolVersion {
+  UnspecifiedProtocolVersion = 0;
+}
+
+enum TextEncoding {
+  UnspecifiedTextEncoding = 0;
+  UTF8 = 1;
+  UTF16 = 2;
+}
+
+message ToolInfo {
+  string name = 1;
+  string version = 2;
+  repeated string arguments = 3;
+}
+
+message Document {
+  string language = 4;
+  string relative_path = 1;
+  repeated Occurrence occurrences = 2;
+  repeated SymbolInformation symbols = 3;
+}
+
+message SymbolInformation {
+  string symbol = 1;
+  repeated string documentation = 3;
+  repeated Relationship relationships = 2;
+  Kind kind = 4;
+  string display_name = 5;
+}
+
+// Symbol kind — values prefixed with K_ to avoid conflict with other enums.
+enum Kind {
+  K_UnspecifiedKind    = 0;
+  K_AbstractMethod     = 1;
+  K_Array              = 2;
+  K_Assertion          = 3;
+  K_Attribute          = 4;
+  K_Axiom              = 5;
+  K_Boolean            = 6;
+  K_Class              = 7;
+  K_Constant           = 8;
+  K_Constructor        = 9;
+  K_Enum               = 10;
+  K_EnumMember         = 11;
+  K_Error              = 12;
+  K_Event              = 13;
+  K_Extension          = 52;
+  K_Fact               = 14;
+  K_Field              = 15;
+  K_File               = 16;
+  K_Function           = 17;
+  K_Getter             = 18;
+  K_Grammar            = 19;
+  K_Interface          = 20;
+  K_Language           = 21;
+  K_Lemma              = 22;
+  K_Macro              = 23;
+  K_Method             = 24;
+  K_MethodAlias        = 25;
+  K_MethodReceiver     = 26;
+  K_MethodSpecification = 27;
+  K_Module             = 28;
+  K_Namespace          = 29;
+  K_Null               = 30;
+  K_Number             = 31;
+  K_Object             = 32;
+  K_Operator           = 33;
+  K_Package            = 34;
+  K_PackageObject      = 35;
+  K_Parameter          = 36;
+  K_ParameterLabel     = 37;
+  K_Pattern            = 38;
+  K_Predicate          = 39;
+  K_Property           = 40;
+  K_Protocol           = 41;
+  K_ProtocolMethod     = 42;
+  K_PureVirtualMethod  = 43;
+  K_Quasiquoter        = 44;
+  K_SelfParameter      = 45;
+  K_Setter             = 46;
+  K_Signature          = 47;
+  K_SingletonClass     = 48;
+  K_SingletonMethod    = 49;
+  K_StaticDataMember   = 50;
+  K_StaticEvent        = 51;
+  K_StaticMethod       = 53;
+  K_StaticProperty     = 54;
+  K_StaticVariable     = 55;
+  K_StringLiteral      = 56;
+  K_Struct             = 57;
+  K_Subscript          = 58;
+  K_Tactic             = 59;
+  K_Theorem            = 60;
+  K_ThisParameter      = 61;
+  K_Trait              = 62;
+  K_TraitMethod        = 63;
+  K_Type               = 64;
+  K_TypeAlias          = 65;
+  K_TypeClass          = 66;
+  K_TypeClassMethod    = 67;
+  K_TypeParameter      = 68;
+  K_Union              = 69;
+  K_Value              = 70;
+  K_Variable           = 71;
+  K_Accessor           = 72;
+}
+
+message Relationship {
+  string symbol = 1;
+  bool is_reference = 2;
+  bool is_implementation = 3;
+  bool is_type_definition = 4;
+  bool is_override = 5;
+}
+
+message Occurrence {
+  repeated int32 range = 1;
+  string symbol = 2;
+  int32 symbol_roles = 3;
+  repeated string override_documentation = 4;
+  SyntaxKind syntax_kind = 5;
+  repeated Diagnostic diagnostics = 6;
+}
+
+// Symbol roles as bit flags.
+enum SymbolRole {
+  UnspecifiedSymbolRole = 0;
+  Definition            = 1;
+  Import                = 2;
+  WriteAccess           = 4;
+  ReadAccess            = 8;
+  Generated             = 16;
+  Test                  = 32;
+  ForwardDefinition     = 64;
+}
+
+// Syntax kinds — prefixed with SK_ to avoid conflicts.
+enum SyntaxKind {
+  SK_UnspecifiedSyntaxKind      = 0;
+  SK_Comment                    = 1;
+  SK_PunctuationDelimiter       = 2;
+  SK_PunctuationBracket         = 3;
+  SK_Keyword                    = 4;
+  SK_StringLiteral              = 5;
+  SK_NumericLiteral             = 6;
+  SK_BooleanLiteral             = 7;
+  SK_NullLiteral                = 8;
+  SK_RegexLiteral               = 9;
+  SK_OperatorBracket            = 10;
+  SK_CharacterLiteral           = 11;
+  SK_Identifier                 = 12;
+  SK_IdentifierBuiltin          = 13;
+  SK_IdentifierNull             = 14;
+  SK_IdentifierConstant         = 15;
+  SK_IdentifierMutableGlobal    = 16;
+  SK_IdentifierParameter        = 17;
+  SK_IdentifierLocal            = 18;
+  SK_IdentifierShadowed         = 19;
+  SK_IdentifierNamespace        = 20;
+  SK_IdentifierFunction         = 23;
+  SK_IdentifierFunctionDefinition = 24;
+  SK_IdentifierMacro            = 25;
+  SK_IdentifierMacroDefinition  = 26;
+  SK_IdentifierType             = 27;
+  SK_IdentifierBuiltinType      = 28;
+  SK_IdentifierAttribute        = 29;
+  SK_RegexEscape                = 30;
+  SK_RegexRepeated              = 31;
+  SK_RegexWildcard              = 32;
+  SK_RegexDelimiter             = 33;
+  SK_RegexJoin                  = 34;
+  SK_StringLiteralEscape        = 35;
+  SK_StringLiteralSpecial       = 36;
+  SK_StringLiteralKey           = 37;
+  SK_AttributeBracket           = 38;
+  SK_AttributeName              = 39;
+  SK_AttributeValue             = 40;
+}
+
+message Diagnostic {
+  Severity severity = 1;
+  string code = 2;
+  string message = 3;
+  string source = 4;
+  repeated DiagnosticTag tags = 5;
+}
+
+// Severity — prefixed with SEV_ to avoid conflicts.
+enum Severity {
+  SEV_Unspecified = 0;
+  SEV_Error       = 1;
+  SEV_Warning     = 2;
+  SEV_Information = 3;
+  SEV_Hint        = 4;
+}
+
+enum DiagnosticTag {
+  UnspecifiedDiagnosticTag = 0;
+  Unnecessary              = 1;
+  Deprecated               = 2;
+}

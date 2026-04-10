@@ -1,0 +1,27 @@
+# Build output
+target/
+*.rlib
+*.pdb
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.orig
+.direnv/
+
+# Environment
+.env
+.env.local
+
+# LIP / CKB tooling
+.ckb/
+
+# Dependency locks (kept for reproducibility — remove this line if you prefer)
+# Cargo.lock
