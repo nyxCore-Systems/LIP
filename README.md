@@ -122,6 +122,12 @@ spec/
   symbol-uri.md         # Symbol URI grammar reference
 docs/
   LIP_SPEC.mdx          # Full protocol specification
+  user/                 # User documentation
+    getting-started.md
+    cli-reference.md
+    mcp-integration.md
+    daemon.md
+    registry.md
 ```
 
 ---
@@ -148,10 +154,18 @@ lip import --from-scip index.scip
 # Start the LSP bridge (editors connect here)
 lip lsp --socket /tmp/lip.sock
 
+# Start the MCP server (AI agents and tools connect here)
+lip mcp --socket /tmp/lip.sock
+
 # Fetch / publish dependency slices
 lip fetch <sha256-hash> --registry https://registry.lip.dev
 lip push slice.json    --registry https://registry.lip.dev
-lip index ./src --json | lip push --registry https://registry.lip.dev
+
+# Build dependency slices from your lockfiles
+lip slice --cargo                          # uses ./Cargo.toml
+lip slice --npm                            # uses ./package.json
+lip slice --pub                            # uses ./pubspec.yaml
+lip slice --cargo --push --registry https://registry.lip.dev
 ```
 
 ---
@@ -269,26 +283,23 @@ docker run -p 8080:8080 -v lip-slices:/slices lip-registry
 ## Architecture
 
 ```
-Editor / AI agent
-  │
-  │ LSP (JSON-RPC, stdio)          direct LIP queries
-  ▼                                        │
-LipLspBackend  ─── bridge/lsp_server.rs    │
-  │ LIP JSON (Unix socket, length-prefixed)│
-  └──────────────┬────────────────────────-┘
+Editor                     AI agent / CKB / Cursor
+  │ LSP (stdio)               │ MCP (stdio, JSON-RPC)
+  ▼                           ▼
+LipLspBackend            lip mcp server
+  │                           │
+  │   LIP JSON (Unix socket, length-prefixed)
+  └──────────────┬────────────┘
                  ▼
           LipDaemon  ─── daemon/server.rs
                  │
-                 ├── FileWatcher ─── daemon/watcher.rs
-                 │     per-file notify; re-indexes on content change only
+                 ├── FileWatcher   per-file notify, re-indexes on change
                  ▼
           LipDatabase  ─── query_graph/db.rs
-                 │
-                 │  blast-radius graph · name_to_symbols index
-                 │  early-cutoff: API surface unchanged → no downstream work
+                 │  blast-radius · CPG · name_to_symbols
+                 │  early-cutoff: API surface unchanged → zero work
                  ▼
-          Tier1Indexer  ─── indexer/
-                 Rust · TypeScript · Python · Dart
+          Tier1Indexer  Rust · TypeScript · Python · Dart
 ```
 
 ---

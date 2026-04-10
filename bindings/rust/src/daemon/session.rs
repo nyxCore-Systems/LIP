@@ -6,7 +6,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-use crate::query_graph::{ClientMessage, LipDatabase, ServerMessage};
+use crate::query_graph::{BatchQueryResult, ClientMessage, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
 use super::journal::{Journal, JournalEntry};
@@ -283,6 +283,150 @@ impl Session {
                 let entries = db.annotation_list(&symbol_uri);
                 ServerMessage::AnnotationEntries { entries }
             }
+
+            // ── Batch ─────────────────────────────────────────────────────
+            ClientMessage::BatchQuery { queries } => {
+                let mut results = Vec::with_capacity(queries.len());
+                // Acquire the db lock once for the entire batch — one
+                // mutex round-trip instead of N.
+                let mut db = self.db.lock().await;
+                let mut annotation_writes: Vec<OwnedAnnotationEntry> = vec![];
+
+                for q in queries {
+                    let r = process_query_sync(q, &mut db, &mut annotation_writes);
+                    results.push(r);
+                }
+                drop(db);
+
+                // Flush journal writes and tier2 jobs for any AnnotationSets
+                // collected during the batch, now that the db lock is released.
+                for entry in annotation_writes {
+                    self.journal_write(JournalEntry::AnnotationSet { entry });
+                }
+
+                ServerMessage::BatchResult { results }
+            }
+        }
+    }
+}
+
+// ── Batch query helper ────────────────────────────────────────────────────────
+
+/// Process a single query synchronously, given an already-locked database.
+///
+/// `Manifest`, `Delta`, and nested `BatchQuery` entries return an error result.
+/// `AnnotationSet` entries are committed to the db and their entries are
+/// appended to `annotation_writes` for journal persistence after the lock is released.
+fn process_query_sync(
+    q:                  ClientMessage,
+    db:                 &mut LipDatabase,
+    annotation_writes:  &mut Vec<OwnedAnnotationEntry>,
+) -> BatchQueryResult {
+    let ok = |msg: ServerMessage| BatchQueryResult { ok: Some(msg), error: None };
+    let err = |msg: &str| BatchQueryResult { ok: None, error: Some(msg.into()) };
+
+    match q {
+        // Not permitted in a batch.
+        ClientMessage::Manifest(_) =>
+            err("Manifest is not permitted inside a BatchQuery"),
+        ClientMessage::Delta { .. } =>
+            err("Delta is not permitted inside a BatchQuery"),
+        ClientMessage::BatchQuery { .. } =>
+            err("nested BatchQuery is not supported"),
+
+        // ── Queries ───────────────────────────────────────────────────────
+        ClientMessage::QueryDefinition { uri, line, col } => {
+            let sym_uri = db.symbol_at_position(&uri, line as i32, col as i32);
+            match sym_uri {
+                Some(ref su) => {
+                    let sym = db.symbol_by_uri(su);
+                    let (loc_uri, loc_range) = db
+                        .symbol_definition_location(su)
+                        .unwrap_or_else(|| (uri.clone(), OwnedRange::default()));
+                    ok(ServerMessage::DefinitionResult {
+                        symbol:         sym,
+                        location_uri:   Some(loc_uri),
+                        location_range: Some(loc_range),
+                    })
+                }
+                None => ok(ServerMessage::DefinitionResult {
+                    symbol:         None,
+                    location_uri:   None,
+                    location_range: None,
+                }),
+            }
+        }
+
+        ClientMessage::QueryReferences { symbol_uri, limit } => {
+            let limit = limit.unwrap_or(50);
+            let uris = db.tracked_uris();
+            let mut occs = vec![];
+            'outer: for u in &uris {
+                for occ in db.file_occurrences(u).iter() {
+                    if occ.symbol_uri == symbol_uri {
+                        occs.push(occ.clone());
+                        if occs.len() >= limit { break 'outer; }
+                    }
+                }
+            }
+            ok(ServerMessage::ReferencesResult { occurrences: occs })
+        }
+
+        ClientMessage::QueryHover { uri, line, col } => {
+            let sym_uri = db.symbol_at_position(&uri, line as i32, col as i32);
+            let sym = sym_uri.as_deref().and_then(|su| db.symbol_by_uri(su));
+            ok(ServerMessage::HoverResult { symbol: sym })
+        }
+
+        ClientMessage::QueryBlastRadius { symbol_uri } => {
+            let result = db.blast_radius_for(&symbol_uri);
+            ok(ServerMessage::BlastRadiusResult(result))
+        }
+
+        ClientMessage::QueryWorkspaceSymbols { query, limit } => {
+            let limit = limit.unwrap_or(100);
+            let syms = db.workspace_symbols(&query, limit);
+            ok(ServerMessage::WorkspaceSymbolsResult { symbols: syms })
+        }
+
+        ClientMessage::QueryDocumentSymbols { uri } => {
+            let symbols = db.file_symbols(&uri).to_vec();
+            ok(ServerMessage::DocumentSymbolsResult { symbols })
+        }
+
+        ClientMessage::QueryDeadSymbols { limit } => {
+            let symbols = db.dead_symbols(limit);
+            ok(ServerMessage::DeadSymbolsResult { symbols })
+        }
+
+        // ── Annotations ───────────────────────────────────────────────────
+        ClientMessage::AnnotationSet { symbol_uri, key, value, author_id } => {
+            let entry = OwnedAnnotationEntry {
+                symbol_uri: symbol_uri.clone(),
+                key:        key.clone(),
+                value,
+                author_id,
+                confidence: 100,
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                expires_ms: 0,
+            };
+            db.annotation_set(entry.clone());
+            annotation_writes.push(entry);
+            ok(ServerMessage::AnnotationAck)
+        }
+
+        ClientMessage::AnnotationGet { symbol_uri, key } => {
+            let value = db.annotation_get(&symbol_uri, &key)
+                .map(|e| e.value.clone());
+            ok(ServerMessage::AnnotationValue { value })
+        }
+
+        ClientMessage::AnnotationList { symbol_uri } => {
+            let entries = db.annotation_list(&symbol_uri);
+            ok(ServerMessage::AnnotationEntries { entries })
         }
     }
 }

@@ -1,0 +1,187 @@
+# Daemon
+
+The LIP daemon is a persistent background process that maintains the query graph, watches files, and answers queries. Everything else — the LSP bridge, MCP server, CLI queries — connects to it.
+
+---
+
+## Starting
+
+```bash
+lip daemon --socket /tmp/lip.sock
+```
+
+```bash
+lip daemon \
+  --socket /tmp/lip.sock \
+  --journal ~/.local/share/lip/journal.lip
+```
+
+The daemon logs to stderr. Set `LIP_LOG=info` for startup details, `LIP_LOG=debug` for verbose query tracing.
+
+---
+
+## Persistence — the WAL journal
+
+The daemon writes all mutations (file upserts, deletes, annotations) to a write-ahead log (WAL journal) before applying them. On startup it replays the journal to restore the full graph state.
+
+This means:
+- The graph is immediately warm on restart — no re-indexing.
+- Annotations and Tier 2 upgrades survive restarts.
+- Crash recovery is automatic.
+
+The journal grows incrementally. On startup the daemon compacts it by replaying only the most recent state per file. In practice the journal stays small unless a workspace has thousands of files changing rapidly.
+
+**Default location:** `~/.local/share/lip/journal.lip`
+
+To reset the graph entirely:
+```bash
+rm ~/.local/share/lip/journal.lip
+lip daemon  # starts cold
+```
+
+---
+
+## File watcher
+
+The daemon uses the OS-native filesystem watcher (`FSEvents` on macOS, `inotify` on Linux). It watches each tracked file individually — not the entire directory tree.
+
+**How it works:**
+1. A file is registered when the daemon first receives a delta for it.
+2. When the OS delivers a change event, the daemon reads the file and compares its content hash to the stored version.
+3. If the hash is unchanged (e.g. a write that didn't modify content), nothing happens.
+4. If the hash changed, the daemon re-indexes just that file and updates the blast-radius graph.
+
+This means the journal grows proportionally to actual edits, not to filesystem noise.
+
+**Path canonicalization:** On macOS, `/tmp` is a symlink to `/private/tmp`. The watcher canonicalizes all paths so events match their registered entries correctly.
+
+---
+
+## Confidence tiers and background verification
+
+The daemon applies updates in two stages:
+
+**Tier 1 (immediate):** Tree-sitter indexing runs synchronously on every file change. Results are available within milliseconds.
+
+**Tier 2 (background):** If a Tier 2 analyzer (e.g. `rust-analyzer`) is configured, the daemon queues a verification job for the blast radius of the change. When complete, Tier 1 symbols are silently upgraded to Tier 2 confidence (score 51–90).
+
+Tier 2 is currently wired for Rust via `rust-analyzer`. TypeScript, Python, and Dart Tier 2 is planned.
+
+---
+
+## Protocol
+
+The daemon listens on a Unix socket and speaks a length-prefixed JSON protocol:
+
+```
+[4 bytes: big-endian message length][JSON body]
+```
+
+Each connection handles one request/response pair. The protocol is synchronous per connection; clients that need concurrent queries open multiple connections.
+
+**Message types (client → daemon):**
+
+| Type | Description |
+|------|-------------|
+| `Manifest` | Send repo root + Merkle hash on connection |
+| `Delta` | Upsert or delete a file (carries source text) |
+| `QueryDefinition` | Find definition at (uri, line, col) |
+| `QueryReferences` | Find all references to a symbol URI |
+| `QueryHover` | Hover info at (uri, line, col) |
+| `QueryBlastRadius` | Blast radius for a symbol URI |
+| `QueryWorkspaceSymbols` | Search symbols by name |
+| `QueryDocumentSymbols` | List symbols in a file |
+| `QueryDeadSymbols` | Find unreferenced symbols |
+| `AnnotationGet/Set/List` | Persistent symbol annotations |
+| `BatchQuery` | Multiple queries in one round-trip (see below) |
+
+**Acknowledgment:** Every `Delta` receives a `DeltaAck { seq, accepted }` response, eliminating the fire-and-forget drift that LSP is known for.
+
+### BatchQuery
+
+`BatchQuery { queries: [...] }` executes N sub-queries under a **single db lock acquisition** and returns one result per query in order:
+
+```json
+{
+  "type": "batch_query",
+  "queries": [
+    { "type": "query_blast_radius", "symbol_uri": "lip://local/src/auth.rs#AuthService" },
+    { "type": "query_references",   "symbol_uri": "lip://local/src/auth.rs#AuthService", "limit": 50 },
+    { "type": "annotation_get",     "symbol_uri": "lip://local/src/auth.rs#AuthService", "key": "lip:fragile" }
+  ]
+}
+```
+
+Response:
+```json
+{
+  "type": "batch_result",
+  "results": [
+    { "ok": { "type": "blast_radius_result", ... }, "error": null },
+    { "ok": { "type": "references_result",   ... }, "error": null },
+    { "ok": { "type": "annotation_value",    ... }, "error": null }
+  ]
+}
+```
+
+`Manifest`, `Delta`, and nested `BatchQuery` entries return an error result for that slot without aborting the batch. All other `ClientMessage` types are supported.
+
+---
+
+## Running as a system service
+
+**launchd (macOS)** — `~/Library/LaunchAgents/dev.lip.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>       <string>dev.lip.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.cargo/bin/lip</string>
+    <string>daemon</string>
+    <string>--socket</string><string>/tmp/lip.sock</string>
+  </array>
+  <key>RunAtLoad</key>   <true/>
+  <key>KeepAlive</key>   <true/>
+  <key>StandardErrorPath</key>  <string>/tmp/lip-daemon.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/dev.lip.daemon.plist
+```
+
+**systemd (Linux)** — `~/.config/systemd/user/lip-daemon.service`:
+
+```ini
+[Unit]
+Description=LIP daemon
+
+[Service]
+ExecStart=%h/.cargo/bin/lip daemon --socket /tmp/lip.sock
+Restart=on-failure
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now lip-daemon
+```
+
+---
+
+## Disabling the file watcher
+
+If you prefer to push file changes manually (e.g. in CI or editor plugins that send deltas themselves):
+
+```bash
+lip daemon --no-watch
+```
+
+In this mode the daemon only updates when it receives an explicit `Delta` message via the socket.

@@ -8,6 +8,7 @@ use lip::query_graph::{ClientMessage, ServerMessage};
 
 use crate::output;
 
+
 #[derive(Args)]
 pub struct QueryArgs {
     /// Path to the daemon Unix socket.
@@ -53,12 +54,40 @@ pub enum QueryKind {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
+    /// Execute multiple queries in one round-trip (reads JSON array from file or stdin).
+    ///
+    /// Each object in the JSON array must carry a `type` field matching a ClientMessage
+    /// variant (snake_case). Example:
+    ///
+    ///   [{"type":"query_blast_radius","symbol_uri":"lip://local/src/main.rs#main"},
+    ///    {"type":"query_references","symbol_uri":"lip://local/src/main.rs#main"},
+    ///    {"type":"annotation_get","symbol_uri":"lip://local/src/main.rs#main","key":"lip:fragile"}]
+    Batch {
+        /// JSON file containing an array of query objects.
+        /// Omit to read from stdin.
+        input: Option<PathBuf>,
+    },
 }
 
 pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
-    let mut stream = UnixStream::connect(&args.socket).await.map_err(|e| {
-        anyhow::anyhow!("cannot connect to daemon at {}: {e}", args.socket.display())
-    })?;
+    // Batch reads its input before opening the socket, so handle it first.
+    if let QueryKind::Batch { ref input } = args.kind {
+        let raw = match input {
+            Some(path) => tokio::fs::read(path).await?,
+            None => {
+                use tokio::io::AsyncReadExt as _;
+                let mut buf = Vec::new();
+                tokio::io::stdin().read_to_end(&mut buf).await?;
+                buf
+            }
+        };
+        let queries: Vec<ClientMessage> = serde_json::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("batch input is not a valid JSON array of queries: {e}"))?;
+        let msg = ClientMessage::BatchQuery { queries };
+        let resp = send_recv(&args.socket, msg).await?;
+        output::print_json(&resp)?;
+        return Ok(());
+    }
 
     let msg = match args.kind {
         QueryKind::Definition { uri, line, col } => {
@@ -79,20 +108,26 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         QueryKind::DeadSymbols { limit } => {
             ClientMessage::QueryDeadSymbols { limit: Some(limit) }
         }
+        QueryKind::Batch { .. } => unreachable!("handled above"),
     };
 
+    let resp = send_recv(&args.socket, msg).await?;
+    output::print_json(&resp)?;
+    Ok(())
+}
+
+async fn send_recv(socket: &PathBuf, msg: ClientMessage) -> anyhow::Result<ServerMessage> {
+    let mut stream = UnixStream::connect(socket).await.map_err(|e| {
+        anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket.display())
+    })?;
     let body = serde_json::to_vec(&msg)?;
     let len  = body.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&body).await?;
-
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let resp_len = u32::from_be_bytes(len_buf) as usize;
     let mut resp_bytes = vec![0u8; resp_len];
     stream.read_exact(&mut resp_bytes).await?;
-
-    let resp: ServerMessage = serde_json::from_slice(&resp_bytes)?;
-    output::print_json(&resp)?;
-    Ok(())
+    Ok(serde_json::from_slice(&resp_bytes)?)
 }

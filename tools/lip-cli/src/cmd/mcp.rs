@@ -140,6 +140,13 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             value:      req_str(args, "value")?,
             author_id:  req_str(args, "author_id")?,
         },
+        "lip_batch_query" => {
+            let queries_val = args.get("queries")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `queries`"))?;
+            let queries: Vec<ClientMessage> = serde_json::from_value(queries_val.clone())
+                .map_err(|e| anyhow::anyhow!("queries is not a valid array of query objects: {e}"))?;
+            ClientMessage::BatchQuery { queries }
+        }
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -151,18 +158,39 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
 fn format_response(tool: &str, msg: &ServerMessage) -> String {
     match msg {
         ServerMessage::BlastRadiusResult(r) => {
-            let files = r.affected_files.join("\n  ");
-            format!(
+            let mut out = format!(
                 "Blast radius for `{}`:\n\
+                 risk:                  {}{}\n\
                  direct dependents:     {}\n\
-                 transitive dependents: {}\n\
-                 affected files ({}):\n  {}",
+                 transitive dependents: {}",
                 r.symbol_uri,
+                r.risk_level,
+                if r.truncated { " (truncated)" } else { "" },
                 r.direct_dependents,
                 r.transitive_dependents,
-                r.affected_files.len(),
-                if files.is_empty() { "(none)".into() } else { files },
-            )
+            );
+
+            if !r.direct_items.is_empty() {
+                out.push_str("\n\ndirect (distance 1):");
+                for item in &r.direct_items {
+                    let sym = if item.symbol_uri.is_empty() { String::new() }
+                              else { format!("  #{}", item.symbol_uri.split('#').last().unwrap_or("")) };
+                    out.push_str(&format!("\n  {}{}", item.file_uri, sym));
+                }
+            }
+
+            if !r.transitive_items.is_empty() {
+                out.push_str("\n\ntransitive:");
+                for item in &r.transitive_items {
+                    out.push_str(&format!("\n  [d={}] {}", item.distance, item.file_uri));
+                }
+            }
+
+            if r.direct_items.is_empty() && r.transitive_items.is_empty() {
+                out.push_str("\n\naffected files: (none)");
+            }
+
+            out
         }
         ServerMessage::WorkspaceSymbolsResult { symbols } => {
             if symbols.is_empty() {
@@ -223,6 +251,19 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
         ServerMessage::AnnotationAck => "Annotation saved.".into(),
         ServerMessage::AnnotationValue { value } => {
             value.clone().unwrap_or_else(|| "(not set)".into())
+        }
+        ServerMessage::BatchResult { results } => {
+            results.iter().enumerate()
+                .map(|(i, r)| {
+                    let header = format!("[{i}]");
+                    match &r.ok {
+                        Some(msg) => format!("{header}\n{}", format_response(tool, msg)),
+                        None => format!("{header} error: {}",
+                            r.error.as_deref().unwrap_or("unknown error")),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n")
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -389,7 +430,7 @@ fn tools_manifest() -> Value {
                     "symbol_uri": { "type": "string" },
                     "key": {
                         "type": "string",
-                        "description": "e.g. 'team:owner', 'lip:fragile', 'agent:note'"
+                        "description": "e.g. 'team:owner', 'lip:fragile', 'agent:note', 'lip:nyx-agent-lock'"
                     },
                     "value":     { "type": "string" },
                     "author_id": {
@@ -398,6 +439,47 @@ fn tools_manifest() -> Value {
                     }
                 },
                 "required": ["symbol_uri", "key", "value", "author_id"]
+            }
+        },
+        {
+            "name": "lip_batch_query",
+            "description": "Execute multiple queries in a single round-trip — \
+                            one socket connection instead of N. \
+                            Use for planning: blast_radius + references + annotation_get \
+                            for 10 symbols costs 1 round-trip, not 30. \
+                            Each query object must carry a `type` field \
+                            (e.g. 'query_blast_radius', 'query_references', 'annotation_get'). \
+                            Manifest and Delta are not permitted inside a batch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "description": "Array of query objects, each with a `type` field",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": [
+                                        "query_blast_radius",
+                                        "query_references",
+                                        "query_definition",
+                                        "query_hover",
+                                        "query_workspace_symbols",
+                                        "query_document_symbols",
+                                        "query_dead_symbols",
+                                        "annotation_get",
+                                        "annotation_set",
+                                        "annotation_list"
+                                    ]
+                                }
+                            },
+                            "required": ["type"]
+                        }
+                    }
+                },
+                "required": ["queries"]
             }
         }
     ])

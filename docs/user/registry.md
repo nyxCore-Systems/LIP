@@ -1,0 +1,186 @@
+# Registry and Dependency Slices
+
+A dependency slice is a pre-built, content-addressed JSON blob containing all exported symbols for a specific package version. Once a slice exists in the registry, no one on the team ever indexes that dependency again.
+
+---
+
+## The problem slices solve
+
+Without slices:
+- `cargo check` on a 200-dep project: 5–20 minutes of compile time to index dependencies
+- Repeated on every machine, every CI runner, every `git clone`
+- `react@18.2.0` has not changed, but you re-index it every time
+
+With slices:
+- `react@18.2.0` is indexed once by anyone on the team (or pulled from the public registry)
+- Every subsequent consumer downloads a ~50 KB blob and mounts it in < 1 second
+- Stored keyed by content hash — immutable, verifiable, cacheable forever
+
+---
+
+## Building slices
+
+### Cargo
+
+```bash
+# Build slices for all dependencies in ./Cargo.toml
+lip slice --cargo
+
+# Custom manifest path
+lip slice --cargo path/to/workspace/Cargo.toml
+
+# Slices are written to ~/.cache/lip/slices/<hash>.json
+```
+
+Internally this runs `cargo metadata` to discover the dependency graph, finds each crate's source in `~/.cargo/registry/src/`, and indexes it with the Tier 1 tree-sitter indexer.
+
+### npm
+
+```bash
+# Build slices for all dependencies in ./package.json
+# (requires node_modules to already exist — run `npm install` first)
+lip slice --npm
+
+# Custom manifest
+lip slice --npm path/to/package.json
+```
+
+Indexes `.ts` and `.tsx` files from `node_modules/`. TypeScript `.d.ts` declaration files are included automatically.
+
+### pub (Dart)
+
+```bash
+# Build slices for all dependencies in ./pubspec.yaml
+# (requires pubspec.lock — run `dart pub get` first)
+lip slice --pub
+
+# Custom manifest
+lip slice --pub path/to/pubspec.yaml
+```
+
+Finds packages in `~/.pub-cache/hosted/pub.dev/` and indexes `.dart` files.
+
+### Multiple package managers
+
+```bash
+lip slice --cargo --npm --pub
+```
+
+---
+
+## Sharing slices with your team
+
+### Push to the public registry
+
+```bash
+lip slice --cargo --push --registry https://registry.lip.dev
+```
+
+Anyone who uses the same dependency versions will automatically get your slices on their next `lip fetch`.
+
+### Push to a private registry
+
+```bash
+lip slice --cargo --push --registry https://your-registry.internal
+```
+
+See [Running a private registry](#running-a-private-registry).
+
+### Fetch a specific slice
+
+```bash
+lip fetch <sha256-hash> --registry https://registry.lip.dev
+```
+
+Slices are cached locally at `~/.cache/lip/slices/`. Once cached, they are never re-downloaded for the same package version.
+
+---
+
+## Automatic slice loading
+
+When the daemon starts with a `ManifestRequest` that includes a `dep_tree_hash`, it compares the hash against its cached slices and reports any `missing_slices`. The client (e.g. the LSP bridge or a CI script) can then fetch and provide them:
+
+```bash
+# The LSP bridge handles this automatically.
+# Manual equivalent:
+lip fetch <hash> && lip push <hash-file>.json
+```
+
+---
+
+## Running a private registry
+
+The `lip-registry` server is a lightweight HTTP blob store. Run it anywhere — on a team server, in Docker, or in CI.
+
+### From source
+
+```bash
+cargo run -p lip-registry -- serve \
+  --store /var/lib/lip/slices \
+  --port 8080
+```
+
+### Docker
+
+```bash
+docker build -f tools/lip-registry/Dockerfile -t lip-registry .
+
+docker run -d \
+  --name lip-registry \
+  -p 8080:8080 \
+  -v lip-slices:/slices \
+  lip-registry
+```
+
+The registry stores slices as content-addressed JSON files under `--store`. There is no database — the filesystem is the store.
+
+### Registry API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/slices/:hash` | Download a slice |
+| `PUT` | `/slices/:hash` | Upload a slice |
+| `GET` | `/health` | Health check |
+
+All slices are identified by their SHA-256 content hash. The server rejects uploads if the hash doesn't match the content.
+
+### Pointing clients at your registry
+
+```bash
+# CLI
+lip slice --cargo --push --registry https://your-registry.internal
+lip fetch <hash> --registry https://your-registry.internal
+
+# Daemon (env var)
+LIP_REGISTRY=https://your-registry.internal lip daemon
+```
+
+---
+
+## Slice format
+
+A slice is a JSON file with this structure:
+
+```json
+{
+  "manager":      "cargo",
+  "package_name": "tokio",
+  "version":      "1.35.1",
+  "package_hash": "<sha256 of 'cargo:tokio@1.35.1'>",
+  "content_hash": "<sha256 of symbol JSON>",
+  "symbols": [
+    {
+      "uri":            "lip://cargo/tokio@1.35.1/runtime#Runtime",
+      "display_name":   "Runtime",
+      "kind":           "Class",
+      "confidence_score": 100,
+      "signature":      "pub struct Runtime",
+      "documentation":  "The Tokio runtime..."
+    }
+  ],
+  "slice_url":  "https://registry.lip.dev/slices/<hash>",
+  "built_at_ms": 1712700000000
+}
+```
+
+Slices from the registry are mounted as Tier 3 (confidence 100) anchors in the query graph. They are immutable — a slice for `tokio@1.35.1` is the same on every machine and never expires.

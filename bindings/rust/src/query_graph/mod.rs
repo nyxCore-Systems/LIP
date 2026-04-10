@@ -38,4 +38,4 @@ pub mod db;
 pub mod types;
 
 pub use db::LipDatabase;
-pub use types::{ApiSurface, BlastRadiusResult, ClientMessage, ServerMessage};
+pub use types::{ApiSurface, BatchQueryResult, BlastRadiusResult, ClientMessage, ImpactItem, RiskLevel, ServerMessage};

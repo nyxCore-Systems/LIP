@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::schema::{EdgeKind};
-use crate::query_graph::types::{ApiSurface, BlastRadiusResult};
+use crate::query_graph::types::{ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel};
 use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -417,6 +417,10 @@ impl LipDatabase {
 
     /// Compute blast radius for a symbol URI (spec §8.1).
     pub fn blast_radius_for(&mut self, symbol_uri: &str) -> BlastRadiusResult {
+        // BFS limits — keeps response time bounded on highly-connected symbols.
+        const DEPTH_LIMIT: u32 = 4;
+        const NODE_LIMIT:  usize = 200;
+
         let all_uris: Vec<String> = self.file_inputs.keys().cloned().collect();
         let def_uri = all_uris.iter().find(|uri| {
             self.file_symbols(uri).iter().any(|s| s.uri == symbol_uri)
@@ -429,57 +433,169 @@ impl LipDatabase {
             };
         };
 
-        let direct = self.reverse_deps(&def_uri);
-        let mut transitive: HashSet<String> = direct.iter().cloned().collect();
-        for dep in direct.clone() {
-            for indirect in self.reverse_deps(&dep) {
-                transitive.insert(indirect);
-            }
-        }
-
-        // CPG augmentation: BFS over the reverse call graph to find all
-        // transitive callers of this symbol and map them to their defining files.
+        // ── Phase 1: file-level reverse-dependency BFS ────────────────────
         //
-        // Cross-file resolution: Tier 1 generates file-local URIs, so a call to
-        // `helper` in file A produces `to_uri = lip://local/A#helper`, while the
-        // definition in file B has URI `lip://local/B#helper`. `callee_to_callers`
-        // is keyed by exact URI, so we also query `callee_name_to_callers` (keyed
-        // by display name) to pick up callers from other files.
-        let mut cpg_queue: VecDeque<String> = VecDeque::new();
-        let mut cpg_visited: HashSet<String> = HashSet::new();
-        cpg_queue.push_back(symbol_uri.to_owned());
-        while let Some(callee) = cpg_queue.pop_front() {
-            // URI-exact callers (same-file or pre-resolved edges).
-            if let Some(callers) = self.callee_to_callers.get(&callee).cloned() {
-                for caller in callers {
-                    if cpg_visited.insert(caller.clone()) {
-                        cpg_queue.push_back(caller.clone());
+        // Walks `reverse_deps` (file → files that import it) with depth
+        // tracking. Produces a map of file_uri → minimum distance from def_uri.
+        //
+        // NOTE: def_uri is intentionally NOT seeded at distance 0. If a
+        // same-file symbol calls the target (e.g. main() calls helper() in
+        // the same file), the CPG phase will discover def_uri at distance 1
+        // and include it correctly. Seeding at 0 would suppress that.
+        let mut truncated = false;
+        let mut file_distance: HashMap<String, u32> = HashMap::new();
+        {
+            let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+            // Start from def_uri's direct dependents at distance 1.
+            for dep_file in self.reverse_deps(&def_uri) {
+                if !file_distance.contains_key(&dep_file) {
+                    file_distance.insert(dep_file.clone(), 1);
+                    queue.push_back((dep_file, 1));
+                }
+            }
+
+            while let Some((file_uri, depth)) = queue.pop_front() {
+                if depth >= DEPTH_LIMIT {
+                    truncated = true;
+                    continue;
+                }
+                if file_distance.len() > NODE_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                for dep_file in self.reverse_deps(&file_uri) {
+                    if !file_distance.contains_key(&dep_file) {
+                        file_distance.insert(dep_file.clone(), depth + 1);
+                        queue.push_back((dep_file, depth + 1));
                     }
                 }
             }
-            // Name-based callers: catches file-local URIs from other files.
-            let name = extract_name(&callee);
-            if !name.is_empty() {
-                if let Some(callers) = self.callee_name_to_callers.get(name).cloned() {
+        }
+
+        // ── Phase 2: CPG (call-graph) BFS ─────────────────────────────────
+        //
+        // Walks `callee_to_callers` and `callee_name_to_callers` with depth
+        // tracking, then maps each caller symbol to its defining file.
+        //
+        // Cross-file resolution: Tier 1 generates file-local URIs, so a call
+        // to `helper` in file A produces `to_uri = lip://local/A#helper` while
+        // the definition in file B has URI `lip://local/B#helper`.
+        // `callee_name_to_callers` bridges this by keying on the name fragment.
+        //
+        // caller_sym → minimum distance from symbol_uri
+        let mut cpg_distance: HashMap<String, u32> = HashMap::new();
+        {
+            let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+            cpg_distance.insert(symbol_uri.to_owned(), 0);
+            queue.push_back((symbol_uri.to_owned(), 0));
+
+            while let Some((callee, depth)) = queue.pop_front() {
+                if depth >= DEPTH_LIMIT {
+                    truncated = true;
+                    continue;
+                }
+                if cpg_distance.len() > NODE_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                // URI-exact callers (same-file or pre-resolved edges).
+                if let Some(callers) = self.callee_to_callers.get(&callee).cloned() {
                     for caller in callers {
-                        if cpg_visited.insert(caller.clone()) {
-                            cpg_queue.push_back(caller);
+                        if !cpg_distance.contains_key(&caller) {
+                            cpg_distance.insert(caller.clone(), depth + 1);
+                            queue.push_back((caller, depth + 1));
+                        }
+                    }
+                }
+                // Name-based callers: catches file-local URIs from other files.
+                let name = extract_name(&callee);
+                if !name.is_empty() {
+                    if let Some(callers) = self.callee_name_to_callers.get(name).cloned() {
+                        for caller in callers {
+                            if !cpg_distance.contains_key(&caller) {
+                                cpg_distance.insert(caller.clone(), depth + 1);
+                                queue.push_back((caller, depth + 1));
+                            }
                         }
                     }
                 }
             }
         }
-        for caller_sym in &cpg_visited {
+
+        // ── Phase 3: merge ────────────────────────────────────────────────
+        //
+        // For each caller symbol from the CPG pass, resolve its defining file
+        // and merge into `file_distance` taking the minimum distance.
+        // Also collect `(file_uri, symbol_uri, distance)` for `ImpactItem`s.
+        //
+        // sym_impacts: file_uri → (caller_sym_uri, distance)
+        // We keep one representative symbol per file (the closest caller).
+        let mut sym_impacts: HashMap<String, (String, u32)> = HashMap::new();
+        for (caller_sym, &sym_dist) in &cpg_distance {
+            if caller_sym == symbol_uri { continue; } // skip the target itself
             if let Some((file_uri, _)) = self.def_index.get(caller_sym) {
-                transitive.insert(file_uri.clone());
+                let prev_dist = file_distance.get(file_uri).copied().unwrap_or(u32::MAX);
+                let best = sym_dist.min(prev_dist);
+                file_distance.insert(file_uri.clone(), best);
+                sym_impacts
+                    .entry(file_uri.clone())
+                    .and_modify(|(_, d)| { if sym_dist < *d { *d = sym_dist; } })
+                    .or_insert_with(|| (caller_sym.clone(), sym_dist));
             }
         }
 
+        // ── Phase 4: build result ─────────────────────────────────────────
+        let mut direct_items:     Vec<ImpactItem> = vec![];
+        let mut transitive_items: Vec<ImpactItem> = vec![];
+        let mut affected_files:   Vec<String>     = vec![];
+
+        for (file_uri, &distance) in &file_distance {
+            if distance == 0 { continue; } // the symbol's own file is not an "affected" file
+            let (sym_uri, sym_dist) = sym_impacts
+                .get(file_uri)
+                .map(|(s, d)| (s.as_str(), *d))
+                .unwrap_or(("", distance));
+            let effective_dist = distance.min(sym_dist);
+            let item = ImpactItem {
+                file_uri:   file_uri.clone(),
+                symbol_uri: sym_uri.to_owned(),
+                distance:   effective_dist,
+                confidence: ImpactItem::confidence_at(effective_dist),
+            };
+            affected_files.push(file_uri.clone());
+            if effective_dist == 1 {
+                direct_items.push(item);
+            } else {
+                transitive_items.push(item);
+            }
+        }
+
+        // Sort for deterministic output.
+        direct_items.sort_by(|a, b| a.file_uri.cmp(&b.file_uri));
+        transitive_items.sort_by(|a, b| a.distance.cmp(&b.distance).then(a.file_uri.cmp(&b.file_uri)));
+        affected_files.sort();
+
+        let direct_count     = direct_items.len() as u32;
+        let transitive_count = (direct_items.len() + transitive_items.len()) as u32;
+
+        // Risk: Low ≤3 direct / ≤5 total · Medium ≤10 direct / ≤20 total · High otherwise
+        let risk_level = if direct_count > 10 || transitive_count > 20 {
+            RiskLevel::High
+        } else if direct_count > 3 || transitive_count > 5 {
+            RiskLevel::Medium
+        } else {
+            RiskLevel::Low
+        };
+
         BlastRadiusResult {
             symbol_uri:            symbol_uri.to_owned(),
-            direct_dependents:     direct.len() as u32,
-            transitive_dependents: transitive.len() as u32,
-            affected_files:        transitive.into_iter().collect(),
+            direct_dependents:     direct_count,
+            transitive_dependents: transitive_count,
+            affected_files,
+            direct_items,
+            transitive_items,
+            truncated,
+            risk_level,
         }
     }
 
