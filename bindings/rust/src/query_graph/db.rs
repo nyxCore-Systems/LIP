@@ -8,6 +8,7 @@
 /// pattern manually. A v0.2 migration to the salsa crate is tracked in the
 /// roadmap.
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
@@ -73,7 +74,9 @@ pub struct LipDatabase {
     /// Reverse index: symbol_uri → (file_uri, definition range). O(1) definition lookup.
     def_index:   HashMap<String, (String, OwnedRange)>,
     /// Last Merkle root sent by the client. Drives lifecycle state reporting.
-    merkle_root: Option<String>,
+    merkle_root:    Option<String>,
+    /// Repo root from the last ManifestRequest. Used by Tier 2 to locate rust-analyzer's workspace.
+    workspace_root: Option<PathBuf>,
     /// Persistent annotations keyed by (symbol_uri, annotation_key).
     annotations: HashMap<String, HashMap<String, OwnedAnnotationEntry>>,
 }
@@ -81,14 +84,15 @@ pub struct LipDatabase {
 impl LipDatabase {
     pub fn new() -> Self {
         Self {
-            revision:    0,
-            file_inputs: HashMap::new(),
-            sym_cache:   HashMap::new(),
-            occ_cache:   HashMap::new(),
-            api_cache:   HashMap::new(),
-            def_index:   HashMap::new(),
-            merkle_root: None,
-            annotations: HashMap::new(),
+            revision:       0,
+            file_inputs:    HashMap::new(),
+            sym_cache:      HashMap::new(),
+            occ_cache:      HashMap::new(),
+            api_cache:      HashMap::new(),
+            def_index:      HashMap::new(),
+            merkle_root:    None,
+            workspace_root: None,
+            annotations:    HashMap::new(),
         }
     }
 
@@ -139,6 +143,48 @@ impl LipDatabase {
 
     pub fn file_count(&self) -> usize {
         self.file_inputs.len()
+    }
+
+    pub fn set_workspace_root(&mut self, root: PathBuf) {
+        self.workspace_root = Some(root);
+    }
+
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
+    }
+
+    /// Merge Tier 2 symbol upgrades into the cached symbol list for `uri`.
+    ///
+    /// For each upgraded symbol (matched by URI), replaces `confidence_score`
+    /// and `signature` / `documentation` with the Tier 2 values. The file
+    /// input revision is NOT bumped — this is a quality enhancement on existing
+    /// data, not a new source input. The API surface cache is invalidated so
+    /// downstream callers see the improved data on their next access.
+    pub fn upgrade_file_symbols(&mut self, uri: &str, upgrades: &[OwnedSymbolInfo]) {
+        if upgrades.is_empty() { return; }
+        let Some(cached) = self.sym_cache.get(uri) else { return; };
+        let rev = cached.revision;
+        let existing: Vec<OwnedSymbolInfo> = cached.value.as_ref().clone();
+
+        let merged: Vec<OwnedSymbolInfo> = existing
+            .into_iter()
+            .map(|mut sym| {
+                if let Some(up) = upgrades.iter().find(|u| u.uri == sym.uri) {
+                    sym.confidence_score = up.confidence_score;
+                    if up.signature.is_some() {
+                        sym.signature = up.signature.clone();
+                    }
+                    if up.documentation.is_some() {
+                        sym.documentation = up.documentation.clone();
+                    }
+                }
+                sym
+            })
+            .collect();
+
+        self.sym_cache.insert(uri.to_owned(), Cached::new(Arc::new(merged), rev));
+        // Invalidate api_cache so the content_hash reflects updated signatures.
+        self.api_cache.remove(uri);
     }
 
     // ── Raw accessors ─────────────────────────────────────────────────────

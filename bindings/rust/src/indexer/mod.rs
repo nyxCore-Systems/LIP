@@ -28,6 +28,7 @@
 pub mod language;
 pub mod symbol_extractor;
 pub mod tier1;
+pub mod tier2;
 
 pub use language::Language;
 pub use tier1::Tier1Indexer;

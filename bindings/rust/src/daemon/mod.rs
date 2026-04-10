@@ -36,7 +36,9 @@ pub mod manifest;
 pub mod mmap;
 pub mod server;
 pub mod session;
+pub mod tier2_manager;
 
 pub use manifest::{ManifestRequest, ManifestResponse};
 pub use server::LipDaemon;
 pub use session::{read_message, write_client_message, write_message, Session};
+pub use tier2_manager::VerificationJob;

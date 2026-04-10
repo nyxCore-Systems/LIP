@@ -1,23 +1,30 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::query_graph::{ClientMessage, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
 use super::manifest::ManifestResponse;
+use super::tier2_manager::VerificationJob;
 
 /// Per-connection session state.
 pub struct Session {
-    pub db: Arc<Mutex<LipDatabase>>,
+    pub db:       Arc<Mutex<LipDatabase>>,
+    /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
+    pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
 }
 
 impl Session {
-    pub fn new(db: Arc<Mutex<LipDatabase>>) -> Self {
-        Self { db }
+    pub fn new(
+        db:       Arc<Mutex<LipDatabase>>,
+        tier2_tx: Option<mpsc::Sender<VerificationJob>>,
+    ) -> Self {
+        Self { db, tier2_tx }
     }
 
     /// Drive the session loop for a single connected client.
@@ -71,6 +78,9 @@ impl Session {
                     IndexingState::Cold
                 };
                 db.set_merkle_root(req.merkle_root.clone());
+                if !req.repo_root.is_empty() {
+                    db.set_workspace_root(PathBuf::from(&req.repo_root));
+                }
                 ServerMessage::ManifestResponse(ManifestResponse {
                     cached_merkle_root: req.merkle_root,
                     missing_slices:     vec![],
@@ -80,17 +90,39 @@ impl Session {
 
             // ── File update ───────────────────────────────────────────────
             ClientMessage::Delta { seq, action, document } => {
-                let uri      = document.uri.clone();
-                let lang     = document.language.clone();
+                let uri        = document.uri.clone();
+                let lang       = document.language.clone();
+                let source_opt = document.source_text.clone();
 
-                {
+                let workspace_root = {
                     let mut db = self.db.lock().await;
                     match action {
                         Action::Upsert => {
-                            let text = document.source_text.clone().unwrap_or_default();
-                            db.upsert_file(uri.clone(), text, lang);
+                            let text = source_opt.clone().unwrap_or_default();
+                            db.upsert_file(uri.clone(), text, lang.clone());
                         }
                         Action::Delete => { db.remove_file(&uri); }
+                    }
+                    db.workspace_root().map(|p| p.to_owned())
+                };
+
+                // Enqueue Tier 2 verification for Rust files on upsert.
+                if matches!(action, Action::Upsert) {
+                    let is_rust = lang == "rust" || uri.ends_with(".rs");
+                    if is_rust {
+                        if let (Some(tx), Some(source)) = (&self.tier2_tx, source_opt) {
+                            let job = VerificationJob {
+                                uri:            uri.clone(),
+                                source,
+                                workspace_root,
+                                version:        seq as i32,
+                            };
+                            // try_send: non-blocking; drop job if channel full rather
+                            // than blocking the session loop.
+                            if let Err(e) = tx.try_send(job) {
+                                debug!("tier2 channel full, dropping job for {uri}: {e}");
+                            }
+                        }
                     }
                 }
 
