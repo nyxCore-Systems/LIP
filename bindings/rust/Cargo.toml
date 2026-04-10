@@ -1,6 +1,6 @@
 [package]
 name        = "lip"
-version     = "0.5.0"
+version     = "1.0.0"
 edition     = "2021"
 license     = "Apache-2.0"
 description = "LIP — Linked Incremental Protocol: Rust reference implementation"

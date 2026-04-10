@@ -5,5 +5,7 @@ pub mod fetch;
 pub mod import;
 pub mod index;
 pub mod lsp;
+pub mod mcp;
 pub mod push;
 pub mod query;
+pub mod slice;

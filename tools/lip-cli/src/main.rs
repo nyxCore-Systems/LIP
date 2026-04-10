@@ -39,6 +39,10 @@ enum Commands {
     Push(cmd::push::PushArgs),
     /// Annotate a symbol with a key/value pair.
     Annotate(cmd::annotate::AnnotateArgs),
+    /// Start a Model Context Protocol server backed by the LIP daemon.
+    Mcp(cmd::mcp::McpArgs),
+    /// Build pre-computed dependency slices for Cargo, npm, or pub packages.
+    Slice(cmd::slice::SliceArgs),
 }
 
 #[tokio::main]
@@ -60,5 +64,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Fetch(args)    => cmd::fetch::run(args).await,
         Commands::Push(args)     => cmd::push::run(args).await,
         Commands::Annotate(args) => cmd::annotate::run(args).await,
+        Commands::Mcp(args)      => cmd::mcp::run(args).await,
+        Commands::Slice(args)    => cmd::slice::run(args).await,
     }
 }

@@ -32,6 +32,14 @@ fn range_contains(r: &OwnedRange, line: i32, col: i32) -> bool {
     true
 }
 
+/// Extracts the display name from a symbol URI (the fragment after `#`).
+///
+/// `lip://local/src/main.rs#helper` → `"helper"`
+/// Returns `""` for URIs without a `#`.
+fn extract_name(uri: &str) -> &str {
+    uri.rfind('#').map(|i| &uri[i + 1..]).unwrap_or("")
+}
+
 // ─── Internal types ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -85,6 +93,15 @@ pub struct LipDatabase {
     callee_to_callers: HashMap<String, Vec<String>>,
     /// Per-file call edge index for cleanup on re-upsert or remove.
     file_call_edges: HashMap<String, Vec<(String, String)>>,
+    /// Global name index: display_name → [definition symbol_uris].
+    /// Enables cross-file symbol lookup by unqualified name.
+    name_to_symbols: HashMap<String, Vec<String>>,
+    /// CPG name index: callee display_name → [caller symbol_uris].
+    /// Bridges file-local callee URIs to definitions in other files during
+    /// `blast_radius_for`. A call edge `to_uri = lip://local/X#foo` from any
+    /// file is stored here under key `"foo"`, so blast_radius on the canonical
+    /// definition `lip://local/Y#foo` still finds all callers.
+    callee_name_to_callers: HashMap<String, Vec<String>>,
 }
 
 impl LipDatabase {
@@ -99,8 +116,10 @@ impl LipDatabase {
             merkle_root:    None,
             workspace_root:    None,
             annotations:       HashMap::new(),
-            callee_to_callers: HashMap::new(),
-            file_call_edges:   HashMap::new(),
+            callee_to_callers:      HashMap::new(),
+            file_call_edges:        HashMap::new(),
+            name_to_symbols:        HashMap::new(),
+            callee_name_to_callers: HashMap::new(),
         }
     }
 
@@ -119,11 +138,28 @@ impl LipDatabase {
         self.occ_cache.remove(&uri);
 
         // Eagerly rebuild the definition reverse index for this file.
+        // First remove stale name_to_symbols entries for symbols this file defined.
+        let stale_defs: Vec<String> = self.def_index.iter()
+            .filter(|(_, (furi, _))| furi == &uri)
+            .map(|(sym_uri, _)| sym_uri.clone())
+            .collect();
+        for sym_uri in &stale_defs {
+            let name = extract_name(sym_uri);
+            if let Some(uris) = self.name_to_symbols.get_mut(name) {
+                uris.retain(|u| u != sym_uri);
+                if uris.is_empty() { self.name_to_symbols.remove(name); }
+            }
+        }
         self.def_index.retain(|_, (furi, _)| furi != &uri);
         let occs = self.compute_occurrences(&uri);
         for occ in occs.iter() {
             if occ.role == Role::Definition {
                 self.def_index.insert(occ.symbol_uri.clone(), (uri.clone(), occ.range.clone()));
+                // Populate global name index.
+                let name = extract_name(&occ.symbol_uri).to_owned();
+                if !name.is_empty() {
+                    self.name_to_symbols.entry(name).or_default().push(occ.symbol_uri.clone());
+                }
             }
         }
         // Cache the occurrences we just computed to avoid a redundant parse on first query.
@@ -141,6 +177,14 @@ impl LipDatabase {
                     .entry(edge.to_uri.clone())
                     .or_default()
                     .push(edge.from_uri.clone());
+                // Name-based index: enables cross-file resolution in blast_radius_for.
+                let callee_name = extract_name(&edge.to_uri).to_owned();
+                if !callee_name.is_empty() {
+                    self.callee_name_to_callers
+                        .entry(callee_name)
+                        .or_default()
+                        .push(edge.from_uri.clone());
+                }
                 pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
             }
             self.file_call_edges.insert(uri.clone(), pairs);
@@ -153,6 +197,18 @@ impl LipDatabase {
         self.sym_cache.remove(uri);
         self.occ_cache.remove(uri);
         self.api_cache.remove(uri);
+        // Clean name_to_symbols before clearing def_index.
+        let stale_defs: Vec<String> = self.def_index.iter()
+            .filter(|(_, (furi, _))| furi.as_str() == uri)
+            .map(|(sym_uri, _)| sym_uri.clone())
+            .collect();
+        for sym_uri in &stale_defs {
+            let name = extract_name(sym_uri);
+            if let Some(uris) = self.name_to_symbols.get_mut(name) {
+                uris.retain(|u| u != sym_uri);
+                if uris.is_empty() { self.name_to_symbols.remove(name); }
+            }
+        }
         self.def_index.retain(|_, (furi, _)| furi.as_str() != uri);
         self.remove_file_call_edges(uri);
     }
@@ -162,6 +218,11 @@ impl LipDatabase {
             for (from, to) in pairs {
                 if let Some(callers) = self.callee_to_callers.get_mut(&to) {
                     callers.retain(|c| *c != from);
+                }
+                let callee_name = extract_name(&to);
+                if let Some(callers) = self.callee_name_to_callers.get_mut(callee_name) {
+                    callers.retain(|c| *c != from);
+                    if callers.is_empty() { self.callee_name_to_callers.remove(callee_name); }
                 }
             }
         }
@@ -235,6 +296,16 @@ impl LipDatabase {
 
     pub fn tracked_uris(&self) -> Vec<String> {
         self.file_inputs.keys().cloned().collect()
+    }
+
+    /// All definition symbol URIs with the given display name across all tracked files.
+    ///
+    /// Useful for workspace-wide "go to definition by name" without a full scan.
+    pub fn symbols_by_name(&self, name: &str) -> Vec<&str> {
+        self.name_to_symbols
+            .get(name)
+            .map(|uris| uris.iter().map(String::as_str).collect())
+            .unwrap_or_default()
     }
 
     pub fn current_revision(&self) -> u64 {
@@ -368,14 +439,32 @@ impl LipDatabase {
 
         // CPG augmentation: BFS over the reverse call graph to find all
         // transitive callers of this symbol and map them to their defining files.
+        //
+        // Cross-file resolution: Tier 1 generates file-local URIs, so a call to
+        // `helper` in file A produces `to_uri = lip://local/A#helper`, while the
+        // definition in file B has URI `lip://local/B#helper`. `callee_to_callers`
+        // is keyed by exact URI, so we also query `callee_name_to_callers` (keyed
+        // by display name) to pick up callers from other files.
         let mut cpg_queue: VecDeque<String> = VecDeque::new();
         let mut cpg_visited: HashSet<String> = HashSet::new();
         cpg_queue.push_back(symbol_uri.to_owned());
         while let Some(callee) = cpg_queue.pop_front() {
+            // URI-exact callers (same-file or pre-resolved edges).
             if let Some(callers) = self.callee_to_callers.get(&callee).cloned() {
                 for caller in callers {
                     if cpg_visited.insert(caller.clone()) {
-                        cpg_queue.push_back(caller);
+                        cpg_queue.push_back(caller.clone());
+                    }
+                }
+            }
+            // Name-based callers: catches file-local URIs from other files.
+            let name = extract_name(&callee);
+            if !name.is_empty() {
+                if let Some(callers) = self.callee_name_to_callers.get(name).cloned() {
+                    for caller in callers {
+                        if cpg_visited.insert(caller.clone()) {
+                            cpg_queue.push_back(caller);
+                        }
                     }
                 }
             }
@@ -994,5 +1083,56 @@ impl Greeter {
             "stale CPG edge should be purged on re-upsert; got {:?}",
             result.affected_files
         );
+    }
+
+    #[test]
+    fn blast_radius_cpg_cross_file_via_name_index() {
+        // lib.rs defines `helper`; caller.rs calls `helper`.
+        // Tier 1 generates file-local URIs, so the call edge from caller.rs uses
+        // lip://local/caller.rs#helper, while the definition in lib.rs has URI
+        // lip://local/lib.rs#helper. The callee_name_to_callers index should bridge
+        // this gap and include caller.rs in the blast radius for helper.
+        let mut db = LipDatabase::new();
+        let lib_uri    = "file:///project/lib.rs".to_owned();
+        let caller_uri = "file:///project/caller.rs".to_owned();
+
+        db.upsert_file(lib_uri.clone(),    "pub fn helper() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(caller_uri.clone(), "pub fn main() { helper(); }".to_owned(), "rust".to_owned());
+
+        let helper_sym = db.file_symbols(&lib_uri)
+            .iter()
+            .find(|s| s.display_name == "helper")
+            .map(|s| s.uri.clone())
+            .expect("helper not found in lib.rs");
+
+        let result = db.blast_radius_for(&helper_sym);
+        assert!(
+            result.affected_files.contains(&caller_uri),
+            "cross-file CPG: caller.rs should be in blast radius of lib.rs#helper; got {:?}",
+            result.affected_files
+        );
+    }
+
+    #[test]
+    fn symbols_by_name_finds_definition() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/api.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn my_func() {}".to_owned(), "rust".to_owned());
+
+        let uris = db.symbols_by_name("my_func");
+        assert!(!uris.is_empty(), "name_to_symbols should index my_func");
+        assert!(uris.iter().any(|u| u.contains("my_func")),
+            "returned URIs should contain my_func; got {uris:?}");
+    }
+
+    #[test]
+    fn symbols_by_name_cleared_on_remove() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/api.rs".to_owned();
+        db.upsert_file(uri.clone(), "pub fn gone_fn() {}".to_owned(), "rust".to_owned());
+        assert!(!db.symbols_by_name("gone_fn").is_empty());
+        db.remove_file(&uri);
+        assert!(db.symbols_by_name("gone_fn").is_empty(),
+            "name_to_symbols should be pruned on remove_file");
     }
 }
