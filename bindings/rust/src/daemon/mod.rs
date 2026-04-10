@@ -38,6 +38,7 @@ pub mod mmap;
 pub mod server;
 pub mod session;
 pub mod tier2_manager;
+pub mod watcher;
 
 pub use journal::{Journal, JournalEntry};
 pub use manifest::{ManifestRequest, ManifestResponse};

@@ -12,6 +12,7 @@ use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 use super::journal::{Journal, JournalEntry};
 use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
+use super::watcher::{uri_to_path, FileWatcherHandle};
 
 /// Per-connection session state.
 pub struct Session {
@@ -20,6 +21,8 @@ pub struct Session {
     pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
     /// Shared write-ahead journal. `None` when persistence is disabled.
     pub journal:  Option<Arc<StdMutex<Journal>>>,
+    /// Handle to the filesystem watcher. `None` when watching is disabled.
+    pub watcher:  Option<FileWatcherHandle>,
 }
 
 impl Session {
@@ -27,8 +30,9 @@ impl Session {
         db:       Arc<Mutex<LipDatabase>>,
         tier2_tx: Option<mpsc::Sender<VerificationJob>>,
         journal:  Option<Arc<StdMutex<Journal>>>,
+        watcher:  Option<FileWatcherHandle>,
     ) -> Self {
-        Self { db, tier2_tx, journal }
+        Self { db, tier2_tx, journal, watcher }
     }
 
     fn journal_write(&self, entry: JournalEntry) {
@@ -129,6 +133,23 @@ impl Session {
                     }
                     db.workspace_root().map(|p| p.to_owned())
                 };
+
+                // Register / deregister with the filesystem watcher so out-of-band
+                // changes (git checkout, build artefacts, etc.) are caught.
+                if let Some(w) = &self.watcher {
+                    match action {
+                        Action::Upsert => {
+                            if let Some(path) = uri_to_path(&uri) {
+                                w.add(uri.clone(), path);
+                            }
+                        }
+                        Action::Delete => {
+                            if let Some(path) = uri_to_path(&uri) {
+                                w.remove(path);
+                            }
+                        }
+                    }
+                }
 
                 // Enqueue Tier 2 verification for supported languages on upsert.
                 if matches!(action, Action::Upsert) {

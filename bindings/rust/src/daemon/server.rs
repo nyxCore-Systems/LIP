@@ -10,6 +10,7 @@ use crate::query_graph::LipDatabase;
 use super::journal::{self, Journal, COMPACT_THRESHOLD as COMPACT_THR};
 use super::session::Session;
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
+use super::watcher::{self, FileWatcherHandle};
 
 /// The LIP daemon — accepts Unix socket connections and dispatches sessions.
 pub struct LipDaemon {
@@ -17,6 +18,8 @@ pub struct LipDaemon {
     db:          Arc<Mutex<LipDatabase>>,
     tier2_tx:    mpsc::Sender<VerificationJob>,
     tier2_rx:    Option<mpsc::Receiver<VerificationJob>>,
+    /// Whether to spawn the per-file filesystem watcher on startup.
+    watch_files: bool,
 }
 
 impl LipDaemon {
@@ -27,7 +30,14 @@ impl LipDaemon {
             db:          Arc::new(Mutex::new(LipDatabase::new())),
             tier2_tx,
             tier2_rx:    Some(tier2_rx),
+            watch_files: true,
         }
+    }
+
+    /// Disable the filesystem watcher (useful in tests).
+    pub fn without_file_watcher(mut self) -> Self {
+        self.watch_files = false;
+        self
     }
 
     /// Run the accept loop. Blocks until the process is killed.
@@ -76,12 +86,32 @@ impl LipDaemon {
         let manager = Tier2Manager::new(self.db.clone(), rx);
         tokio::spawn(async move { manager.run().await });
 
+        // Spawn the per-file filesystem watcher (TruthKeeper §3.1).
+        // After replay we immediately register all tracked files so out-of-band
+        // changes (git checkout, cargo build output, etc.) are detected without
+        // waiting for a client Delta.
+        let watcher_handle: Option<FileWatcherHandle> = if self.watch_files {
+            let handle = watcher::spawn(self.db.clone(), Arc::clone(&shared_journal));
+            {
+                let db = self.db.lock().await;
+                for uri in db.tracked_uris() {
+                    if let Some(path) = watcher::uri_to_path(&uri) {
+                        handle.add(uri, path);
+                    }
+                }
+            }
+            Some(handle)
+        } else {
+            None
+        };
+
         loop {
             let (stream, _) = listener.accept().await?;
             let session = Arc::new(Session::new(
                 self.db.clone(),
                 Some(self.tier2_tx.clone()),
                 Some(Arc::clone(&shared_journal)),
+                watcher_handle.clone(),
             ));
             tokio::spawn(async move {
                 if let Err(e) = session.run(stream).await {
