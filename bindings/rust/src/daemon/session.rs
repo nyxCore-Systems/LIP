@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::query_graph::{ClientMessage, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
+use super::journal::{Journal, JournalEntry};
 use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
 
@@ -17,14 +18,27 @@ pub struct Session {
     pub db:       Arc<Mutex<LipDatabase>>,
     /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
     pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
+    /// Shared write-ahead journal. `None` when persistence is disabled.
+    pub journal:  Option<Arc<StdMutex<Journal>>>,
 }
 
 impl Session {
     pub fn new(
         db:       Arc<Mutex<LipDatabase>>,
         tier2_tx: Option<mpsc::Sender<VerificationJob>>,
+        journal:  Option<Arc<StdMutex<Journal>>>,
     ) -> Self {
-        Self { db, tier2_tx }
+        Self { db, tier2_tx, journal }
+    }
+
+    fn journal_write(&self, entry: JournalEntry) {
+        if let Some(j) = &self.journal {
+            if let Ok(mut guard) = j.lock() {
+                if let Err(e) = guard.append(&entry) {
+                    warn!("journal write failed: {e}");
+                }
+            }
+        }
     }
 
     /// Drive the session loop for a single connected client.
@@ -78,8 +92,10 @@ impl Session {
                     IndexingState::Cold
                 };
                 db.set_merkle_root(req.merkle_root.clone());
+                self.journal_write(JournalEntry::SetMerkleRoot { root: req.merkle_root.clone() });
                 if !req.repo_root.is_empty() {
                     db.set_workspace_root(PathBuf::from(&req.repo_root));
+                    self.journal_write(JournalEntry::SetWorkspaceRoot { path: req.repo_root.clone() });
                 }
                 ServerMessage::ManifestResponse(ManifestResponse {
                     cached_merkle_root: req.merkle_root,
@@ -99,9 +115,17 @@ impl Session {
                     match action {
                         Action::Upsert => {
                             let text = source_opt.clone().unwrap_or_default();
+                            self.journal_write(JournalEntry::UpsertFile {
+                                uri:      uri.clone(),
+                                text:     text.clone(),
+                                language: lang.clone(),
+                            });
                             db.upsert_file(uri.clone(), text, lang.clone());
                         }
-                        Action::Delete => { db.remove_file(&uri); }
+                        Action::Delete => {
+                            self.journal_write(JournalEntry::RemoveFile { uri: uri.clone() });
+                            db.remove_file(&uri);
+                        }
                     }
                     db.workspace_root().map(|p| p.to_owned())
                 };
@@ -218,6 +242,7 @@ impl Session {
                         .unwrap_or(0),
                     expires_ms: 0,
                 };
+                self.journal_write(JournalEntry::AnnotationSet { entry: entry.clone() });
                 let mut db = self.db.lock().await;
                 db.annotation_set(entry);
                 ServerMessage::AnnotationAck

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use crate::query_graph::LipDatabase;
 
+use super::journal::{self, Journal};
 use super::session::Session;
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
 
@@ -34,6 +35,28 @@ impl LipDaemon {
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
+
+        // Open the write-ahead journal. The path mirrors the socket with a
+        // `.journal` extension so they live in the same directory.
+        let journal_path = {
+            let name = self.socket_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            self.socket_path.with_file_name(format!("{name}.journal"))
+        };
+        let (raw_journal, entries) = Journal::open(&journal_path)?;
+        // Replay persisted entries into the db before accepting connections.
+        {
+            let mut db = self.db.lock().await;
+            journal::replay(&entries, &mut db);
+        }
+        if !entries.is_empty() {
+            info!("replayed {} journal entries from {}", entries.len(), journal_path.display());
+        }
+        let shared_journal = Arc::new(StdMutex::new(raw_journal));
+
         let listener = UnixListener::bind(&self.socket_path)?;
         info!("LIP daemon listening on {}", self.socket_path.display());
 
@@ -48,6 +71,7 @@ impl LipDaemon {
             let session = Arc::new(Session::new(
                 self.db.clone(),
                 Some(self.tier2_tx.clone()),
+                Some(Arc::clone(&shared_journal)),
             ));
             tokio::spawn(async move {
                 if let Err(e) = session.run(stream).await {

@@ -32,12 +32,14 @@
 //! In v0.1 it is unused; the daemon will switch to it once the FlatBuffers
 //! schema is stabilised.
 
+pub mod journal;
 pub mod manifest;
 pub mod mmap;
 pub mod server;
 pub mod session;
 pub mod tier2_manager;
 
+pub use journal::{Journal, JournalEntry};
 pub use manifest::{ManifestRequest, ManifestResponse};
 pub use server::LipDaemon;
 pub use session::{read_message, write_client_message, write_message, Session};
