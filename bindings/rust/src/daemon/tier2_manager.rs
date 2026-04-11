@@ -12,13 +12,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
 use crate::indexer::tier2::ts_server::TypeScriptBackend;
 use crate::indexer::tier2::py_ls::PythonBackend;
-use crate::query_graph::LipDatabase;
+use crate::query_graph::{LipDatabase, ServerMessage};
 
 pub const CHANNEL_CAPACITY: usize = 64;
 
@@ -73,17 +73,24 @@ impl Tier2Backends {
 // ─── Manager ─────────────────────────────────────────────────────────────────
 
 pub struct Tier2Manager {
-    db:       Arc<Mutex<LipDatabase>>,
-    rx:       mpsc::Receiver<VerificationJob>,
-    backends: Tier2Backends,
+    db:        Arc<Mutex<LipDatabase>>,
+    rx:        mpsc::Receiver<VerificationJob>,
+    backends:  Tier2Backends,
+    /// Broadcast sender for push notifications. `None` when notifications are disabled.
+    notify_tx: Option<broadcast::Sender<ServerMessage>>,
 }
 
 impl Tier2Manager {
-    pub fn new(db: Arc<Mutex<LipDatabase>>, rx: mpsc::Receiver<VerificationJob>) -> Self {
+    pub fn new(
+        db:        Arc<Mutex<LipDatabase>>,
+        rx:        mpsc::Receiver<VerificationJob>,
+        notify_tx: broadcast::Sender<ServerMessage>,
+    ) -> Self {
         Self {
             db,
             rx,
-            backends: Tier2Backends::new(),
+            backends:  Tier2Backends::new(),
+            notify_tx: Some(notify_tx),
         }
     }
 
@@ -153,6 +160,7 @@ impl Tier2Manager {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
@@ -192,6 +200,7 @@ impl Tier2Manager {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
@@ -230,12 +239,47 @@ impl Tier2Manager {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: python verification failed for {}: {e}", job.uri);
                 self.backends.python = None;
+            }
+        }
+    }
+
+    /// For each symbol in `upgrades` that actually raises confidence, broadcast
+    /// a `SymbolUpgraded` notification to all connected sessions.
+    ///
+    /// Called with the db lock held so we can read the current (pre-upgrade)
+    /// confidence values before the merge overwrites them.
+    fn broadcast_upgrades(
+        &self,
+        file_uri: &str,
+        upgrades: &[crate::schema::OwnedSymbolInfo],
+        db:       &mut LipDatabase,
+    ) {
+        let Some(ref tx) = self.notify_tx else { return; };
+        // If no receivers, skip the db read.
+        if tx.receiver_count() == 0 { return; }
+
+        let current_syms = db.file_symbols(file_uri);
+        for up in upgrades {
+            let old_confidence = current_syms
+                .iter()
+                .find(|s| s.uri == up.uri)
+                .map(|s| s.confidence_score)
+                .unwrap_or(0);
+            if up.confidence_score > old_confidence {
+                let msg = ServerMessage::SymbolUpgraded {
+                    uri:            up.uri.clone(),
+                    old_confidence,
+                    new_confidence: up.confidence_score,
+                };
+                // `send` fails only when there are no receivers; that's fine.
+                let _ = tx.send(msg);
             }
         }
     }

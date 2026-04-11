@@ -147,6 +147,10 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
                 .map_err(|e| anyhow::anyhow!("queries is not a valid array of query objects: {e}"))?;
             ClientMessage::BatchQuery { queries }
         }
+        "lip_similar_symbols" => ClientMessage::SimilarSymbols {
+            query: req_str(args, "query")?,
+            limit: args["limit"].as_u64().map(|n| n as usize).unwrap_or(20),
+        },
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -252,7 +256,8 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
         ServerMessage::AnnotationValue { value } => {
             value.clone().unwrap_or_else(|| "(not set)".into())
         }
-        ServerMessage::BatchResult { results } => {
+        // BatchQuery → per-slot ok/error results
+        ServerMessage::BatchQueryResponse { results } => {
             results.iter().enumerate()
                 .map(|(i, r)| {
                     let header = format!("[{i}]");
@@ -264,6 +269,34 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("\n---\n")
+        }
+        // Batch → one ServerMessage per request
+        ServerMessage::BatchResult { results } => {
+            results.iter().enumerate()
+                .map(|(i, msg)| match msg {
+                    ServerMessage::Error { message } =>
+                        format!("[{i}] error: {message}"),
+                    other =>
+                        format!("[{i}]\n{}", format_response(tool, other)),
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        }
+        ServerMessage::SimilarSymbolsResult { symbols } => {
+            if symbols.is_empty() { return "No similar symbols found.".into(); }
+            symbols.iter()
+                .map(|s| format!(
+                    "{:<30} {:<12}  score={:.2}  {}",
+                    s.name,
+                    s.kind,
+                    s.score,
+                    s.uri,
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ServerMessage::SymbolUpgraded { uri, old_confidence, new_confidence } => {
+            format!("upgraded {uri}: confidence {old_confidence} → {new_confidence}")
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -439,6 +472,20 @@ fn tools_manifest() -> Value {
                     }
                 },
                 "required": ["symbol_uri", "key", "value", "author_id"]
+            }
+        },
+        {
+            "name": "lip_similar_symbols",
+            "description": "Trigram fuzzy-search across all tracked symbol names and documentation. \
+                            Useful when you know roughly what a symbol is called but not its exact name \
+                            or location. Returns URI, kind, and relevance score.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Partial name or keyword to search for" },
+                    "limit": { "type": "integer", "default": 20 }
+                },
+                "required": ["query"]
             }
         },
         {

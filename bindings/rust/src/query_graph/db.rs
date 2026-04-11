@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::schema::{EdgeKind};
-use crate::query_graph::types::{ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel};
+use crate::query_graph::types::{ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel, SimilarSymbol};
 use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -38,6 +38,28 @@ fn range_contains(r: &OwnedRange, line: i32, col: i32) -> bool {
 /// Returns `""` for URIs without a `#`.
 fn extract_name(uri: &str) -> &str {
     uri.rfind('#').map(|i| &uri[i + 1..]).unwrap_or("")
+}
+
+/// Jaccard similarity of 3-character windows (trigrams) between two strings.
+///
+/// Both inputs are lowercased before comparison. Returns 1.0 for two empty
+/// strings, 0.0 when exactly one is empty.
+fn trigram_similarity(a: &str, b: &str) -> f32 {
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+    let a_tris: std::collections::HashSet<&str> =
+        a_lower.as_bytes().windows(3)
+            .map(|w| std::str::from_utf8(w).unwrap_or(""))
+            .collect();
+    let b_tris: std::collections::HashSet<&str> =
+        b_lower.as_bytes().windows(3)
+            .map(|w| std::str::from_utf8(w).unwrap_or(""))
+            .collect();
+    if a_tris.is_empty() && b_tris.is_empty() { return 1.0; }
+    if a_tris.is_empty() || b_tris.is_empty() { return 0.0; }
+    let intersection = a_tris.intersection(&b_tris).count();
+    let union        = a_tris.union(&b_tris).count();
+    intersection as f32 / union as f32
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────
@@ -705,6 +727,42 @@ impl LipDatabase {
             }
         }
         matches
+    }
+
+    /// Trigram fuzzy search across all tracked symbols.
+    ///
+    /// Scores each symbol by Jaccard similarity of 3-char windows between
+    /// `query` and the symbol name (and optionally its documentation at 0.6×
+    /// weight). Returns up to `limit` results with score ≥ 0.2, sorted
+    /// descending by score.
+    pub fn similar_symbols(&mut self, query: &str, limit: usize) -> Vec<SimilarSymbol> {
+        let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
+        let mut hits: Vec<SimilarSymbol> = Vec::new();
+
+        for uri in &uris {
+            for sym in self.file_symbols(uri).iter() {
+                let name_score = trigram_similarity(query, &sym.display_name);
+                let doc_score  = sym.documentation
+                    .as_deref()
+                    .map(|d| trigram_similarity(query, d) * 0.6)
+                    .unwrap_or(0.0);
+                let score = name_score.max(doc_score);
+                if score >= 0.2 {
+                    hits.push(SimilarSymbol {
+                        uri:        sym.uri.clone(),
+                        name:       sym.display_name.clone(),
+                        kind:       format!("{:?}", sym.kind).to_lowercase(),
+                        score,
+                        doc:        sym.documentation.clone(),
+                        confidence: sym.confidence_score,
+                    });
+                }
+            }
+        }
+
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(limit);
+        hits
     }
 
     // ── Private ───────────────────────────────────────────────────────────

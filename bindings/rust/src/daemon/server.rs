@@ -2,15 +2,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::query_graph::LipDatabase;
+use crate::query_graph::{LipDatabase, ServerMessage};
 
 use super::journal::{self, Journal, COMPACT_THRESHOLD as COMPACT_THR};
 use super::session::Session;
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
 use super::watcher::{self, FileWatcherHandle};
+
+/// Broadcast channel capacity for push notifications (e.g. `SymbolUpgraded`).
+const NOTIFY_CAPACITY: usize = 64;
 
 /// The LIP daemon — accepts Unix socket connections and dispatches sessions.
 pub struct LipDaemon {
@@ -20,17 +23,21 @@ pub struct LipDaemon {
     tier2_rx:    Option<mpsc::Receiver<VerificationJob>>,
     /// Whether to spawn the per-file filesystem watcher on startup.
     watch_files: bool,
+    /// Broadcast sender for push notifications to all active sessions.
+    notify_tx:   broadcast::Sender<ServerMessage>,
 }
 
 impl LipDaemon {
     pub fn new(socket_path: impl AsRef<Path>) -> Self {
         let (tier2_tx, tier2_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (notify_tx, _)       = broadcast::channel(NOTIFY_CAPACITY);
         Self {
             socket_path: socket_path.as_ref().to_owned(),
             db:          Arc::new(Mutex::new(LipDatabase::new())),
             tier2_tx,
             tier2_rx:    Some(tier2_rx),
             watch_files: true,
+            notify_tx,
         }
     }
 
@@ -83,7 +90,7 @@ impl LipDaemon {
         // Spawn the Tier 2 background manager. It is a separate task so Tier 2
         // verification never blocks session response latency.
         let rx = self.tier2_rx.take().expect("tier2_rx consumed exactly once");
-        let manager = Tier2Manager::new(self.db.clone(), rx);
+        let manager = Tier2Manager::new(self.db.clone(), rx, self.notify_tx.clone());
         tokio::spawn(async move { manager.run().await });
 
         // Spawn the per-file filesystem watcher (TruthKeeper §3.1).
@@ -112,6 +119,7 @@ impl LipDaemon {
                 Some(self.tier2_tx.clone()),
                 Some(Arc::clone(&shared_journal)),
                 watcher_handle.clone(),
+                Some(self.notify_tx.clone()),
             ));
             tokio::spawn(async move {
                 if let Err(e) = session.run(stream).await {

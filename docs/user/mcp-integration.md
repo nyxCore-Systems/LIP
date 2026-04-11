@@ -17,6 +17,7 @@
 | `lip_dead_symbols` | Symbols defined but never referenced |
 | `lip_annotation_get` | Read a persistent symbol annotation |
 | `lip_annotation_set` | Write a persistent symbol annotation |
+| `lip_similar_symbols` | Trigram fuzzy-search across all symbol names and docs |
 | `lip_batch_query` | Execute multiple queries in one round-trip |
 
 All tools are backed by the live LIP daemon — results are always current, never a stale snapshot.

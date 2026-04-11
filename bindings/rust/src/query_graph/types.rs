@@ -63,6 +63,17 @@ impl ImpactItem {
     }
 }
 
+/// A single fuzzy-search hit returned by `ClientMessage::SimilarSymbols`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimilarSymbol {
+    pub uri:        String,
+    pub name:       String,
+    pub kind:       String,
+    pub score:      f32,
+    pub doc:        Option<String>,
+    pub confidence: u8,
+}
+
 /// Result of `blast_radius(symbol_uri)`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlastRadiusResult {
@@ -130,7 +141,17 @@ pub enum ServerMessage {
     AnnotationValue { value: Option<String> },
     AnnotationEntries { entries: Vec<crate::schema::OwnedAnnotationEntry> },
     /// Response to a [`ClientMessage::BatchQuery`]. One result per input query, in order.
-    BatchResult { results: Vec<BatchQueryResult> },
+    BatchQueryResponse { results: Vec<BatchQueryResult> },
+    /// Response to a [`ClientMessage::Batch`]. One `ServerMessage` per request, in order.
+    BatchResult { results: Vec<ServerMessage> },
+    /// Push notification: a symbol's confidence score was raised by Tier 2 verification.
+    SymbolUpgraded {
+        uri:            String,
+        old_confidence: u8,
+        new_confidence: u8,
+    },
+    /// Response to a [`ClientMessage::SimilarSymbols`] fuzzy search.
+    SimilarSymbolsResult { symbols: Vec<SimilarSymbol> },
     Error { message: String },
 }
 
@@ -188,4 +209,17 @@ pub enum ClientMessage {
     /// Restrictions: `Manifest`, `Delta`, and nested `BatchQuery` entries are
     /// rejected with an error entry rather than aborting the whole batch.
     BatchQuery { queries: Vec<ClientMessage> },
+    /// Simple batch: execute multiple requests and return one `ServerMessage` per
+    /// request, in order. Nested `Batch` entries are rejected immediately.
+    Batch { requests: Vec<ClientMessage> },
+    /// Trigram fuzzy-search across all tracked symbol names and documentation.
+    SimilarSymbols { query: String, limit: usize },
+}
+
+impl ClientMessage {
+    /// Returns `true` for any message that may appear inside a [`ClientMessage::Batch`].
+    /// A `Batch` itself is excluded to prevent nesting.
+    pub fn is_batchable(&self) -> bool {
+        !matches!(self, ClientMessage::Batch { .. })
+    }
 }

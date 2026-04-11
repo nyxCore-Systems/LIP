@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::query_graph::{BatchQueryResult, ClientMessage, LipDatabase, ServerMessage};
@@ -16,23 +16,27 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 
 /// Per-connection session state.
 pub struct Session {
-    pub db:       Arc<Mutex<LipDatabase>>,
+    pub db:        Arc<Mutex<LipDatabase>>,
     /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
-    pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
+    pub tier2_tx:  Option<mpsc::Sender<VerificationJob>>,
     /// Shared write-ahead journal. `None` when persistence is disabled.
-    pub journal:  Option<Arc<StdMutex<Journal>>>,
+    pub journal:   Option<Arc<StdMutex<Journal>>>,
     /// Handle to the filesystem watcher. `None` when watching is disabled.
-    pub watcher:  Option<FileWatcherHandle>,
+    pub watcher:   Option<FileWatcherHandle>,
+    /// Broadcast sender for push notifications (e.g. `SymbolUpgraded`).
+    /// Kept so we can subscribe receivers for newly forked sessions.
+    pub notify_tx: Option<broadcast::Sender<ServerMessage>>,
 }
 
 impl Session {
     pub fn new(
-        db:       Arc<Mutex<LipDatabase>>,
-        tier2_tx: Option<mpsc::Sender<VerificationJob>>,
-        journal:  Option<Arc<StdMutex<Journal>>>,
-        watcher:  Option<FileWatcherHandle>,
+        db:        Arc<Mutex<LipDatabase>>,
+        tier2_tx:  Option<mpsc::Sender<VerificationJob>>,
+        journal:   Option<Arc<StdMutex<Journal>>>,
+        watcher:   Option<FileWatcherHandle>,
+        notify_tx: Option<broadcast::Sender<ServerMessage>>,
     ) -> Self {
-        Self { db, tier2_tx, journal, watcher }
+        Self { db, tier2_tx, journal, watcher, notify_tx }
     }
 
     fn journal_write(&self, entry: JournalEntry) {
@@ -48,6 +52,10 @@ impl Session {
     /// Drive the session loop for a single connected client.
     pub async fn run(self: Arc<Self>, mut stream: UnixStream) -> anyhow::Result<()> {
         info!("new client session");
+        // Subscribe to push notifications for this session's lifetime.
+        let mut notify_rx: Option<broadcast::Receiver<ServerMessage>> =
+            self.notify_tx.as_ref().map(|tx| tx.subscribe());
+
         loop {
             let msg_bytes = match read_message(&mut stream).await {
                 Ok(b)  => b,
@@ -76,11 +84,37 @@ impl Session {
                 error!("write error: {e}");
                 break;
             }
+
+            // Drain any pending push notifications before blocking on the next read.
+            if let Some(ref mut rx) = notify_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(notification) => {
+                            if let Err(e) = write_message(&mut stream, &notification).await {
+                                error!("write error (notification): {e}");
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::TryRecvError::Empty) => break,
+                        Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                            warn!("notification receiver lagged by {n} messages");
+                        }
+                        Err(broadcast::error::TryRecvError::Closed) => break,
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    async fn handle(&self, msg: ClientMessage) -> ServerMessage {
+    fn handle(
+        &self,
+        msg: ClientMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServerMessage> + Send + '_>> {
+        Box::pin(self.handle_inner(msg))
+    }
+
+    async fn handle_inner(&self, msg: ClientMessage) -> ServerMessage {
         match msg {
             // ── Handshake ─────────────────────────────────────────────────
             ClientMessage::Manifest(req) => {
@@ -284,7 +318,7 @@ impl Session {
                 ServerMessage::AnnotationEntries { entries }
             }
 
-            // ── Batch ─────────────────────────────────────────────────────
+            // ── BatchQuery ────────────────────────────────────────────────
             ClientMessage::BatchQuery { queries } => {
                 let mut results = Vec::with_capacity(queries.len());
                 // Acquire the db lock once for the entire batch — one
@@ -304,7 +338,30 @@ impl Session {
                     self.journal_write(JournalEntry::AnnotationSet { entry });
                 }
 
+                ServerMessage::BatchQueryResponse { results }
+            }
+
+            // ── Batch (simple) ────────────────────────────────────────────
+            ClientMessage::Batch { requests } => {
+                if let Some(bad) = requests.iter().find(|r| !r.is_batchable()) {
+                    let _ = bad; // already matched by is_batchable
+                    return ServerMessage::Error {
+                        message: "nested Batch not allowed".into(),
+                    };
+                }
+                let mut results = Vec::with_capacity(requests.len());
+                for req in requests {
+                    let r = self.handle(req).await;
+                    results.push(r);
+                }
                 ServerMessage::BatchResult { results }
+            }
+
+            // ── SimilarSymbols ────────────────────────────────────────────
+            ClientMessage::SimilarSymbols { query, limit } => {
+                let mut db = self.db.lock().await;
+                let symbols = db.similar_symbols(&query, limit);
+                ServerMessage::SimilarSymbolsResult { symbols }
             }
         }
     }
@@ -333,6 +390,8 @@ fn process_query_sync(
             err("Delta is not permitted inside a BatchQuery"),
         ClientMessage::BatchQuery { .. } =>
             err("nested BatchQuery is not supported"),
+        ClientMessage::Batch { .. } =>
+            err("nested Batch is not supported"),
 
         // ── Queries ───────────────────────────────────────────────────────
         ClientMessage::QueryDefinition { uri, line, col } => {
@@ -427,6 +486,11 @@ fn process_query_sync(
         ClientMessage::AnnotationList { symbol_uri } => {
             let entries = db.annotation_list(&symbol_uri);
             ok(ServerMessage::AnnotationEntries { entries })
+        }
+
+        ClientMessage::SimilarSymbols { query, limit } => {
+            let symbols = db.similar_symbols(&query, limit);
+            ok(ServerMessage::SimilarSymbolsResult { symbols })
         }
     }
 }
