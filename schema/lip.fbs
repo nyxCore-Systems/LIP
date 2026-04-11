@@ -1,5 +1,5 @@
 // lip.fbs — LIP FlatBuffers Schema
-// Version: 0.2.0-dev
+// Version: 1.1.0
 // License: Apache 2.0
 //
 // This is the canonical schema. All language bindings and protocol
@@ -227,5 +227,195 @@ table DeltaAck {
   /// Set when accepted = false; describes why the delta was rejected.
   error:    string;
 }
+
+// ─── Blast Radius ────────────────────────────────────────────────────────────
+
+enum RiskLevel : byte {
+  Low    = 0,
+  Medium = 1,
+  High   = 2,
+}
+
+/// A single file (or symbol within a file) that is transitively affected by
+/// a change to a target symbol. Part of BlastRadiusResult.
+table ImpactItem {
+  file_uri:   string;
+  /// URI of the specific calling symbol. Empty when only file-level data is available.
+  symbol_uri: string;
+  /// Graph distance from the target: 1 = direct caller, 2 = caller-of-caller, …
+  distance:   uint32;
+  /// Confidence that this dependency is real.
+  /// Schedule: d=1→0.95, d=2→0.85, d=3→0.75, d≥4→0.50.
+  confidence: float32;
+}
+
+table BlastRadiusResult {
+  symbol_uri:            string;
+  direct_dependents:     uint32;   // compat — prefer direct_items.length
+  transitive_dependents: uint32;   // compat — prefer direct_items.length + transitive_items.length
+  affected_files:        [string]; // compat — flat deduped list
+  direct_items:          [ImpactItem];
+  transitive_items:      [ImpactItem];
+  truncated:             bool;
+  risk_level:            RiskLevel;
+}
+
+// ─── Fuzzy Search ────────────────────────────────────────────────────────────
+
+table SimilarSymbol {
+  uri:        string;
+  name:       string;
+  kind:       string;
+  score:      float32;
+  doc:        string;
+  confidence: uint8;
+}
+
+// ─── Query Request Messages (Client → Daemon) ─────────────────────────────────
+//
+// FlatBuffers unions require a separate table per message type.
+// Each table is a `ClientMessage` union member.
+// The framed IPC message is: { type: ClientMessageType (1 byte), body: <table> }.
+
+table QueryDefinition {
+  uri:  string;
+  line: uint32;
+  col:  uint32;
+}
+
+table QueryReferences {
+  symbol_uri: string;
+  limit:      uint32 = 50;
+}
+
+table QueryHover {
+  uri:  string;
+  line: uint32;
+  col:  uint32;
+}
+
+table QueryBlastRadius {
+  symbol_uri: string;
+}
+
+table QueryWorkspaceSymbols {
+  query: string;
+  limit: uint32 = 100;
+}
+
+table QueryDocumentSymbols {
+  uri: string;
+}
+
+table QueryDeadSymbols {
+  limit: uint32 = 200;
+}
+
+table AnnotationSet {
+  symbol_uri: string;
+  key:        string;
+  value:      string;
+  author_id:  string;
+}
+
+table AnnotationGet {
+  symbol_uri: string;
+  key:        string;
+}
+
+table AnnotationList {
+  symbol_uri: string;
+}
+
+table QuerySimilarSymbols {
+  query: string;
+  limit: uint32 = 20;
+}
+
+/// Execute multiple queries in one Unix socket round-trip.
+/// Each entry must be a batchable ClientMessage (no nested Batch or Delta).
+table BatchQuery {
+  queries: [BatchQueryEntry];
+}
+
+/// A single entry inside a BatchQuery (discriminated by type byte + table offset).
+/// FlatBuffers encodes this as a union, here represented as raw type + body bytes
+/// for forward compatibility.
+table BatchQueryEntry {
+  type_byte: uint8;
+  body:      [uint8]; // inline FlatBuffers table bytes
+}
+
+/// One result slot in a BatchQueryResponse.
+table BatchQueryResult {
+  /// Inline FlatBuffers ServerMessage body on success.
+  ok:    [uint8];
+  error: string;
+}
+
+// ─── Query Response Messages (Daemon → Client) ────────────────────────────────
+
+table DefinitionResult {
+  symbol:         SymbolInfo;
+  location_uri:   string;
+  location_range: Range;
+}
+
+table ReferencesResult {
+  occurrences: [Occurrence];
+}
+
+table HoverResult {
+  symbol: SymbolInfo;
+}
+
+table WorkspaceSymbolsResult {
+  symbols: [SymbolInfo];
+}
+
+table DocumentSymbolsResult {
+  symbols: [SymbolInfo];
+}
+
+table DeadSymbolsResult {
+  symbols: [SymbolInfo];
+}
+
+table AnnotationValue {
+  value: string;   // empty string = not set
+  found: bool;
+}
+
+table AnnotationEntries {
+  entries: [AnnotationEntry];
+}
+
+table BatchQueryResponse {
+  results: [BatchQueryResult];
+}
+
+/// Push notification: a symbol's Tier 1 confidence was upgraded by Tier 2.
+table SymbolUpgraded {
+  uri:            string;
+  old_confidence: uint8;
+  new_confidence: uint8;
+}
+
+table SimilarSymbolsResult {
+  symbols: [SimilarSymbol];
+}
+
+table ErrorMessage {
+  message: string;
+}
+
+// ─── Root ─────────────────────────────────────────────────────────────────────
+//
+// The EventStream table is the root for streaming and batch contexts.
+// IPC messages are framed with a 4-byte big-endian length prefix followed by
+// a FlatBuffers buffer whose root is one of the tables above.
+// During the JSON transport phase the `type` field in the JSON envelope
+// discriminates message kind; the FlatBuffers transport uses a 1-byte type
+// prefix before the buffer.
 
 root_type EventStream;

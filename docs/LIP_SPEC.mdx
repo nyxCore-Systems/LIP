@@ -1070,52 +1070,49 @@ lip-protocol/
 
 ## 13. Roadmap
 
-### v0.1 — Foundation (current)
+### v1.1 — Shipped ✓
 
-- [ ] FlatBuffers schema (`lip.fbs`)
-- [ ] Rust bindings (generated + handwritten utilities)
-- [ ] Dart bindings (for CKB/Cartographer integration)
-- [ ] Daemon: Tree-sitter Tier 1 indexer
-- [ ] Daemon: Salsa query graph (in-memory, single session)
-- [ ] LIP-to-LSP bridge (definition, references, hover, workspace symbols)
-- [ ] CLI: `lip index`, `lip query`, `lip import --from-scip`
+- [x] FlatBuffers schema (`schema/lip.fbs`) — data model + IPC tables
+- [x] Rust reference implementation (`bindings/rust/`)
+- [x] Daemon: Tree-sitter Tier 1 indexer (Rust, TypeScript, Python, Dart)
+- [x] Daemon: Salsa-inspired query graph (incremental, WAL-persisted)
+- [x] Blast radius engine — CPG call-edge BFS, `ImpactItem` with depth-weighted confidence, `RiskLevel`
+- [x] Delta acknowledgment (`DeltaAck`) — eliminates fire-and-forget drift
+- [x] Daemon: Tier 2 incremental compiler (rust-analyzer, typescript-language-server, pyright/pylsp, dart language-server)
+- [x] LIP-to-LSP bridge (`lip lsp`) — definition, references, hover, workspace symbols
+- [x] MCP server (`lip mcp`) — 11 tools for AI agent integration
+- [x] CLI: `lip index`, `lip query`, `lip import --from-scip`, `lip export --to-scip`
+- [x] CLI: `lip push`, `lip fetch`, `lip slice` (Cargo, npm, pub)
+- [x] Registry server (`lip-registry`) with Docker image
+- [x] Annotation Overlay Layer (`AnnotationEntry`, `lip:*` / `agent:*` / `team:*` key prefixes)
+- [x] `lip:nyx-agent-lock` convention — worktree collision prevention for multi-agent workflows
+- [x] `BatchQuery` + `Batch` — N queries in one round-trip
+- [x] `SimilarSymbols` — trigram fuzzy search across symbol names and docs
+- [x] Dead code detection (`QueryDeadSymbols`)
+- [x] Push notifications (`SymbolUpgraded`) — broadcast when Tier 2 upgrades a symbol
+- [x] Persisted query graph (survives daemon restarts via WAL journal)
 
-### v0.2 — Persistence & incremental
+### v1.2 — In progress
 
-- [ ] Persisted query graph (survives daemon restarts)
-- [ ] Blast radius engine (reverse dep graph)
-- [ ] Merkle sync protocol
-- [ ] Delta acknowledgment (`DeltaAck`) — eliminate fire-and-forget drift
-- [ ] Daemon: Tier 2 incremental compiler (TypeScript, Rust, Dart)
-- [ ] Daemon: FlatBuffers + shared-memory IPC (mmap path)
+- [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
+- [ ] Shared-memory mmap path for zero-copy symbol reads (spec §7.1)
+- [ ] Merkle sync protocol — incremental repo-state reconciliation on daemon connect
+- [ ] `lip import --from-scip` upgrades to Tier 3 (score 100); Tier 2 upgrades to score 90 (currently uses 70)
+- [ ] `lip slice --pip` — Python dependency slices
 
-### v0.3 — Federation
+### v1.3 — Intelligence extensions
 
-- [ ] Registry protocol (gRPC + HTTP blob)
-- [ ] Reference registry server
-- [ ] Dependency slice builder (npm, cargo, pub, pip, go)
-- [ ] Team cache sharing (daemon ↔ registry sync)
-- [ ] CLI: `lip export --to-scip`, `lip push`, `lip pull`
-
-### v0.4 — Intelligence extensions
-
-- [ ] Blast radius query API
-- [ ] Code Property Graph edges (`GraphEdge`, `EdgeKind`) — Tier 2 populated
-- [ ] CPG query API (`lip.query.cpg`)
-- [ ] Taint tracking via CPG `DataFlows` traversal
-- [ ] Dead code detection
+- [ ] CPG query API (`lip.query.cpg`) — traversal over `GraphEdge` tables
+- [ ] Taint tracking via CPG `DataFlows` traversal (requires Tier 2 data-flow edges)
 - [ ] Runtime telemetry overlay (OpenTelemetry integration)
-- [ ] Annotation Overlay Layer (`AnnotationEntry`, `lip.annotation.*`)
-- [ ] Annotation sync to team cache
-- [ ] RFC process + public governance model
+- [ ] Annotation sync to team registry cache
 
-### v1.0 — Stable protocol
+### v2.0 — Multi-language ecosystem
 
-- [ ] Frozen schema (backward compat guaranteed)
-- [ ] TypeScript, Go, Python bindings
-- [ ] VS Code extension (LIP-native)
-- [ ] Neovim plugin
-- [ ] Language support: TypeScript, Rust, Dart, Go, Python, Java
+- [ ] TypeScript and Go bindings (generated from `lip.fbs`)
+- [ ] Frozen schema (backward compat guaranteed within major version)
+- [ ] VS Code extension (LIP-native, replaces LSP bridge for LIP-aware editors)
+- [ ] Language support: Go, Java, Kotlin, C#
 
 ---
 
