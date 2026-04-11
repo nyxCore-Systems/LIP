@@ -189,7 +189,8 @@ impl Session {
                 if matches!(action, Action::Upsert) {
                     let needs_tier2 = lang == "rust"       || uri.ends_with(".rs")
                         || lang == "typescript" || uri.ends_with(".ts") || uri.ends_with(".tsx")
-                        || lang == "python"     || uri.ends_with(".py");
+                        || lang == "python"     || uri.ends_with(".py")
+                        || lang == "dart"       || uri.ends_with(".dart");
                     if needs_tier2 {
                         if let (Some(tx), Some(source)) = (&self.tier2_tx, source_opt) {
                             let job = VerificationJob {

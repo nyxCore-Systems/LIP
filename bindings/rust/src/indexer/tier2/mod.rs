@@ -1,9 +1,10 @@
 //! Tier 2 compiler-backed indexer (spec §3.3, confidence 51–90).
 //!
-//! Ships three LSP backends:
+//! Ships four LSP backends:
 //! - [`rust_analyzer`]: `rust-analyzer` for Rust files
 //! - [`ts_server`]: `typescript-language-server` for TypeScript/TSX files
 //! - [`py_ls`]: `pyright-langserver` (or `pylsp` fallback) for Python files
+//! - [`dart_ls`]: `dart language-server` for Dart files
 //!
 //! # Integration
 //!
@@ -24,7 +25,9 @@ pub mod lsp_client;
 pub mod rust_analyzer;
 pub mod ts_server;
 pub mod py_ls;
+pub mod dart_ls;
 
 pub use rust_analyzer::VerificationResult;
 pub use ts_server::TypeScriptBackend;
 pub use py_ls::PythonBackend;
+pub use dart_ls::DartBackend;

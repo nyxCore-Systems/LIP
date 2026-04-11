@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
 use crate::indexer::tier2::ts_server::TypeScriptBackend;
 use crate::indexer::tier2::py_ls::PythonBackend;
+use crate::indexer::tier2::dart_ls::DartBackend;
 use crate::query_graph::{LipDatabase, ServerMessage};
 
 pub const CHANNEL_CAPACITY: usize = 64;
@@ -54,6 +55,9 @@ struct Tier2Backends {
 
     python:          Option<PythonBackend>,
     python_disabled: bool,
+
+    dart:          Option<DartBackend>,
+    dart_disabled: bool,
 }
 
 impl Tier2Backends {
@@ -66,6 +70,8 @@ impl Tier2Backends {
             typescript_disabled: false,
             python:              None,
             python_disabled:     false,
+            dart:                None,
+            dart_disabled:       false,
         }
     }
 }
@@ -111,6 +117,8 @@ impl Tier2Manager {
             self.handle_typescript(job).await;
         } else if job.uri.ends_with(".py") {
             self.handle_python(job).await;
+        } else if job.uri.ends_with(".dart") {
+            self.handle_dart(job).await;
         }
         // Unknown extension — nothing to do; Tier 1 results remain.
     }
@@ -246,6 +254,45 @@ impl Tier2Manager {
             Err(e) => {
                 error!("tier2: python verification failed for {}: {e}", job.uri);
                 self.backends.python = None;
+            }
+        }
+    }
+
+    // ── Dart ──────────────────────────────────────────────────────────────────
+
+    async fn ensure_dart_backend(&mut self) {
+        if self.backends.dart.is_some() || self.backends.dart_disabled { return; }
+
+        match DartBackend::new().await {
+            Ok(b) => {
+                info!("tier2: dart language-server backend ready");
+                self.backends.dart = Some(b);
+            }
+            Err(e) => {
+                warn!("tier2: dart language-server unavailable, disabling: {e}");
+                self.backends.dart_disabled = true;
+            }
+        }
+    }
+
+    async fn handle_dart(&mut self, job: VerificationJob) {
+        if self.backends.dart_disabled { return; }
+
+        self.ensure_dart_backend().await;
+        if self.backends.dart_disabled { return; }
+
+        let backend = self.backends.dart.as_mut().unwrap();
+        match backend.verify_file(&job.uri, &job.source, job.version).await {
+            Ok(result) => {
+                let upgraded = result.symbols.len();
+                let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
+                db.upgrade_file_symbols(&result.uri, &result.symbols);
+                debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
+            }
+            Err(e) => {
+                error!("tier2: dart verification failed for {}: {e}", job.uri);
+                self.backends.dart = None;
             }
         }
     }

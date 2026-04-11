@@ -54,6 +54,12 @@ pub enum QueryKind {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
+    /// Fuzzy-search symbol names and docs using trigrams.
+    Similar {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Execute multiple queries in one round-trip (reads JSON array from file or stdin).
     ///
     /// Each object in the JSON array must carry a `type` field matching a ClientMessage
@@ -107,6 +113,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         }
         QueryKind::DeadSymbols { limit } => {
             ClientMessage::QueryDeadSymbols { limit: Some(limit) }
+        }
+        QueryKind::Similar { query, limit } => {
+            ClientMessage::SimilarSymbols { query, limit }
         }
         QueryKind::Batch { .. } => unreachable!("handled above"),
     };
