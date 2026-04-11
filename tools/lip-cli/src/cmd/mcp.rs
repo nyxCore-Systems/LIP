@@ -207,7 +207,10 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                     let sym = if item.symbol_uri.is_empty() {
                         String::new()
                     } else {
-                        format!("  #{}", item.symbol_uri.split('#').next_back().unwrap_or(""))
+                        format!(
+                            "  #{}",
+                            item.symbol_uri.split('#').next_back().unwrap_or("")
+                        )
                     };
                     out.push_str(&format!("\n  {}{}", item.file_uri, sym));
                 }
