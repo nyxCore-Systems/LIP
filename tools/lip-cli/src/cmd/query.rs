@@ -60,6 +60,17 @@ pub enum QueryKind {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Merkle sync probe: report files whose content hash differs from the daemon's.
+    ///
+    /// Reads a JSON array of [uri, sha256_hex] pairs from a file or stdin.
+    /// Prints the URIs the client should re-send as Delta::Upsert.
+    ///
+    /// Example input:
+    ///   [["file:///src/main.rs", "abc123…"], ["file:///src/lib.rs", "def456…"]]
+    StaleFiles {
+        /// JSON file containing [[uri, sha256], …] pairs. Omit to read from stdin.
+        input: Option<PathBuf>,
+    },
     /// Execute multiple queries in one round-trip (reads JSON array from file or stdin).
     ///
     /// Each object in the JSON array must carry a `type` field matching a ClientMessage
@@ -76,6 +87,25 @@ pub enum QueryKind {
 }
 
 pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
+    // StaleFiles reads its input before opening the socket.
+    if let QueryKind::StaleFiles { ref input } = args.kind {
+        let raw = match input {
+            Some(path) => tokio::fs::read(path).await?,
+            None => {
+                use tokio::io::AsyncReadExt as _;
+                let mut buf = Vec::new();
+                tokio::io::stdin().read_to_end(&mut buf).await?;
+                buf
+            }
+        };
+        let files: Vec<(String, String)> = serde_json::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("input must be a JSON array of [uri, sha256] pairs: {e}"))?;
+        let msg = ClientMessage::QueryStaleFiles { files };
+        let resp = send_recv(&args.socket, msg).await?;
+        output::print_json(&resp)?;
+        return Ok(());
+    }
+
     // Batch reads its input before opening the socket, so handle it first.
     if let QueryKind::Batch { ref input } = args.kind {
         let raw = match input {
@@ -117,6 +147,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         QueryKind::Similar { query, limit } => {
             ClientMessage::SimilarSymbols { query, limit }
         }
+        QueryKind::StaleFiles { .. } => unreachable!("handled above"),
         QueryKind::Batch { .. } => unreachable!("handled above"),
     };
 

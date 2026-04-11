@@ -364,6 +364,13 @@ impl Session {
                 let symbols = db.similar_symbols(&query, limit);
                 ServerMessage::SimilarSymbolsResult { symbols }
             }
+
+            // ── Merkle sync ───────────────────────────────────────────────
+            ClientMessage::QueryStaleFiles { files } => {
+                let db = self.db.lock().await;
+                let stale_uris = db.stale_files(&files);
+                ServerMessage::StaleFilesResult { stale_uris }
+            }
         }
     }
 }
@@ -492,6 +499,11 @@ fn process_query_sync(
         ClientMessage::SimilarSymbols { query, limit } => {
             let symbols = db.similar_symbols(&query, limit);
             ok(ServerMessage::SimilarSymbolsResult { symbols })
+        }
+
+        ClientMessage::QueryStaleFiles { files } => {
+            let stale_uris = db.stale_files(&files);
+            ok(ServerMessage::StaleFilesResult { stale_uris })
         }
     }
 }

@@ -320,6 +320,21 @@ impl LipDatabase {
         self.file_inputs.keys().cloned().collect()
     }
 
+    /// Merkle sync probe: given a slice of `(uri, client_content_hash)` pairs,
+    /// returns URIs that are stale (daemon hash ≠ client hash) or unknown to
+    /// the daemon (never indexed). The client should re-Delta each returned URI.
+    pub fn stale_files(&self, entries: &[(String, String)]) -> Vec<String> {
+        entries.iter()
+            .filter(|(uri, client_hash)| {
+                match self.file_inputs.get(uri) {
+                    None     => true,   // daemon has never seen this file
+                    Some(fi) => sha256_hex(fi.text.as_bytes()) != *client_hash,
+                }
+            })
+            .map(|(uri, _)| uri.clone())
+            .collect()
+    }
+
     /// All definition symbol URIs with the given display name across all tracked files.
     ///
     /// Useful for workspace-wide "go to definition by name" without a full scan.
@@ -1308,5 +1323,60 @@ impl Greeter {
         db.remove_file(&uri);
         assert!(db.symbols_by_name("gone_fn").is_empty(),
             "name_to_symbols should be pruned on remove_file");
+    }
+
+    // ── Merkle sync ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn stale_files_unknown_uri_is_stale() {
+        let db = LipDatabase::new();
+        let stale = db.stale_files(&[
+            ("file:///src/unknown.rs".into(), "deadbeef".into()),
+        ]);
+        assert_eq!(stale, vec!["file:///src/unknown.rs"]);
+    }
+
+    #[test]
+    fn stale_files_matching_hash_is_clean() {
+        let mut db = LipDatabase::new();
+        let uri  = "file:///src/main.rs".to_owned();
+        let text = "fn main() {}".to_owned();
+        db.upsert_file(uri.clone(), text.clone(), "rust".to_owned());
+        let hash = sha256_hex(text.as_bytes());
+
+        let stale = db.stale_files(&[(uri.clone(), hash)]);
+        assert!(stale.is_empty(), "matching hash should not be stale");
+    }
+
+    #[test]
+    fn stale_files_wrong_hash_is_stale() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///src/main.rs".to_owned();
+        db.upsert_file(uri.clone(), "fn main() {}".to_owned(), "rust".to_owned());
+
+        let stale = db.stale_files(&[(uri.clone(), "wrong_hash".into())]);
+        assert_eq!(stale, vec![uri]);
+    }
+
+    #[test]
+    fn stale_files_mixed_returns_only_stale() {
+        let mut db = LipDatabase::new();
+
+        let clean_text = "fn clean() {}".to_owned();
+        let stale_text = "fn stale() {}".to_owned();
+
+        db.upsert_file("file:///src/clean.rs".into(), clean_text.clone(), "rust".into());
+        db.upsert_file("file:///src/stale.rs".into(), stale_text.clone(), "rust".into());
+
+        let clean_hash = sha256_hex(clean_text.as_bytes());
+        let stale = db.stale_files(&[
+            ("file:///src/clean.rs".into(), clean_hash),
+            ("file:///src/stale.rs".into(), "outdated_hash".into()),
+            ("file:///src/new.rs".into(),   "any_hash".into()),
+        ]);
+        assert_eq!(stale.len(), 2);
+        assert!(stale.contains(&"file:///src/stale.rs".to_owned()));
+        assert!(stale.contains(&"file:///src/new.rs".to_owned()));
+        assert!(!stale.contains(&"file:///src/clean.rs".to_owned()));
     }
 }

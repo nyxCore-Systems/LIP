@@ -151,6 +151,13 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             query: req_str(args, "query")?,
             limit: args["limit"].as_u64().map(|n| n as usize).unwrap_or(20),
         },
+        "lip_stale_files" => {
+            let files_val = args.get("files")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `files`"))?;
+            let files: Vec<(String, String)> = serde_json::from_value(files_val.clone())
+                .map_err(|e| anyhow::anyhow!("`files` must be an array of [uri, sha256] pairs: {e}"))?;
+            ClientMessage::QueryStaleFiles { files }
+        }
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -294,6 +301,12 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 ))
                 .collect::<Vec<_>>()
                 .join("\n")
+        }
+        ServerMessage::StaleFilesResult { stale_uris } => {
+            if stale_uris.is_empty() { return "All files are up to date.".into(); }
+            let mut out = format!("{} stale file(s) — re-send Delta::Upsert for each:\n", stale_uris.len());
+            for uri in stale_uris { out.push_str(&format!("  {uri}\n")); }
+            out
         }
         ServerMessage::SymbolUpgraded { uri, old_confidence, new_confidence } => {
             format!("upgraded {uri}: confidence {old_confidence} → {new_confidence}")
@@ -486,6 +499,32 @@ fn tools_manifest() -> Value {
                     "limit": { "type": "integer", "default": 20 }
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "lip_stale_files",
+            "description": "Merkle sync probe: given the client's per-file content hashes, \
+                            returns URIs that are stale (daemon hash differs) or unknown. \
+                            One round-trip on reconnect — the client then re-sends Delta::Upsert \
+                            only for the returned URIs rather than re-indexing everything.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "Array of [uri, sha256_hex] pairs",
+                        "items": {
+                            "type": "array",
+                            "prefixItems": [
+                                { "type": "string", "description": "File URI (file:///…)" },
+                                { "type": "string", "description": "SHA-256 hex of the file content" }
+                            ],
+                            "minItems": 2,
+                            "maxItems": 2
+                        }
+                    }
+                },
+                "required": ["files"]
             }
         },
         {

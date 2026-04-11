@@ -409,6 +409,28 @@ table ErrorMessage {
   message: string;
 }
 
+// ─── Merkle Sync ─────────────────────────────────────────────────────────────
+
+/// One entry in a QueryStaleFiles request: client's view of a single file.
+table FileHashEntry {
+  uri:          string;   // file:///absolute/path
+  content_hash: string;   // SHA-256 hex of the file's raw bytes (client-side)
+}
+
+/// Ask the daemon which files are stale or unknown.
+/// One round-trip on reconnect: the client sends all (uri, hash) pairs it
+/// knows about and the daemon returns the URIs that need re-Δ.
+table QueryStaleFiles {
+  files: [FileHashEntry];
+}
+
+/// Response to QueryStaleFiles.
+/// stale_uris — files where daemon hash ≠ client hash, or daemon has never
+/// indexed. Client should re-send Delta::Upsert for each.
+table StaleFilesResult {
+  stale_uris: [string];
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 //
 // The EventStream table is the root for streaming and batch contexts.

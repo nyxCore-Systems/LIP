@@ -152,6 +152,12 @@ pub enum ServerMessage {
     },
     /// Response to a [`ClientMessage::SimilarSymbols`] fuzzy search.
     SimilarSymbolsResult { symbols: Vec<SimilarSymbol> },
+    /// Response to [`ClientMessage::QueryStaleFiles`].
+    ///
+    /// `stale_uris` — files where the daemon's content hash differs from the
+    /// client's, or that the daemon has never indexed. The client should
+    /// re-send a `Delta::Upsert` for each URI in this list.
+    StaleFilesResult { stale_uris: Vec<String> },
     Error { message: String },
 }
 
@@ -214,6 +220,10 @@ pub enum ClientMessage {
     Batch { requests: Vec<ClientMessage> },
     /// Trigram fuzzy-search across all tracked symbol names and documentation.
     SimilarSymbols { query: String, limit: usize },
+    /// Merkle sync probe: given the client's per-file content hashes, returns the
+    /// URIs whose daemon-side hash differs or that the daemon has never seen.
+    /// One round-trip on reconnect tells the client exactly which files to re-Delta.
+    QueryStaleFiles { files: Vec<(String, String)> },
 }
 
 impl ClientMessage {
