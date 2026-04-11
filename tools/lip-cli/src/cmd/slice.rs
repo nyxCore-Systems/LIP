@@ -40,6 +40,12 @@ pub struct SliceArgs {
           num_args = 0..=1, default_missing_value = "pubspec.yaml")]
     pub pub_dart: Option<PathBuf>,
 
+    /// Build slices for all Python pip dependencies.
+    /// Uses `pip list --format=json` to enumerate packages and `pip show` to
+    /// locate their source directories. Requires `pip` in PATH.
+    #[arg(long)]
+    pub pip: bool,
+
     /// Directory to write slice files (default: ~/.cache/lip/slices).
     #[arg(long, default_value = "~/.cache/lip/slices")]
     pub output: PathBuf,
@@ -69,10 +75,14 @@ pub async fn run(args: SliceArgs) -> anyhow::Result<()> {
         total += slice_pub(manifest, &output, &args).await?;
     }
 
-    if args.cargo.is_none() && args.npm.is_none() && args.pub_dart.is_none() {
+    if args.pip {
+        total += slice_pip(&output, &args).await?;
+    }
+
+    if args.cargo.is_none() && args.npm.is_none() && args.pub_dart.is_none() && !args.pip {
         anyhow::bail!(
-            "specify at least one package manager: --cargo, --npm, or --pub\n\
-             Example: lip slice --cargo"
+            "specify at least one package manager: --cargo, --npm, --pub, or --pip\n\
+             Example: lip slice --pip"
         );
     }
 
@@ -276,6 +286,70 @@ fn parse_pubspec_lock(text: &str) -> Vec<(String, String)> {
     }
 
     results
+}
+
+// ── pip (Python) ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PipPackage {
+    name:    String,
+    version: String,
+}
+
+async fn slice_pip(output: &Path, args: &SliceArgs) -> anyhow::Result<usize> {
+    println!("Slicing pip dependencies …");
+
+    // Step 1: enumerate all installed packages.
+    let list_out = Command::new("pip")
+        .args(["list", "--format=json"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("pip not found in PATH: {e}\nInstall Python and pip first."))?;
+    anyhow::ensure!(list_out.status.success(),
+        "pip list failed: {}", String::from_utf8_lossy(&list_out.stderr));
+    let packages: Vec<PipPackage> = serde_json::from_slice(&list_out.stdout)
+        .map_err(|e| anyhow::anyhow!("could not parse `pip list` output: {e}"))?;
+
+    let mut count = 0usize;
+    for pkg in &packages {
+        // Step 2: locate the package source directory via `pip show`.
+        let show_out = Command::new("pip")
+            .args(["show", "--files", &pkg.name])
+            .output();
+        let show_out = match show_out {
+            Ok(o) if o.status.success() => o,
+            _ => continue,
+        };
+        let show_text = String::from_utf8_lossy(&show_out.stdout);
+
+        // Extract "Location: /path/to/site-packages"
+        let location = show_text.lines()
+            .find_map(|l| l.strip_prefix("Location: ").map(str::trim))
+            .map(PathBuf::from);
+        let Some(location) = location else { continue };
+
+        // The package's own directory within site-packages:
+        //   - normalised name (dashes→underscores, lowercase)
+        let norm = pkg.name.to_lowercase().replace('-', "_");
+        // Try both the normalised name and the original.
+        let pkg_dir = [norm.as_str(), pkg.name.as_str()]
+            .iter()
+            .map(|n| location.join(n))
+            .find(|p| p.is_dir());
+        let Some(pkg_dir) = pkg_dir else { continue };
+
+        let symbols = index_directory(&pkg_dir, &pkg.name, &pkg.version, "pip");
+        if symbols.is_empty() { continue; }
+
+        let slice = build_slice("pip", &pkg.name, &pkg.version, symbols);
+        let hash  = save_slice(&slice, output)?;
+        if args.push {
+            push_slice(&slice, &hash, &args.registry).await?;
+        }
+        println!("  {}@{}  ({} symbols)  {hash}", pkg.name, pkg.version, slice.symbols.len());
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 // ── Indexing ──────────────────────────────────────────────────────────────────

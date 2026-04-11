@@ -40,6 +40,17 @@ fn extract_name(uri: &str) -> &str {
     uri.rfind('#').map(|i| &uri[i + 1..]).unwrap_or("")
 }
 
+/// Returns `true` if the annotation entry has expired (past its `expires_ms` timestamp).
+/// An `expires_ms` of 0 means the entry is permanent and never expires.
+fn is_expired(entry: &crate::schema::OwnedAnnotationEntry) -> bool {
+    if entry.expires_ms == 0 { return false; }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(i64::MAX);
+    entry.expires_ms < now_ms
+}
+
 /// Jaccard similarity of 3-character windows (trigrams) between two strings.
 ///
 /// Both inputs are lowercased before comparison. Returns 1.0 for two empty
@@ -705,24 +716,41 @@ impl LipDatabase {
             .insert(entry.key.clone(), entry);
     }
 
-    /// Get the annotation for `(symbol_uri, key)`, if present.
+    /// Get the annotation for `(symbol_uri, key)`, if present and not expired.
     pub fn annotation_get(&self, symbol_uri: &str, key: &str) -> Option<&OwnedAnnotationEntry> {
-        self.annotations.get(symbol_uri)?.get(key)
+        let entry = self.annotations.get(symbol_uri)?.get(key)?;
+        if is_expired(entry) { None } else { Some(entry) }
     }
 
-    /// List all annotations for `symbol_uri`.
+    /// List all non-expired annotations for `symbol_uri`.
     pub fn annotation_list(&self, symbol_uri: &str) -> Vec<OwnedAnnotationEntry> {
         self.annotations
             .get(symbol_uri)
-            .map(|m| m.values().cloned().collect())
+            .map(|m| m.values().filter(|e| !is_expired(e)).cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Remove all annotations whose `expires_ms` has passed.
+    ///
+    /// Called periodically by the daemon (e.g. on journal compaction) to keep
+    /// the in-memory annotation table from growing unboundedly.
+    pub fn purge_expired_annotations(&mut self) -> usize {
+        let mut removed = 0usize;
+        for sym_map in self.annotations.values_mut() {
+            let before = sym_map.len();
+            sym_map.retain(|_, e| !is_expired(e));
+            removed += before - sym_map.len();
+        }
+        // Remove empty inner maps to avoid accumulating empty HashMaps.
+        self.annotations.retain(|_, m| !m.is_empty());
+        removed
     }
 
     /// All annotations across every symbol URI — used by journal compaction.
     pub fn all_annotations(&self) -> Vec<OwnedAnnotationEntry> {
         self.annotations
             .values()
-            .flat_map(|m| m.values().cloned())
+            .flat_map(|m| m.values().filter(|e| !is_expired(e)).cloned())
             .collect()
     }
 
@@ -1323,6 +1351,66 @@ impl Greeter {
         db.remove_file(&uri);
         assert!(db.symbols_by_name("gone_fn").is_empty(),
             "name_to_symbols should be pruned on remove_file");
+    }
+
+    // ── Annotation expiry ─────────────────────────────────────────────────────
+
+    fn make_annotation(sym: &str, key: &str, expires_ms: i64) -> crate::schema::OwnedAnnotationEntry {
+        crate::schema::OwnedAnnotationEntry {
+            symbol_uri:   sym.to_owned(),
+            key:          key.to_owned(),
+            value:        "v".to_owned(),
+            author_id:    "test".to_owned(),
+            confidence:   100,
+            timestamp_ms: 0,
+            expires_ms,
+        }
+    }
+
+    #[test]
+    fn annotation_zero_expires_never_expires() {
+        let mut db = LipDatabase::new();
+        db.annotation_set(make_annotation("lip://s#f", "k", 0));
+        assert!(db.annotation_get("lip://s#f", "k").is_some());
+    }
+
+    #[test]
+    fn annotation_future_expires_is_visible() {
+        let mut db = LipDatabase::new();
+        let far_future = i64::MAX;
+        db.annotation_set(make_annotation("lip://s#f", "k", far_future));
+        assert!(db.annotation_get("lip://s#f", "k").is_some());
+    }
+
+    #[test]
+    fn annotation_past_expires_is_hidden() {
+        let mut db = LipDatabase::new();
+        // expires_ms = 1 (1 ms past the Unix epoch) — definitely expired
+        db.annotation_set(make_annotation("lip://s#f", "k", 1));
+        assert!(db.annotation_get("lip://s#f", "k").is_none(),
+            "expired annotation should not be returned by get");
+        assert!(db.annotation_list("lip://s#f").is_empty(),
+            "expired annotation should not be returned by list");
+    }
+
+    #[test]
+    fn purge_expired_removes_only_expired() {
+        let mut db = LipDatabase::new();
+        db.annotation_set(make_annotation("lip://s#f", "live",    0));
+        db.annotation_set(make_annotation("lip://s#f", "expired", 1));
+        let removed = db.purge_expired_annotations();
+        assert_eq!(removed, 1);
+        assert!(db.annotation_get("lip://s#f", "live").is_some());
+        assert!(db.annotation_get("lip://s#f", "expired").is_none());
+    }
+
+    #[test]
+    fn purge_removes_empty_symbol_maps() {
+        let mut db = LipDatabase::new();
+        db.annotation_set(make_annotation("lip://s#f", "k", 1));
+        db.purge_expired_annotations();
+        // The inner HashMap for "lip://s#f" should be gone, not just empty.
+        assert!(!db.annotations.contains_key("lip://s#f"));
     }
 
     // ── Merkle sync ───────────────────────────────────────────────────────────
