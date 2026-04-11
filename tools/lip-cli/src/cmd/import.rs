@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use clap::Args;
 use prost::Message;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
+use lip::query_graph::{ClientMessage, ServerMessage};
 use lip::schema::{
     sha256_hex, Action, OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence, OwnedRange,
     OwnedSymbolInfo, Role, SymbolKind,
@@ -17,15 +20,30 @@ mod scip {
 }
 
 /// Import a SCIP `.scip` index file and emit a LIP EventStream.
+///
+/// With `--push-to-daemon`, each document delta is streamed directly to a running
+/// LIP daemon — enabling nightly CI to push compiler-accurate symbols into the
+/// live graph without a daemon restart.
 #[derive(Args)]
 pub struct ImportArgs {
     /// Path to the `.scip` file to import.
     #[arg(long = "from-scip")]
     pub scip_file: PathBuf,
 
-    /// Write the resulting EventStream JSON to this file (default: stdout).
+    /// Write the resulting EventStream JSON to this file (default: stdout when
+    /// not using --push-to-daemon).
     #[arg(long)]
     pub output: Option<PathBuf>,
+
+    /// Push deltas directly to a running LIP daemon via its Unix socket.
+    /// When set, each document in the SCIP index is streamed as a `Delta` message.
+    #[arg(long)]
+    pub push_to_daemon: Option<PathBuf>,
+
+    /// Confidence score to assign to imported symbols (1–100).
+    /// Default: 90 (compiler-verified, not locally re-checked).
+    #[arg(long, default_value_t = 90)]
+    pub confidence: u8,
 }
 
 pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
@@ -43,14 +61,19 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         args.scip_file.display()
     );
 
-    let mut deltas: Vec<OwnedDelta> = index.documents.into_iter().map(convert_document).collect();
+    let confidence = args.confidence;
+    let mut deltas: Vec<OwnedDelta> = index
+        .documents
+        .into_iter()
+        .map(|d| convert_document(d, confidence))
+        .collect();
 
     // Also import external symbols as a synthetic document.
     if !index.external_symbols.is_empty() {
         let symbols: Vec<OwnedSymbolInfo> = index
             .external_symbols
             .into_iter()
-            .map(|sym| convert_symbol_info(&sym))
+            .map(|sym| convert_symbol_info(&sym, confidence))
             .collect();
 
         let doc = OwnedDocument {
@@ -72,6 +95,41 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         });
     }
 
+    // ── CI batch push: stream deltas directly to a running daemon ──────────────
+    if let Some(socket_path) = args.push_to_daemon {
+        let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "cannot connect to daemon at {}: {e}",
+                socket_path.display()
+            )
+        })?;
+        let total = deltas.len();
+        for (seq, delta) in deltas.into_iter().enumerate() {
+            let Some(doc) = delta.document else { continue };
+            let msg = ClientMessage::Delta {
+                seq: seq as u64,
+                action: delta.action,
+                document: doc,
+            };
+            let body = serde_json::to_vec(&msg)?;
+            stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+            stream.write_all(&body).await?;
+
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await?;
+            let resp_len = u32::from_be_bytes(len_buf) as usize;
+            let mut resp_bytes = vec![0u8; resp_len];
+            stream.read_exact(&mut resp_bytes).await?;
+            let resp: ServerMessage = serde_json::from_slice(&resp_bytes)?;
+            if let ServerMessage::DeltaAck { accepted: false, error, .. } = &resp {
+                anyhow::bail!("daemon rejected delta {seq}: {}", error.as_deref().unwrap_or("?"));
+            }
+        }
+        eprintln!("pushed {total} deltas to daemon at {}", socket_path.display());
+        return Ok(());
+    }
+
+    // ── Default: emit EventStream JSON ────────────────────────────────────────
     let stream = OwnedEventStream::new(
         concat!("lip-cli/", env!("CARGO_PKG_VERSION"), " import-scip"),
         deltas,
@@ -90,11 +148,15 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
 
 // ─── Conversion helpers ───────────────────────────────────────────────────────
 
-fn convert_document(doc: scip::Document) -> OwnedDelta {
+fn convert_document(doc: scip::Document, confidence: u8) -> OwnedDelta {
     let uri = format!("file:///{}", doc.relative_path.trim_start_matches('/'));
     let content_hash = sha256_hex(doc.relative_path.as_bytes());
 
-    let symbols: Vec<OwnedSymbolInfo> = doc.symbols.iter().map(convert_symbol_info).collect();
+    let symbols: Vec<OwnedSymbolInfo> = doc
+        .symbols
+        .iter()
+        .map(|s| convert_symbol_info(s, confidence))
+        .collect();
 
     let occurrences: Vec<OwnedOccurrence> = doc
         .occurrences
@@ -124,7 +186,7 @@ fn convert_document(doc: scip::Document) -> OwnedDelta {
     }
 }
 
-fn convert_symbol_info(sym: &scip::SymbolInformation) -> OwnedSymbolInfo {
+fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSymbolInfo {
     let display = if sym.display_name.is_empty() {
         // Fall back to the last descriptor segment of the symbol string.
         sym.symbol
@@ -139,19 +201,21 @@ fn convert_symbol_info(sym: &scip::SymbolInformation) -> OwnedSymbolInfo {
     let kind = scip_kind_to_lip(sym.kind);
     let doc = sym.documentation.join("\n\n");
 
+    // SCIP private symbols begin with "local "; everything else is exported.
+    let is_exported = !sym.symbol.starts_with("local ");
     OwnedSymbolInfo {
         uri: scip_symbol_to_lip_uri(&sym.symbol),
         display_name: display,
         kind,
         documentation: if doc.is_empty() { None } else { Some(doc) },
         signature: None,
-        // Imported from SCIP → Tier 2 confidence (spec §10.2)
-        confidence_score: 90,
+        confidence_score: confidence,
         relationships: vec![],
         runtime_p99_ms: None,
         call_rate_per_s: None,
         taint_labels: vec![],
         blast_radius: 0,
+        is_exported,
     }
 }
 

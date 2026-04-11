@@ -222,6 +222,8 @@ impl DartBackend {
             let path = uri.strip_prefix("file://").unwrap_or(uri);
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
+            // Dart convention: names starting with _ are library-private.
+            let is_exported = !sym.name.starts_with('_');
             symbols.push(OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
@@ -234,6 +236,7 @@ impl DartBackend {
                 call_rate_per_s: None,
                 taint_labels: vec![],
                 blast_radius: 0,
+                is_exported,
             });
         }
 

@@ -125,11 +125,19 @@ impl<'a> SymbolExtractor<'a> {
         if let Some(name_node) = node.child_by_field_name(name_field) {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
+                // `pub` keyword is a `visibility_modifier` child; check node text as a
+                // fast heuristic. Covers `pub fn`, `pub struct`, `pub(crate)` etc.
+                let is_exported = (0..node.child_count()).any(|i| {
+                    node.child(i)
+                        .map(|c| c.kind() == "visibility_modifier")
+                        .unwrap_or(false)
+                });
                 out.push(OwnedSymbolInfo {
                     uri: self.lip_uri(name),
                     display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
+                    is_exported,
                     ..OwnedSymbolInfo::new("", "")
                 });
             }
@@ -211,11 +219,18 @@ impl<'a> SymbolExtractor<'a> {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = self.node_text(&name_node);
                     if !name.is_empty() {
+                        // Exported if the containing lexical_declaration's parent is export_statement.
+                        let is_exported = node
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .map(|gp| gp.kind() == "export_statement")
+                            .unwrap_or(false);
                         out.push(OwnedSymbolInfo {
                             uri: self.lip_uri(name),
                             display_name: name.to_owned(),
                             kind: SymbolKind::Variable,
                             confidence_score: 25,
+                            is_exported,
                             ..OwnedSymbolInfo::new("", "")
                         });
                     }
@@ -235,11 +250,17 @@ impl<'a> SymbolExtractor<'a> {
         if let Some(name_node) = node.child_by_field_name(name_field) {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
+                // Exported if the declaration's parent is an export_statement.
+                let is_exported = node
+                    .parent()
+                    .map(|p| p.kind() == "export_statement")
+                    .unwrap_or(false);
                 out.push(OwnedSymbolInfo {
                     uri: self.lip_uri(name),
                     display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
+                    is_exported,
                     ..OwnedSymbolInfo::new("", "")
                 });
             }
@@ -320,11 +341,14 @@ impl<'a> SymbolExtractor<'a> {
         if let Some(name_node) = node.child_by_field_name(name_field) {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
+                // Python convention: names starting with _ are private.
+                let is_exported = !name.starts_with('_');
                 out.push(OwnedSymbolInfo {
                     uri: self.lip_uri(name),
                     display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
+                    is_exported,
                     ..OwnedSymbolInfo::new("", "")
                 });
             }
@@ -395,11 +419,14 @@ impl<'a> SymbolExtractor<'a> {
         if let Some(name_node) = node.child_by_field_name(name_field) {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
+                // Dart library-private convention: names starting with _ are private.
+                let is_exported = !name.starts_with('_');
                 out.push(OwnedSymbolInfo {
                     uri: self.lip_uri(name),
                     display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
+                    is_exported,
                     ..OwnedSymbolInfo::new("", "")
                 });
             }

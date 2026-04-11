@@ -175,6 +175,10 @@ pub struct OwnedSymbolInfo {
     pub call_rate_per_s: Option<f32>,
     pub taint_labels: Vec<String>,
     pub blast_radius: u32,
+    /// True when the symbol is part of the public/exported API surface.
+    /// Set by the Tier 1 extractor using language-specific visibility rules;
+    /// used by `file_api_surface()` for stable ABI hash computation.
+    pub is_exported: bool,
 }
 
 impl PartialEq for OwnedSymbolInfo {
@@ -188,6 +192,7 @@ impl PartialEq for OwnedSymbolInfo {
             && self.relationships == other.relationships
             && self.taint_labels == other.taint_labels
             && self.blast_radius == other.blast_radius
+            && self.is_exported == other.is_exported
         // runtime_p99_ms / call_rate_per_s intentionally omitted
     }
 }
@@ -215,6 +220,7 @@ impl OwnedSymbolInfo {
             call_rate_per_s: None,
             taint_labels: vec![],
             blast_radius: 0,
+            is_exported: false,
         }
     }
 }

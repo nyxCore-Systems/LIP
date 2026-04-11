@@ -1,5 +1,10 @@
 # LIP — Linked Incremental Protocol
 
+[![Website](https://img.shields.io/badge/website-lip.dev-8b5cf6?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyek0xMSA3djZsNS4yNSAzLjE1LS44NSAxLjQyTDEwIDE0VjdoMXoiLz48L3N2Zz4=)](https://lip.dev)
+[![Crates.io](https://img.shields.io/crates/v/lip-cli?style=flat-square&color=8b5cf6)](https://crates.io/crates/lip-cli)
+[![License: MIT](https://img.shields.io/badge/license-MIT-06b6d4?style=flat-square)](LICENSE)
+[![Rust 1.78+](https://img.shields.io/badge/rust-1.78+-06b6d4?style=flat-square&logo=rust)](https://www.rust-lang.org)
+
 LIP is a persistent, incremental code intelligence daemon. It keeps a live, queryable graph of your entire repository and updates only the **blast radius** of each change — the files and symbols actually affected.
 
 ---

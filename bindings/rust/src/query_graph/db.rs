@@ -18,7 +18,7 @@ use crate::query_graph::types::{
 use crate::schema::EdgeKind;
 use crate::schema::{
     sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedOccurrence, OwnedRange,
-    OwnedSymbolInfo, Role, SymbolKind,
+    OwnedSymbolInfo, Role,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -153,6 +153,10 @@ pub struct LipDatabase {
     mounted_symbols: HashMap<String, OwnedSymbolInfo>,
     /// Tracks which package keys (e.g. "cargo/serde@1.0.0") have been mounted.
     mounted_packages: HashMap<String, (String, String, String)>,
+    /// Kotlin-IC model: file_uri → set of external display-names referenced by that file.
+    /// Enables precise re-verification when a symbol is renamed or deleted — only files
+    /// whose `file_consumed_names` set contains the changed name need re-checking.
+    file_consumed_names: HashMap<String, HashSet<String>>,
 }
 
 impl LipDatabase {
@@ -173,6 +177,7 @@ impl LipDatabase {
             callee_name_to_callers: HashMap::new(),
             mounted_symbols: HashMap::new(),
             mounted_packages: HashMap::new(),
+            file_consumed_names: HashMap::new(),
         }
     }
 
@@ -258,6 +263,32 @@ impl LipDatabase {
             }
             self.file_call_edges.insert(uri.clone(), pairs);
         }
+
+        // Rebuild Kotlin-IC consumed-names index: Reference occurrences whose
+        // symbol is defined in a different file (or unresolved) are "external names".
+        {
+            let cached_occs = self
+                .occ_cache
+                .get(&uri)
+                .map(|c| c.value.clone())
+                .unwrap_or_default();
+            let mut consumed: HashSet<String> = HashSet::new();
+            for occ in cached_occs.iter().filter(|o| o.role == Role::Reference) {
+                let name = extract_name(&occ.symbol_uri);
+                if name.is_empty() {
+                    continue;
+                }
+                let is_external = self
+                    .def_index
+                    .get(&occ.symbol_uri)
+                    .map(|(def_file, _)| def_file != &uri)
+                    .unwrap_or(true); // unresolved → treat as external
+                if is_external {
+                    consumed.insert(name.to_owned());
+                }
+            }
+            self.file_consumed_names.insert(uri.clone(), consumed);
+        }
     }
 
     pub fn remove_file(&mut self, uri: &str) {
@@ -284,6 +315,7 @@ impl LipDatabase {
         }
         self.def_index.retain(|_, (furi, _)| furi.as_str() != uri);
         self.remove_file_call_edges(uri);
+        self.file_consumed_names.remove(uri);
     }
 
     fn remove_file_call_edges(&mut self, uri: &str) {
@@ -473,10 +505,7 @@ impl LipDatabase {
         let symbols = self.file_symbols(uri);
         let public: Vec<OwnedSymbolInfo> = symbols
             .iter()
-            .filter(|s| {
-                !s.display_name.starts_with('_')
-                    && !matches!(s.kind, SymbolKind::Parameter | SymbolKind::Variable)
-            })
+            .filter(|s| s.is_exported)
             .cloned()
             .collect();
 
@@ -639,71 +668,101 @@ impl LipDatabase {
 
         // ── Phase 3: merge ────────────────────────────────────────────────
         //
-        // For each caller symbol from the CPG pass, resolve its defining file
-        // and merge into `file_distance` taking the minimum distance.
-        // Also collect `(file_uri, symbol_uri, distance)` for `ImpactItem`s.
+        // For each caller symbol from the CPG pass, resolve its defining file,
+        // merge into `file_distance`, and collect one entry per distinct
+        // (caller_sym, file) pair — giving function-level granularity.
         //
-        // sym_impacts: file_uri → (caller_sym_uri, distance)
-        // We keep one representative symbol per file (the closest caller).
-        let mut sym_impacts: HashMap<String, (String, u32)> = HashMap::new();
+        // sym_items: Vec<(caller_sym_uri, file_uri, distance)>
+        // Multiple caller symbols in the same file each produce their own entry.
+        let mut sym_items: Vec<(String, String, u32)> = Vec::new();
         for (caller_sym, &sym_dist) in &cpg_distance {
             if caller_sym == symbol_uri {
-                continue;
-            } // skip the target itself
+                continue; // skip the target itself
+            }
             if let Some((file_uri, _)) = self.def_index.get(caller_sym) {
                 let prev_dist = file_distance.get(file_uri).copied().unwrap_or(u32::MAX);
-                let best = sym_dist.min(prev_dist);
-                file_distance.insert(file_uri.clone(), best);
-                sym_impacts
-                    .entry(file_uri.clone())
-                    .and_modify(|(_, d)| {
-                        if sym_dist < *d {
-                            *d = sym_dist;
-                        }
-                    })
-                    .or_insert_with(|| (caller_sym.clone(), sym_dist));
+                file_distance.insert(file_uri.clone(), sym_dist.min(prev_dist));
+                sym_items.push((caller_sym.clone(), file_uri.clone(), sym_dist));
             }
         }
 
         // ── Phase 4: build result ─────────────────────────────────────────
         let mut direct_items: Vec<ImpactItem> = vec![];
         let mut transitive_items: Vec<ImpactItem> = vec![];
-        let mut affected_files: Vec<String> = vec![];
+        let mut affected_files_set: HashSet<String> = HashSet::new();
 
+        // Per-symbol items from CPG — one ImpactItem per (file, symbol) pair.
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (sym, file, dist) in &sym_items {
+            if dist == &0 {
+                continue; // the symbol's own file is not an "affected" file
+            }
+            if seen.insert((file.clone(), sym.clone())) {
+                let item = ImpactItem {
+                    file_uri: file.clone(),
+                    symbol_uri: sym.clone(),
+                    distance: *dist,
+                    confidence: ImpactItem::confidence_at(*dist),
+                };
+                affected_files_set.insert(file.clone());
+                if *dist == 1 {
+                    direct_items.push(item);
+                } else {
+                    transitive_items.push(item);
+                }
+            }
+        }
+
+        // File-level items for files reachable only via reverse-deps (no CPG symbol matched).
         for (file_uri, &distance) in &file_distance {
             if distance == 0 {
-                continue;
-            } // the symbol's own file is not an "affected" file
-            let (sym_uri, sym_dist) = sym_impacts
-                .get(file_uri)
-                .map(|(s, d)| (s.as_str(), *d))
-                .unwrap_or(("", distance));
-            let effective_dist = distance.min(sym_dist);
+                continue; // the symbol's own file is not "affected"
+            }
+            if sym_items.iter().any(|(_, f, _)| f == file_uri) {
+                continue; // already covered by CPG pass above
+            }
             let item = ImpactItem {
                 file_uri: file_uri.clone(),
-                symbol_uri: sym_uri.to_owned(),
-                distance: effective_dist,
-                confidence: ImpactItem::confidence_at(effective_dist),
+                symbol_uri: String::new(),
+                distance,
+                confidence: ImpactItem::confidence_at(distance),
             };
-            affected_files.push(file_uri.clone());
-            if effective_dist == 1 {
+            affected_files_set.insert(file_uri.clone());
+            if distance == 1 {
                 direct_items.push(item);
             } else {
                 transitive_items.push(item);
             }
         }
 
+        let mut affected_files: Vec<String> = affected_files_set.into_iter().collect();
+
         // Sort for deterministic output.
-        direct_items.sort_by(|a, b| a.file_uri.cmp(&b.file_uri));
+        direct_items.sort_by(|a, b| {
+            a.file_uri
+                .cmp(&b.file_uri)
+                .then(a.symbol_uri.cmp(&b.symbol_uri))
+        });
         transitive_items.sort_by(|a, b| {
             a.distance
                 .cmp(&b.distance)
                 .then(a.file_uri.cmp(&b.file_uri))
+                .then(a.symbol_uri.cmp(&b.symbol_uri))
         });
         affected_files.sort();
 
-        let direct_count = direct_items.len() as u32;
-        let transitive_count = (direct_items.len() + transitive_items.len()) as u32;
+        // direct/transitive counts are unique files, not items.
+        let direct_count = direct_items
+            .iter()
+            .map(|i| &i.file_uri)
+            .collect::<HashSet<_>>()
+            .len() as u32;
+        let transitive_count = direct_items
+            .iter()
+            .chain(transitive_items.iter())
+            .map(|i| &i.file_uri)
+            .collect::<HashSet<_>>()
+            .len() as u32;
 
         // Risk: Low ≤3 direct / ≤5 total · Medium ≤10 direct / ≤20 total · High otherwise
         let risk_level = if direct_count > 10 || transitive_count > 20 {
@@ -741,6 +800,19 @@ impl LipDatabase {
     /// O(1) via the definition reverse index maintained in `upsert_file`.
     pub fn symbol_definition_location(&self, symbol_uri: &str) -> Option<(String, OwnedRange)> {
         self.def_index.get(symbol_uri).cloned()
+    }
+
+    /// Files that reference any of the given display-name strings (Kotlin IC model).
+    ///
+    /// Use this after a rename or delete: pass the old symbol name(s) to find every
+    /// file that consumed them and needs re-verification.
+    pub fn files_consuming_names(&self, names: &[&str]) -> Vec<String> {
+        let name_set: HashSet<&str> = names.iter().copied().collect();
+        self.file_consumed_names
+            .iter()
+            .filter(|(_, consumed)| consumed.iter().any(|n| name_set.contains(n.as_str())))
+            .map(|(f, _)| f.clone())
+            .collect()
     }
 
     /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files and mounted slices.
@@ -1055,6 +1127,7 @@ impl Default for LipDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::SymbolKind;
 
     fn make_rust_file(content: &str) -> (String, String, String) {
         (
@@ -1829,6 +1902,7 @@ impl Greeter {
                     call_rate_per_s: None,
                     taint_labels: vec![],
                     blast_radius: 0,
+                    is_exported: true,
                 })
                 .collect(),
             slice_url: String::new(),
@@ -1977,5 +2051,154 @@ impl Greeter {
             .filter(|s| s.uri.contains("anyhow"))
             .collect();
         assert_eq!(anyhow_syms.len(), 1, "re-mount should replace, not append");
+    }
+
+    // ── WS1: is_exported / ABI surface fingerprinting ─────────────────────────
+
+    #[test]
+    fn api_surface_includes_only_exported_symbols() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/lib.rs".to_owned();
+        // pub fn is exported; private fn is not.
+        db.upsert_file(
+            uri.clone(),
+            "pub fn public_fn() {} fn private_fn() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        let surface = db.file_api_surface(&uri);
+        assert!(
+            surface.symbols.iter().any(|s| s.display_name == "public_fn"),
+            "public_fn must appear in API surface"
+        );
+        assert!(
+            !surface.symbols.iter().any(|s| s.display_name == "private_fn"),
+            "private_fn must not appear in API surface"
+        );
+    }
+
+    #[test]
+    fn api_surface_hash_stable_when_private_changes() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/lib.rs".to_owned();
+        db.upsert_file(
+            uri.clone(),
+            "pub fn api() {} fn internal() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        let hash1 = db.file_api_surface(&uri).content_hash.clone();
+
+        // Change only the private function body — API surface must be unchanged.
+        db.upsert_file(
+            uri.clone(),
+            "pub fn api() {} fn internal() { let _x = 1; }".to_owned(),
+            "rust".to_owned(),
+        );
+        let hash2 = db.file_api_surface(&uri).content_hash.clone();
+        assert_eq!(hash1, hash2, "private-only change must not alter API hash");
+    }
+
+    // ── WS2: function-level blast radius ──────────────────────────────────────
+
+    #[test]
+    fn blast_radius_emits_multiple_items_per_file() {
+        let mut db = LipDatabase::new();
+        let lib_uri = "file:///project/lib.rs".to_owned();
+        let caller_uri = "file:///project/caller.rs".to_owned();
+
+        // lib.rs defines `target`; caller.rs has two functions that both call it.
+        db.upsert_file(
+            lib_uri.clone(),
+            "pub fn target() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            caller_uri.clone(),
+            "pub fn caller_a() { target(); } pub fn caller_b() { target(); }".to_owned(),
+            "rust".to_owned(),
+        );
+
+        let target_sym = db
+            .file_symbols(&lib_uri)
+            .iter()
+            .find(|s| s.display_name == "target")
+            .map(|s| s.uri.clone())
+            .expect("target symbol not found");
+
+        let result = db.blast_radius_for(&target_sym);
+        assert!(
+            result.affected_files.contains(&caller_uri),
+            "caller.rs must be in blast radius"
+        );
+        // Function-level: both caller_a and caller_b should appear as separate items.
+        let items_for_caller: Vec<_> = result
+            .direct_items
+            .iter()
+            .chain(result.transitive_items.iter())
+            .filter(|i| i.file_uri == caller_uri)
+            .collect();
+        assert!(
+            items_for_caller.len() >= 2,
+            "both caller_a and caller_b should produce separate ImpactItems; got {:?}",
+            items_for_caller
+        );
+    }
+
+    // ── WS3: name consumption index ───────────────────────────────────────────
+
+    #[test]
+    fn files_consuming_names_finds_referencing_file() {
+        let mut db = LipDatabase::new();
+        let def_uri = "file:///project/lib.rs".to_owned();
+        let ref_uri = "file:///project/main.rs".to_owned();
+
+        // lib.rs defines `my_fn`; main.rs references it.
+        db.upsert_file(
+            def_uri.clone(),
+            "pub fn my_fn() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            ref_uri.clone(),
+            "fn caller() { my_fn(); }".to_owned(),
+            "rust".to_owned(),
+        );
+
+        let consumers = db.files_consuming_names(&["my_fn"]);
+        assert!(
+            consumers.contains(&ref_uri),
+            "main.rs references my_fn so should appear in consumers; got {:?}",
+            consumers
+        );
+        assert!(
+            !consumers.contains(&def_uri),
+            "lib.rs defines my_fn (not an external reference); got {:?}",
+            consumers
+        );
+    }
+
+    #[test]
+    fn files_consuming_names_cleared_on_remove() {
+        let mut db = LipDatabase::new();
+        let def_uri = "file:///project/lib.rs".to_owned();
+        let ref_uri = "file:///project/main.rs".to_owned();
+
+        db.upsert_file(
+            def_uri.clone(),
+            "pub fn my_fn() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            ref_uri.clone(),
+            "fn caller() { my_fn(); }".to_owned(),
+            "rust".to_owned(),
+        );
+
+        db.remove_file(&ref_uri);
+        let consumers = db.files_consuming_names(&["my_fn"]);
+        assert!(
+            !consumers.contains(&ref_uri),
+            "removed file must not appear in consumers; got {:?}",
+            consumers
+        );
     }
 }

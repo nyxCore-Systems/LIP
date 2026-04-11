@@ -226,6 +226,8 @@ impl TypeScriptBackend {
             let path = uri.strip_prefix("file://").unwrap_or(uri);
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
+            // Infer visibility from hover signature: TS exported items start with "export".
+            let is_exported = sig.as_deref().map(|s| s.starts_with("export")).unwrap_or(false);
             symbols.push(OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
@@ -238,6 +240,7 @@ impl TypeScriptBackend {
                 call_rate_per_s: None,
                 taint_labels: vec![],
                 blast_radius: 0,
+                is_exported,
             });
         }
 
