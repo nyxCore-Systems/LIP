@@ -79,7 +79,7 @@ Symbols carry key/value annotations (`lip:fragile`, `team:owner`, `agent:note`, 
 | 2 | 51–90 | Compiler / analyzer | 200–500 ms | After file save, blast radius only |
 | 3 | 100 | Federated registry slice | Instant (cached) | On startup for external deps |
 
-Tier 2 is implemented for **Rust**, **TypeScript**, and **Python**. Dart Tier 2 is planned. If a language server binary is not in PATH, LIP degrades gracefully to Tier 1 for that language.
+Tier 2 is implemented for **Rust**, **TypeScript**, **Python**, and **Dart**. If a language server binary is not in PATH, LIP degrades gracefully to Tier 1 for that language.
 
 ---
 
@@ -165,7 +165,7 @@ See [docs/user/mcp-integration.md](docs/user/mcp-integration.md) for full tool r
 | Rust | ✓ Functions, structs, enums, traits, impls, consts | ✓ rust-analyzer |
 | TypeScript | ✓ Functions, classes, interfaces, type aliases | ✓ typescript-language-server |
 | Python | ✓ Functions, classes, async functions | ✓ pyright-langserver (pylsp fallback) |
-| Dart | ✓ Functions, classes, methods, constructors | Planned |
+| Dart | ✓ Functions, classes, methods, constructors | ✓ dart language-server |
 
 ---
 
@@ -287,7 +287,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.0 — reference implementation in production use. Wire format is JSON; FlatBuffers IPC is planned for v1.1.
+v1.1 — Dart Tier 2 backend, `lip query similar`, trigram fuzzy search. Wire format is JSON; FlatBuffers IPC is planned for v1.2.
 
 ---
 

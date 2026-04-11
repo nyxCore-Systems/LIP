@@ -65,7 +65,7 @@ The daemon applies updates in two stages:
 
 **Tier 2 (background):** If a Tier 2 analyzer (e.g. `rust-analyzer`) is configured, the daemon queues a verification job for the blast radius of the change. When complete, Tier 1 symbols are silently upgraded to Tier 2 confidence (score 51–90).
 
-Tier 2 is currently wired for Rust via `rust-analyzer`. TypeScript, Python, and Dart Tier 2 is planned.
+Tier 2 is wired for Rust (`rust-analyzer`), TypeScript (`typescript-language-server`), Python (`pyright-langserver` / `pylsp`), and Dart (`dart language-server`). All four backends are lazy-initialized and degrade gracefully if the binary is not in PATH.
 
 ---
 

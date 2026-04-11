@@ -82,7 +82,7 @@ LIP (Linked Incremental Protocol) is a persistent daemon that keeps a live query
 
 **The gap in plain terms:** LIP Tier 1 uses tree-sitter, which is a syntax parser — it knows that `fn verifyToken` exists and that some code nearby calls something named `verifyToken`, but it cannot prove they're the same symbol when they live in different files without help from the name index. SCIP runs the compiler, which resolves that unambiguously.
 
-LIP Tier 2 closes this gap for Rust (rust-analyzer), TypeScript (typescript-language-server), and Python (pyright-langserver / pylsp). All three backends are lazy-initialized on first use and degrade gracefully if the binary is not in PATH. Dart Tier 2 is planned.
+LIP Tier 2 closes this gap for Rust (rust-analyzer), TypeScript (typescript-language-server), Python (pyright-langserver / pylsp), and Dart (dart language-server). All four backends are lazy-initialized on first use and degrade gracefully if the binary is not in PATH.
 
 ---
 
@@ -137,9 +137,8 @@ Each tool does what it's best at. Nothing is replaced.
 
 ## Remaining gap versus SCIP
 
-Tier 2 is now implemented for Rust, TypeScript, and Python. The remaining gaps are:
+Tier 2 is now implemented for Rust, TypeScript, Python, and Dart. The remaining gaps are:
 
-- **Dart Tier 2** — planned, no backend yet
 - **Data-flow / taint analysis** — requires full CPG; not in scope for LIP's architecture
 - **Cross-compilation-unit reference precision at Tier 1** — Tier 1 uses name-based heuristics for cross-file calls; Tier 2 resolves these precisely, but Tier 2 only runs on the blast radius of each change, not on demand for arbitrary queries
 
