@@ -23,21 +23,16 @@ pub enum AnnotateKind {
     /// Set or overwrite an annotation on a symbol.
     Set {
         symbol_uri: String,
-        key:        String,
-        value:      String,
+        key: String,
+        value: String,
         /// Identifier for the author; defaults to "human:cli".
         #[arg(long, default_value = "human:cli")]
         author: String,
     },
     /// Get an annotation value for a (symbol, key) pair.
-    Get {
-        symbol_uri: String,
-        key:        String,
-    },
+    Get { symbol_uri: String, key: String },
     /// List all annotations for a symbol.
-    List {
-        symbol_uri: String,
-    },
+    List { symbol_uri: String },
     /// Search annotations workspace-wide by key prefix.
     /// Pass an empty prefix to list all annotations across all symbols.
     ///
@@ -57,22 +52,26 @@ pub async fn run(args: AnnotateArgs) -> anyhow::Result<()> {
     })?;
 
     let msg = match args.kind {
-        AnnotateKind::Set { symbol_uri, key, value, author } => {
-            ClientMessage::AnnotationSet { symbol_uri, key, value, author_id: author }
-        }
-        AnnotateKind::Get { symbol_uri, key } => {
-            ClientMessage::AnnotationGet { symbol_uri, key }
-        }
-        AnnotateKind::List { symbol_uri } => {
-            ClientMessage::AnnotationList { symbol_uri }
-        }
+        AnnotateKind::Set {
+            symbol_uri,
+            key,
+            value,
+            author,
+        } => ClientMessage::AnnotationSet {
+            symbol_uri,
+            key,
+            value,
+            author_id: author,
+        },
+        AnnotateKind::Get { symbol_uri, key } => ClientMessage::AnnotationGet { symbol_uri, key },
+        AnnotateKind::List { symbol_uri } => ClientMessage::AnnotationList { symbol_uri },
         AnnotateKind::Search { key_prefix } => {
             ClientMessage::AnnotationWorkspaceList { key_prefix }
         }
     };
 
     let body = serde_json::to_vec(&msg)?;
-    let len  = body.len() as u32;
+    let len = body.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&body).await?;
 

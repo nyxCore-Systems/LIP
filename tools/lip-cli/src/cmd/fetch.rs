@@ -41,15 +41,17 @@ pub async fn run(args: FetchArgs) -> anyhow::Result<()> {
         args.cache_dir
     };
 
-    let cache  = Arc::new(SliceCache::open(&cache_dir)?);
+    let cache = Arc::new(SliceCache::open(&cache_dir)?);
     let client = RegistryClient::new(args.registries, cache);
-    let slice  = client.fetch_slice(&args.package_hash).await?;
+    let slice = client.fetch_slice(&args.package_hash).await?;
 
     if args.mount {
         let mut stream = UnixStream::connect(&args.socket).await.map_err(|e| {
             anyhow::anyhow!("cannot connect to daemon at {}: {e}", args.socket.display())
         })?;
-        let msg = ClientMessage::LoadSlice { slice: (*slice).clone() };
+        let msg = ClientMessage::LoadSlice {
+            slice: (*slice).clone(),
+        };
         let body = serde_json::to_vec(&msg)?;
         stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
         stream.write_all(&body).await?;

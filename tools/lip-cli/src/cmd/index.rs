@@ -4,7 +4,7 @@ use clap::Args;
 use walkdir::WalkDir;
 
 use lip::indexer::{language::Language, Tier1Indexer};
-use lip::schema::{OwnedDelta, OwnedEventStream, Action};
+use lip::schema::{Action, OwnedDelta, OwnedEventStream};
 
 use crate::output;
 
@@ -29,10 +29,10 @@ pub struct IndexArgs {
 }
 
 pub async fn run(args: IndexArgs) -> anyhow::Result<()> {
-    let mut indexer  = Tier1Indexer::new();
-    let mut deltas   = vec![];
-    let mut count    = 0usize;
-    let lang_hint    = args.language.as_deref().unwrap_or("");
+    let mut indexer = Tier1Indexer::new();
+    let mut deltas = vec![];
+    let mut count = 0usize;
+    let lang_hint = args.language.as_deref().unwrap_or("");
 
     for entry in WalkDir::new(&args.path)
         .follow_links(false)
@@ -45,10 +45,10 @@ pub async fn run(args: IndexArgs) -> anyhow::Result<()> {
         // WalkDir may return relative paths (e.g. `./src/main.rs`) when the
         // root was given as `.`, which would produce `file://./src/main.rs`.
         let abs = match path.canonicalize() {
-            Ok(p)  => p,
+            Ok(p) => p,
             Err(_) => continue,
         };
-        let uri  = format!("file://{}", abs.display());
+        let uri = format!("file://{}", abs.display());
         let lang = Language::detect(&uri, lang_hint);
 
         if lang == Language::Unknown {
@@ -56,7 +56,7 @@ pub async fn run(args: IndexArgs) -> anyhow::Result<()> {
         }
 
         let source = match std::fs::read_to_string(&abs) {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(_) => continue,
         };
 
@@ -64,11 +64,11 @@ pub async fn run(args: IndexArgs) -> anyhow::Result<()> {
 
         if args.json {
             let delta = OwnedDelta {
-                action:      Action::Upsert,
+                action: Action::Upsert,
                 commit_hash: doc.content_hash.clone(),
-                document:    Some(doc),
-                symbol:      None,
-                slice:       None,
+                document: Some(doc),
+                symbol: None,
+                slice: None,
             };
             deltas.push(delta);
         } else {
@@ -83,10 +83,7 @@ pub async fn run(args: IndexArgs) -> anyhow::Result<()> {
     }
 
     if args.json {
-        let stream = OwnedEventStream::new(
-            concat!("lip-cli/", env!("CARGO_PKG_VERSION")),
-            deltas,
-        );
+        let stream = OwnedEventStream::new(concat!("lip-cli/", env!("CARGO_PKG_VERSION")), deltas);
         output::print_json(&stream)?;
     } else {
         println!("\nIndexed {count} files.");

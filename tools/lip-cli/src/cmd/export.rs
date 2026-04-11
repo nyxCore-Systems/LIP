@@ -61,10 +61,10 @@ pub async fn run(args: ExportArgs) -> anyhow::Result<()> {
 
     let index = scip::Index {
         metadata: Some(scip::Metadata {
-            version:     scip::ProtocolVersion::UnspecifiedProtocolVersion as i32,
-            tool_info:   Some(scip::ToolInfo {
-                name:      args.tool_name,
-                version:   args.tool_version,
+            version: scip::ProtocolVersion::UnspecifiedProtocolVersion as i32,
+            tool_info: Some(scip::ToolInfo {
+                name: args.tool_name,
+                version: args.tool_version,
                 arguments: vec![],
             }),
             project_root: String::new(),
@@ -85,23 +85,17 @@ pub async fn run(args: ExportArgs) -> anyhow::Result<()> {
 // ─── Conversion helpers ───────────────────────────────────────────────────────
 
 fn convert_document(doc: OwnedDocument) -> scip::Document {
-    let symbols: Vec<scip::SymbolInformation> = doc
-        .symbols
-        .iter()
-        .map(convert_symbol_info)
-        .collect();
+    let symbols: Vec<scip::SymbolInformation> =
+        doc.symbols.iter().map(convert_symbol_info).collect();
 
-    let occurrences: Vec<scip::Occurrence> = doc
-        .occurrences
-        .iter()
-        .map(convert_occurrence)
-        .collect();
+    let occurrences: Vec<scip::Occurrence> =
+        doc.occurrences.iter().map(convert_occurrence).collect();
 
     // Note: scip::Document has no `text` field in the generated proto; source
     // text is not part of the SCIP wire format at this schema version.
     let _ = doc.source_text; // present in LIP, absent in SCIP
     scip::Document {
-        language:      doc.language,
+        language: doc.language,
         relative_path: uri_to_relative_path(&doc.uri),
         occurrences,
         symbols,
@@ -113,23 +107,23 @@ fn convert_symbol_info(sym: &OwnedSymbolInfo) -> scip::SymbolInformation {
         .relationships
         .iter()
         .map(|r| scip::Relationship {
-            symbol:             lip_uri_to_scip_symbol(&r.target_uri),
-            is_reference:       r.is_reference,
-            is_implementation:  r.is_implementation,
+            symbol: lip_uri_to_scip_symbol(&r.target_uri),
+            is_reference: r.is_reference,
+            is_implementation: r.is_implementation,
             is_type_definition: r.is_type_definition,
-            is_override:        r.is_override,
+            is_override: r.is_override,
         })
         .collect();
 
     scip::SymbolInformation {
-        symbol:        lip_uri_to_scip_symbol(&sym.uri),
-        display_name:  sym.display_name.clone(),
+        symbol: lip_uri_to_scip_symbol(&sym.uri),
+        display_name: sym.display_name.clone(),
         documentation: sym
             .documentation
             .as_deref()
             .map(|d| vec![d.to_owned()])
             .unwrap_or_default(),
-        kind:          lip_kind_to_scip(sym.kind) as i32,
+        kind: lip_kind_to_scip(sym.kind) as i32,
         relationships,
     }
 }
@@ -150,8 +144,8 @@ fn convert_occurrence(occ: &lip::schema::OwnedOccurrence) -> scip::Occurrence {
 
     scip::Occurrence {
         range,
-        symbol:               lip_uri_to_scip_symbol(&occ.symbol_uri),
-        symbol_roles:         role_bits,
+        symbol: lip_uri_to_scip_symbol(&occ.symbol_uri),
+        symbol_roles: role_bits,
         override_documentation: occ
             .override_doc
             .as_deref()
@@ -203,21 +197,21 @@ fn uri_to_relative_path(uri: &str) -> String {
 
 fn lip_kind_to_scip(kind: SymbolKind) -> scip::Kind {
     match kind {
-        SymbolKind::Class       => scip::Kind::KClass,
-        SymbolKind::Interface   => scip::Kind::KInterface,
-        SymbolKind::Method      => scip::Kind::KMethod,
-        SymbolKind::Function    => scip::Kind::KFunction,
-        SymbolKind::Field       => scip::Kind::KField,
-        SymbolKind::Variable    => scip::Kind::KVariable,
-        SymbolKind::Namespace   => scip::Kind::KNamespace,
-        SymbolKind::Enum        => scip::Kind::KEnum,
-        SymbolKind::EnumMember  => scip::Kind::KEnumMember,
+        SymbolKind::Class => scip::Kind::KClass,
+        SymbolKind::Interface => scip::Kind::KInterface,
+        SymbolKind::Method => scip::Kind::KMethod,
+        SymbolKind::Function => scip::Kind::KFunction,
+        SymbolKind::Field => scip::Kind::KField,
+        SymbolKind::Variable => scip::Kind::KVariable,
+        SymbolKind::Namespace => scip::Kind::KNamespace,
+        SymbolKind::Enum => scip::Kind::KEnum,
+        SymbolKind::EnumMember => scip::Kind::KEnumMember,
         SymbolKind::Constructor => scip::Kind::KConstructor,
-        SymbolKind::TypeAlias   => scip::Kind::KTypeAlias,
+        SymbolKind::TypeAlias => scip::Kind::KTypeAlias,
         SymbolKind::TypeParameter => scip::Kind::KTypeParameter,
-        SymbolKind::Macro       => scip::Kind::KMacro,
-        SymbolKind::Parameter   => scip::Kind::KVariable, // no SCIP equivalent
-        SymbolKind::Unknown     => scip::Kind::KUnspecifiedKind,
+        SymbolKind::Macro => scip::Kind::KMacro,
+        SymbolKind::Parameter => scip::Kind::KVariable, // no SCIP equivalent
+        SymbolKind::Unknown => scip::Kind::KUnspecifiedKind,
     }
 }
 
@@ -238,7 +232,7 @@ mod tests {
     fn lip_uri_roundtrip_legacy_scip_prefix() {
         // Old import.rs format (lip://scip/ prefix) should still round-trip.
         let scip_sym = "scip-typescript npm react 18.2.0 React#Component.";
-        let lip_uri  = format!("lip://scip/{}", scip_sym.replace(' ', "/"));
+        let lip_uri = format!("lip://scip/{}", scip_sym.replace(' ', "/"));
         assert_eq!(lip_uri_to_scip_symbol(&lip_uri), scip_sym);
     }
 
@@ -246,7 +240,7 @@ mod tests {
     fn lip_uri_roundtrip_structured_format() {
         // New 5-field structured format from updated import.rs.
         let scip_sym = "scip-typescript npm react 18.2.0 React#Component.";
-        let lip_uri  = "lip://scip-typescript/npm/react@18.2.0/React#Component.";
+        let lip_uri = "lip://scip-typescript/npm/react@18.2.0/React#Component.";
         assert_eq!(lip_uri_to_scip_symbol(lip_uri), scip_sym);
     }
 
@@ -254,10 +248,10 @@ mod tests {
     fn kind_roundtrip_for_common_kinds() {
         use lip::schema::SymbolKind;
         for (lip, scip) in [
-            (SymbolKind::Class,    scip::Kind::KClass),
+            (SymbolKind::Class, scip::Kind::KClass),
             (SymbolKind::Function, scip::Kind::KFunction),
-            (SymbolKind::Enum,     scip::Kind::KEnum),
-            (SymbolKind::Unknown,  scip::Kind::KUnspecifiedKind),
+            (SymbolKind::Enum, scip::Kind::KEnum),
+            (SymbolKind::Unknown, scip::Kind::KUnspecifiedKind),
         ] {
             assert_eq!(lip_kind_to_scip(lip), scip);
         }

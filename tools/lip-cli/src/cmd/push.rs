@@ -24,7 +24,7 @@ pub struct PushArgs {
 pub async fn run(args: PushArgs) -> anyhow::Result<()> {
     let raw: Vec<u8> = match args.slice_file {
         Some(p) => tokio::fs::read(&p).await?,
-        None    => {
+        None => {
             let mut buf = Vec::new();
             tokio::io::stdin().read_to_end(&mut buf).await?;
             buf
@@ -42,9 +42,9 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         args.cache_dir
     };
 
-    let cache  = Arc::new(SliceCache::open(&cache_dir)?);
+    let cache = Arc::new(SliceCache::open(&cache_dir)?);
     let client = RegistryClient::new(vec![args.registry], cache);
-    let hash   = client.push_slice(raw).await?;
+    let hash = client.push_slice(raw).await?;
 
     println!("{hash}");
     Ok(())

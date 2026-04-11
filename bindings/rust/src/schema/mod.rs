@@ -20,9 +20,7 @@
 pub mod types;
 
 pub use types::{
-    sha256_hex,
-    Action, EdgeKind, IndexingState, LipUri,
-    OwnedAnnotationEntry, OwnedDelta, OwnedDependencySlice, OwnedDocument,
-    OwnedEventStream, OwnedGraphEdge, OwnedOccurrence, OwnedRange,
-    OwnedRelationship, OwnedSymbolInfo, Role, SymbolKind,
+    sha256_hex, Action, EdgeKind, IndexingState, LipUri, OwnedAnnotationEntry, OwnedDelta,
+    OwnedDependencySlice, OwnedDocument, OwnedEventStream, OwnedGraphEdge, OwnedOccurrence,
+    OwnedRange, OwnedRelationship, OwnedSymbolInfo, Role, SymbolKind,
 };

@@ -12,9 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
-use crate::schema::{EdgeKind};
-use crate::query_graph::types::{ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel, SimilarSymbol};
-use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
+use crate::query_graph::types::{
+    ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel, SimilarSymbol,
+};
+use crate::schema::EdgeKind;
+use crate::schema::{
+    sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedOccurrence, OwnedRange,
+    OwnedSymbolInfo, Role, SymbolKind,
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -43,7 +48,9 @@ fn extract_name(uri: &str) -> &str {
 /// Returns `true` if the annotation entry has expired (past its `expires_ms` timestamp).
 /// An `expires_ms` of 0 means the entry is permanent and never expires.
 fn is_expired(entry: &crate::schema::OwnedAnnotationEntry) -> bool {
-    if entry.expires_ms == 0 { return false; }
+    if entry.expires_ms == 0 {
+        return false;
+    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -58,18 +65,24 @@ fn is_expired(entry: &crate::schema::OwnedAnnotationEntry) -> bool {
 fn trigram_similarity(a: &str, b: &str) -> f32 {
     let a_lower = a.to_lowercase();
     let b_lower = b.to_lowercase();
-    let a_tris: std::collections::HashSet<&str> =
-        a_lower.as_bytes().windows(3)
-            .map(|w| std::str::from_utf8(w).unwrap_or(""))
-            .collect();
-    let b_tris: std::collections::HashSet<&str> =
-        b_lower.as_bytes().windows(3)
-            .map(|w| std::str::from_utf8(w).unwrap_or(""))
-            .collect();
-    if a_tris.is_empty() && b_tris.is_empty() { return 1.0; }
-    if a_tris.is_empty() || b_tris.is_empty() { return 0.0; }
+    let a_tris: std::collections::HashSet<&str> = a_lower
+        .as_bytes()
+        .windows(3)
+        .map(|w| std::str::from_utf8(w).unwrap_or(""))
+        .collect();
+    let b_tris: std::collections::HashSet<&str> = b_lower
+        .as_bytes()
+        .windows(3)
+        .map(|w| std::str::from_utf8(w).unwrap_or(""))
+        .collect();
+    if a_tris.is_empty() && b_tris.is_empty() {
+        return 1.0;
+    }
+    if a_tris.is_empty() || b_tris.is_empty() {
+        return 0.0;
+    }
     let intersection = a_tris.intersection(&b_tris).count();
-    let union        = a_tris.union(&b_tris).count();
+    let union = a_tris.union(&b_tris).count();
     intersection as f32 / union as f32
 }
 
@@ -77,15 +90,15 @@ fn trigram_similarity(a: &str, b: &str) -> f32 {
 
 #[derive(Debug)]
 struct FileInput {
-    text:      String,
-    language:  String,
+    text: String,
+    language: String,
     /// Revision at which this input was last changed.
-    revision:  u64,
+    revision: u64,
 }
 
 #[derive(Debug)]
 struct Cached<T> {
-    value:    T,
+    value: T,
     /// Revision of the source `FileInput` when this was computed.
     revision: u64,
 }
@@ -108,15 +121,15 @@ impl<T> Cached<T> {
 ///   is unchanged, downstream callers skip recomputation entirely.
 pub struct LipDatabase {
     /// Global revision counter — increments on every `upsert_file`.
-    revision:    u64,
+    revision: u64,
     file_inputs: HashMap<String, FileInput>,
-    sym_cache:   HashMap<String, Cached<Arc<Vec<OwnedSymbolInfo>>>>,
-    occ_cache:   HashMap<String, Cached<Arc<Vec<OwnedOccurrence>>>>,
-    api_cache:   HashMap<String, Cached<Arc<ApiSurface>>>,
+    sym_cache: HashMap<String, Cached<Arc<Vec<OwnedSymbolInfo>>>>,
+    occ_cache: HashMap<String, Cached<Arc<Vec<OwnedOccurrence>>>>,
+    api_cache: HashMap<String, Cached<Arc<ApiSurface>>>,
     /// Reverse index: symbol_uri → (file_uri, definition range). O(1) definition lookup.
-    def_index:   HashMap<String, (String, OwnedRange)>,
+    def_index: HashMap<String, (String, OwnedRange)>,
     /// Last Merkle root sent by the client. Drives lifecycle state reporting.
-    merkle_root:    Option<String>,
+    merkle_root: Option<String>,
     /// Repo root from the last ManifestRequest. Used by Tier 2 to locate rust-analyzer's workspace.
     workspace_root: Option<PathBuf>,
     /// Persistent annotations keyed by (symbol_uri, annotation_key).
@@ -145,21 +158,21 @@ pub struct LipDatabase {
 impl LipDatabase {
     pub fn new() -> Self {
         Self {
-            revision:       0,
-            file_inputs:    HashMap::new(),
-            sym_cache:      HashMap::new(),
-            occ_cache:      HashMap::new(),
-            api_cache:      HashMap::new(),
-            def_index:      HashMap::new(),
-            merkle_root:    None,
-            workspace_root:    None,
-            annotations:       HashMap::new(),
-            callee_to_callers:      HashMap::new(),
-            file_call_edges:        HashMap::new(),
-            name_to_symbols:        HashMap::new(),
+            revision: 0,
+            file_inputs: HashMap::new(),
+            sym_cache: HashMap::new(),
+            occ_cache: HashMap::new(),
+            api_cache: HashMap::new(),
+            def_index: HashMap::new(),
+            merkle_root: None,
+            workspace_root: None,
+            annotations: HashMap::new(),
+            callee_to_callers: HashMap::new(),
+            file_call_edges: HashMap::new(),
+            name_to_symbols: HashMap::new(),
             callee_name_to_callers: HashMap::new(),
-            mounted_symbols:        HashMap::new(),
-            mounted_packages:       HashMap::new(),
+            mounted_symbols: HashMap::new(),
+            mounted_packages: HashMap::new(),
         }
     }
 
@@ -170,7 +183,14 @@ impl LipDatabase {
     pub fn upsert_file(&mut self, uri: String, text: String, language: String) {
         self.revision += 1;
         let rev = self.revision;
-        self.file_inputs.insert(uri.clone(), FileInput { text, language, revision: rev });
+        self.file_inputs.insert(
+            uri.clone(),
+            FileInput {
+                text,
+                language,
+                revision: rev,
+            },
+        );
         // Invalidate the direct derived caches. api_cache is intentionally kept
         // so file_api_surface can compare the new hash against the previous one and
         // fire an early-cutoff (returning the same Arc) when the API surface is stable.
@@ -179,7 +199,9 @@ impl LipDatabase {
 
         // Eagerly rebuild the definition reverse index for this file.
         // First remove stale name_to_symbols entries for symbols this file defined.
-        let stale_defs: Vec<String> = self.def_index.iter()
+        let stale_defs: Vec<String> = self
+            .def_index
+            .iter()
             .filter(|(_, (furi, _))| furi == &uri)
             .map(|(sym_uri, _)| sym_uri.clone())
             .collect();
@@ -187,29 +209,36 @@ impl LipDatabase {
             let name = extract_name(sym_uri);
             if let Some(uris) = self.name_to_symbols.get_mut(name) {
                 uris.retain(|u| u != sym_uri);
-                if uris.is_empty() { self.name_to_symbols.remove(name); }
+                if uris.is_empty() {
+                    self.name_to_symbols.remove(name);
+                }
             }
         }
         self.def_index.retain(|_, (furi, _)| furi != &uri);
         let occs = self.compute_occurrences(&uri);
         for occ in occs.iter() {
             if occ.role == Role::Definition {
-                self.def_index.insert(occ.symbol_uri.clone(), (uri.clone(), occ.range.clone()));
+                self.def_index
+                    .insert(occ.symbol_uri.clone(), (uri.clone(), occ.range.clone()));
                 // Populate global name index.
                 let name = extract_name(&occ.symbol_uri).to_owned();
                 if !name.is_empty() {
-                    self.name_to_symbols.entry(name).or_default().push(occ.symbol_uri.clone());
+                    self.name_to_symbols
+                        .entry(name)
+                        .or_default()
+                        .push(occ.symbol_uri.clone());
                 }
             }
         }
         // Cache the occurrences we just computed to avoid a redundant parse on first query.
-        self.occ_cache.insert(uri.to_owned(), Cached::new(occs, rev));
+        self.occ_cache
+            .insert(uri.to_owned(), Cached::new(occs, rev));
 
         // Eagerly rebuild the CPG call-edge reverse index for this file.
         self.remove_file_call_edges(&uri);
         if let Some(input) = self.file_inputs.get(&uri) {
-            let lang  = Language::detect(&uri, &input.language.clone());
-            let text  = input.text.clone();
+            let lang = Language::detect(&uri, &input.language.clone());
+            let text = input.text.clone();
             let edges = Tier1Indexer::new().edges_for_source(&uri, &text, lang);
             let mut pairs: Vec<(String, String)> = Vec::new();
             for edge in edges.iter().filter(|e| e.kind == EdgeKind::Calls) {
@@ -238,7 +267,9 @@ impl LipDatabase {
         self.occ_cache.remove(uri);
         self.api_cache.remove(uri);
         // Clean name_to_symbols before clearing def_index.
-        let stale_defs: Vec<String> = self.def_index.iter()
+        let stale_defs: Vec<String> = self
+            .def_index
+            .iter()
             .filter(|(_, (furi, _))| furi.as_str() == uri)
             .map(|(sym_uri, _)| sym_uri.clone())
             .collect();
@@ -246,7 +277,9 @@ impl LipDatabase {
             let name = extract_name(sym_uri);
             if let Some(uris) = self.name_to_symbols.get_mut(name) {
                 uris.retain(|u| u != sym_uri);
-                if uris.is_empty() { self.name_to_symbols.remove(name); }
+                if uris.is_empty() {
+                    self.name_to_symbols.remove(name);
+                }
             }
         }
         self.def_index.retain(|_, (furi, _)| furi.as_str() != uri);
@@ -262,7 +295,9 @@ impl LipDatabase {
                 let callee_name = extract_name(&to);
                 if let Some(callers) = self.callee_name_to_callers.get_mut(callee_name) {
                     callers.retain(|c| *c != from);
-                    if callers.is_empty() { self.callee_name_to_callers.remove(callee_name); }
+                    if callers.is_empty() {
+                        self.callee_name_to_callers.remove(callee_name);
+                    }
                 }
             }
         }
@@ -298,8 +333,12 @@ impl LipDatabase {
     /// data, not a new source input. The API surface cache is invalidated so
     /// downstream callers see the improved data on their next access.
     pub fn upgrade_file_symbols(&mut self, uri: &str, upgrades: &[OwnedSymbolInfo]) {
-        if upgrades.is_empty() { return; }
-        let Some(cached) = self.sym_cache.get(uri) else { return; };
+        if upgrades.is_empty() {
+            return;
+        }
+        let Some(cached) = self.sym_cache.get(uri) else {
+            return;
+        };
         let rev = cached.revision;
         let existing: Vec<OwnedSymbolInfo> = cached.value.as_ref().clone();
 
@@ -319,7 +358,8 @@ impl LipDatabase {
             })
             .collect();
 
-        self.sym_cache.insert(uri.to_owned(), Cached::new(Arc::new(merged), rev));
+        self.sym_cache
+            .insert(uri.to_owned(), Cached::new(Arc::new(merged), rev));
         // Invalidate api_cache so the content_hash reflects updated signatures.
         self.api_cache.remove(uri);
     }
@@ -342,10 +382,11 @@ impl LipDatabase {
     /// returns URIs that are stale (daemon hash ≠ client hash) or unknown to
     /// the daemon (never indexed). The client should re-Delta each returned URI.
     pub fn stale_files(&self, entries: &[(String, String)]) -> Vec<String> {
-        entries.iter()
+        entries
+            .iter()
             .filter(|(uri, client_hash)| {
                 match self.file_inputs.get(uri) {
-                    None     => true,   // daemon has never seen this file
+                    None => true, // daemon has never seen this file
                     Some(fi) => sha256_hex(fi.text.as_bytes()) != *client_hash,
                 }
             })
@@ -373,7 +414,7 @@ impl LipDatabase {
     pub fn file_symbols(&mut self, uri: &str) -> Arc<Vec<OwnedSymbolInfo>> {
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
-            None    => return Arc::new(vec![]),
+            None => return Arc::new(vec![]),
         };
 
         if let Some(cached) = self.sym_cache.get(uri) {
@@ -383,7 +424,8 @@ impl LipDatabase {
         }
 
         let result = self.compute_symbols(uri);
-        self.sym_cache.insert(uri.to_owned(), Cached::new(result.clone(), file_rev));
+        self.sym_cache
+            .insert(uri.to_owned(), Cached::new(result.clone(), file_rev));
         result
     }
 
@@ -391,7 +433,7 @@ impl LipDatabase {
     pub fn file_occurrences(&mut self, uri: &str) -> Arc<Vec<OwnedOccurrence>> {
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
-            None    => return Arc::new(vec![]),
+            None => return Arc::new(vec![]),
         };
 
         if let Some(cached) = self.occ_cache.get(uri) {
@@ -401,7 +443,8 @@ impl LipDatabase {
         }
 
         let result = self.compute_occurrences(uri);
-        self.occ_cache.insert(uri.to_owned(), Cached::new(result.clone(), file_rev));
+        self.occ_cache
+            .insert(uri.to_owned(), Cached::new(result.clone(), file_rev));
         result
     }
 
@@ -412,7 +455,12 @@ impl LipDatabase {
     pub fn file_api_surface(&mut self, uri: &str) -> Arc<ApiSurface> {
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
-            None    => return Arc::new(ApiSurface { content_hash: String::new(), symbols: vec![] }),
+            None => {
+                return Arc::new(ApiSurface {
+                    content_hash: String::new(),
+                    symbols: vec![],
+                })
+            }
         };
 
         // Early-cutoff check: if the API surface is fresh, return it.
@@ -434,7 +482,13 @@ impl LipDatabase {
 
         let surface_text = public
             .iter()
-            .map(|s| format!("{}:{}", s.uri, s.signature.as_deref().unwrap_or(&s.display_name)))
+            .map(|s| {
+                format!(
+                    "{}:{}",
+                    s.uri,
+                    s.signature.as_deref().unwrap_or(&s.display_name)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -445,13 +499,18 @@ impl LipDatabase {
             if cached.value.content_hash == new_hash {
                 // API surface unchanged — early cutoff. Update revision in place.
                 let old_val = cached.value.clone();
-                self.api_cache.insert(uri.to_owned(), Cached::new(old_val.clone(), file_rev));
+                self.api_cache
+                    .insert(uri.to_owned(), Cached::new(old_val.clone(), file_rev));
                 return old_val;
             }
         }
 
-        let surface = Arc::new(ApiSurface { content_hash: new_hash, symbols: public });
-        self.api_cache.insert(uri.to_owned(), Cached::new(surface.clone(), file_rev));
+        let surface = Arc::new(ApiSurface {
+            content_hash: new_hash,
+            symbols: public,
+        });
+        self.api_cache
+            .insert(uri.to_owned(), Cached::new(surface.clone(), file_rev));
         surface
     }
 
@@ -474,12 +533,13 @@ impl LipDatabase {
     pub fn blast_radius_for(&mut self, symbol_uri: &str) -> BlastRadiusResult {
         // BFS limits — keeps response time bounded on highly-connected symbols.
         const DEPTH_LIMIT: u32 = 4;
-        const NODE_LIMIT:  usize = 200;
+        const NODE_LIMIT: usize = 200;
 
         let all_uris: Vec<String> = self.file_inputs.keys().cloned().collect();
-        let def_uri = all_uris.iter().find(|uri| {
-            self.file_symbols(uri).iter().any(|s| s.uri == symbol_uri)
-        }).cloned();
+        let def_uri = all_uris
+            .iter()
+            .find(|uri| self.file_symbols(uri).iter().any(|s| s.uri == symbol_uri))
+            .cloned();
 
         let Some(def_uri) = def_uri else {
             return BlastRadiusResult {
@@ -587,34 +647,42 @@ impl LipDatabase {
         // We keep one representative symbol per file (the closest caller).
         let mut sym_impacts: HashMap<String, (String, u32)> = HashMap::new();
         for (caller_sym, &sym_dist) in &cpg_distance {
-            if caller_sym == symbol_uri { continue; } // skip the target itself
+            if caller_sym == symbol_uri {
+                continue;
+            } // skip the target itself
             if let Some((file_uri, _)) = self.def_index.get(caller_sym) {
                 let prev_dist = file_distance.get(file_uri).copied().unwrap_or(u32::MAX);
                 let best = sym_dist.min(prev_dist);
                 file_distance.insert(file_uri.clone(), best);
                 sym_impacts
                     .entry(file_uri.clone())
-                    .and_modify(|(_, d)| { if sym_dist < *d { *d = sym_dist; } })
+                    .and_modify(|(_, d)| {
+                        if sym_dist < *d {
+                            *d = sym_dist;
+                        }
+                    })
                     .or_insert_with(|| (caller_sym.clone(), sym_dist));
             }
         }
 
         // ── Phase 4: build result ─────────────────────────────────────────
-        let mut direct_items:     Vec<ImpactItem> = vec![];
+        let mut direct_items: Vec<ImpactItem> = vec![];
         let mut transitive_items: Vec<ImpactItem> = vec![];
-        let mut affected_files:   Vec<String>     = vec![];
+        let mut affected_files: Vec<String> = vec![];
 
         for (file_uri, &distance) in &file_distance {
-            if distance == 0 { continue; } // the symbol's own file is not an "affected" file
+            if distance == 0 {
+                continue;
+            } // the symbol's own file is not an "affected" file
             let (sym_uri, sym_dist) = sym_impacts
                 .get(file_uri)
                 .map(|(s, d)| (s.as_str(), *d))
                 .unwrap_or(("", distance));
             let effective_dist = distance.min(sym_dist);
             let item = ImpactItem {
-                file_uri:   file_uri.clone(),
+                file_uri: file_uri.clone(),
                 symbol_uri: sym_uri.to_owned(),
-                distance:   effective_dist,
+                distance: effective_dist,
                 confidence: ImpactItem::confidence_at(effective_dist),
             };
             affected_files.push(file_uri.clone());
@@ -627,10 +695,14 @@ impl LipDatabase {
 
         // Sort for deterministic output.
         direct_items.sort_by(|a, b| a.file_uri.cmp(&b.file_uri));
-        transitive_items.sort_by(|a, b| a.distance.cmp(&b.distance).then(a.file_uri.cmp(&b.file_uri)));
+        transitive_items.sort_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then(a.file_uri.cmp(&b.file_uri))
+        });
         affected_files.sort();
 
-        let direct_count     = direct_items.len() as u32;
+        let direct_count = direct_items.len() as u32;
         let transitive_count = (direct_items.len() + transitive_items.len()) as u32;
 
         // Risk: Low ≤3 direct / ≤5 total · Medium ≤10 direct / ≤20 total · High otherwise
@@ -643,8 +715,8 @@ impl LipDatabase {
         };
 
         BlastRadiusResult {
-            symbol_uri:            symbol_uri.to_owned(),
-            direct_dependents:     direct_count,
+            symbol_uri: symbol_uri.to_owned(),
+            direct_dependents: direct_count,
             transitive_dependents: transitive_count,
             affected_files,
             direct_items,
@@ -694,7 +766,8 @@ impl LipDatabase {
     /// with no reference occurrence are considered dead for the current workspace.
     pub fn dead_symbols(&mut self, limit: Option<usize>) -> Vec<OwnedSymbolInfo> {
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
-        let referenced: HashSet<String> = uris.iter()
+        let referenced: HashSet<String> = uris
+            .iter()
             .flat_map(|u| {
                 self.file_occurrences(u)
                     .iter()
@@ -710,7 +783,9 @@ impl LipDatabase {
             for sym in self.file_symbols(uri).iter() {
                 if !referenced.contains(&sym.uri) {
                     result.push(sym.clone());
-                    if result.len() >= cap { break 'outer; }
+                    if result.len() >= cap {
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -730,7 +805,11 @@ impl LipDatabase {
     /// Get the annotation for `(symbol_uri, key)`, if present and not expired.
     pub fn annotation_get(&self, symbol_uri: &str, key: &str) -> Option<&OwnedAnnotationEntry> {
         let entry = self.annotations.get(symbol_uri)?.get(key)?;
-        if is_expired(entry) { None } else { Some(entry) }
+        if is_expired(entry) {
+            None
+        } else {
+            Some(entry)
+        }
     }
 
     /// List all non-expired annotations for `symbol_uri`.
@@ -790,12 +869,16 @@ impl LipDatabase {
                 !uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name))
             });
             self.def_index.retain(|uri, (file_uri, _)| {
-                let is_slice_sym = uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
-                let is_slice_file = file_uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
+                let is_slice_sym =
+                    uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
+                let is_slice_file = file_uri
+                    .starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
                 !(is_slice_sym || is_slice_file)
             });
             self.name_to_symbols.values_mut().for_each(|uris| {
-                uris.retain(|u| !u.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name)));
+                uris.retain(|u| {
+                    !u.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name))
+                });
             });
             self.name_to_symbols.retain(|_, uris| !uris.is_empty());
         }
@@ -806,23 +889,39 @@ impl LipDatabase {
             sym.confidence_score = 100; // Tier 3
             let name = extract_name(&sym.uri).to_owned();
             // Synthetic file URI: everything up to the # fragment.
-            let file_uri = sym.uri
+            let file_uri = sym
+                .uri
                 .find('#')
                 .map(|i| sym.uri[..i].to_owned())
                 .unwrap_or_else(|| sym.uri.clone());
             self.def_index.insert(
                 sym.uri.clone(),
-                (file_uri, OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 0 }),
+                (
+                    file_uri,
+                    OwnedRange {
+                        start_line: 0,
+                        start_char: 0,
+                        end_line: 0,
+                        end_char: 0,
+                    },
+                ),
             );
             if !name.is_empty() {
-                self.name_to_symbols.entry(name).or_default().push(sym.uri.clone());
+                self.name_to_symbols
+                    .entry(name)
+                    .or_default()
+                    .push(sym.uri.clone());
             }
             self.mounted_symbols.insert(sym.uri.clone(), sym);
         }
 
         self.mounted_packages.insert(
             pkg_key,
-            (slice.manager.clone(), slice.package_name.clone(), slice.version.clone()),
+            (
+                slice.manager.clone(),
+                slice.package_name.clone(),
+                slice.version.clone(),
+            ),
         );
     }
 
@@ -858,7 +957,9 @@ impl LipDatabase {
             for sym in self.mounted_symbols.values() {
                 if sym.display_name.to_lowercase().contains(&q) {
                     matches.push(sym.clone());
-                    if matches.len() >= limit { break; }
+                    if matches.len() >= limit {
+                        break;
+                    }
                 }
             }
         }
@@ -877,7 +978,8 @@ impl LipDatabase {
 
         let score_sym = |sym: &OwnedSymbolInfo| -> f32 {
             let name_score = trigram_similarity(query, &sym.display_name);
-            let doc_score  = sym.documentation
+            let doc_score = sym
+                .documentation
                 .as_deref()
                 .map(|d| trigram_similarity(query, d) * 0.6)
                 .unwrap_or(0.0);
@@ -889,11 +991,11 @@ impl LipDatabase {
                 let score = score_sym(sym);
                 if score >= 0.2 {
                     hits.push(SimilarSymbol {
-                        uri:        sym.uri.clone(),
-                        name:       sym.display_name.clone(),
-                        kind:       format!("{:?}", sym.kind).to_lowercase(),
+                        uri: sym.uri.clone(),
+                        name: sym.display_name.clone(),
+                        kind: format!("{:?}", sym.kind).to_lowercase(),
                         score,
-                        doc:        sym.documentation.clone(),
+                        doc: sym.documentation.clone(),
                         confidence: sym.confidence_score,
                     });
                 }
@@ -904,17 +1006,21 @@ impl LipDatabase {
             let score = score_sym(sym);
             if score >= 0.2 {
                 hits.push(SimilarSymbol {
-                    uri:        sym.uri.clone(),
-                    name:       sym.display_name.clone(),
-                    kind:       format!("{:?}", sym.kind).to_lowercase(),
+                    uri: sym.uri.clone(),
+                    name: sym.display_name.clone(),
+                    kind: format!("{:?}", sym.kind).to_lowercase(),
                     score,
-                    doc:        sym.documentation.clone(),
+                    doc: sym.documentation.clone(),
                     confidence: sym.confidence_score,
                 });
             }
         }
 
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         hits
     }
@@ -993,7 +1099,7 @@ mod tests {
         let (uri, text, lang) = make_rust_file("pub fn foo() {}");
         db.upsert_file(uri.clone(), text, lang);
 
-        let first  = db.file_symbols(&uri);
+        let first = db.file_symbols(&uri);
         let second = db.file_symbols(&uri);
         // Exact same Arc pointer — no recomputation.
         assert!(Arc::ptr_eq(&first, &second));
@@ -1064,8 +1170,16 @@ mod tests {
         let mut db = LipDatabase::new();
         assert!(db.tracked_uris().is_empty());
 
-        db.upsert_file("lip://s/p@1/a.rs".to_owned(), String::new(), "rust".to_owned());
-        db.upsert_file("lip://s/p@1/b.rs".to_owned(), String::new(), "rust".to_owned());
+        db.upsert_file(
+            "lip://s/p@1/a.rs".to_owned(),
+            String::new(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            "lip://s/p@1/b.rs".to_owned(),
+            String::new(),
+            "rust".to_owned(),
+        );
         assert_eq!(db.tracked_uris().len(), 2);
 
         db.remove_file("lip://s/p@1/a.rs");
@@ -1079,7 +1193,11 @@ mod tests {
     fn workspace_symbols_empty_query_returns_up_to_limit() {
         let mut db = LipDatabase::new();
         // Empty source → no symbols; just verify it doesn't panic.
-        db.upsert_file("lip://s/p@1/a.rs".to_owned(), String::new(), "rust".to_owned());
+        db.upsert_file(
+            "lip://s/p@1/a.rs".to_owned(),
+            String::new(),
+            "rust".to_owned(),
+        );
         let syms = db.workspace_symbols("", 10);
         assert!(syms.len() <= 10);
     }
@@ -1101,7 +1219,11 @@ mod tests {
     fn symbol_at_position_hits_occurrence_range() {
         let mut db = LipDatabase::new();
         let uri = "lip://s/p@1/pos.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn greet() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn greet() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         // Use the actual parsed occurrences so the test is not fragile to
         // tree-sitter range changes — pick the first occurrence and query at
@@ -1128,7 +1250,11 @@ mod tests {
     fn symbol_definition_location_found_after_upsert() {
         let mut db = LipDatabase::new();
         let uri = "lip://s/p@1/def.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn defined_fn() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn defined_fn() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         // Find a definition occurrence to get a real symbol URI.
         let occs = db.file_occurrences(&uri);
@@ -1149,17 +1275,25 @@ mod tests {
     fn symbol_definition_location_cleared_on_remove() {
         let mut db = LipDatabase::new();
         let uri = "lip://s/p@1/clear.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn gone() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn gone() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         let occs = db.file_occurrences(&uri);
         let def_occ = occs.iter().find(|o| o.role == Role::Definition);
-        let Some(def_occ) = def_occ else { return; };
+        let Some(def_occ) = def_occ else {
+            return;
+        };
         let sym_uri = def_occ.symbol_uri.clone();
 
         assert!(db.symbol_definition_location(&sym_uri).is_some());
         db.remove_file(&uri);
-        assert!(db.symbol_definition_location(&sym_uri).is_none(),
-            "def_index should be pruned on remove_file");
+        assert!(
+            db.symbol_definition_location(&sym_uri).is_none(),
+            "def_index should be pruned on remove_file"
+        );
     }
 
     // ── dead_symbols ──────────────────────────────────────────────────────
@@ -1209,13 +1343,13 @@ mod tests {
         use crate::schema::OwnedAnnotationEntry;
         let mut db = LipDatabase::new();
         let entry = OwnedAnnotationEntry {
-            symbol_uri:   "lip://s/p@1/f.rs#foo".to_owned(),
-            key:          "team:owner".to_owned(),
-            value:        "platform".to_owned(),
-            author_id:    "human:alice".to_owned(),
-            confidence:   100,
+            symbol_uri: "lip://s/p@1/f.rs#foo".to_owned(),
+            key: "team:owner".to_owned(),
+            value: "platform".to_owned(),
+            author_id: "human:alice".to_owned(),
+            confidence: 100,
             timestamp_ms: 0,
-            expires_ms:   0,
+            expires_ms: 0,
         };
         db.annotation_set(entry.clone());
 
@@ -1227,7 +1361,9 @@ mod tests {
     #[test]
     fn annotation_get_missing_returns_none() {
         let db = LipDatabase::new();
-        assert!(db.annotation_get("lip://s/p@1/f.rs#no_sym", "key").is_none());
+        assert!(db
+            .annotation_get("lip://s/p@1/f.rs#no_sym", "key")
+            .is_none());
     }
 
     #[test]
@@ -1237,13 +1373,13 @@ mod tests {
         let sym = "lip://s/p@1/f.rs#bar";
         for key in ["k1", "k2", "k3"] {
             db.annotation_set(OwnedAnnotationEntry {
-                symbol_uri:   sym.to_owned(),
-                key:          key.to_owned(),
-                value:        key.to_owned(),
-                author_id:    "human:test".to_owned(),
-                confidence:   100,
+                symbol_uri: sym.to_owned(),
+                key: key.to_owned(),
+                value: key.to_owned(),
+                author_id: "human:test".to_owned(),
+                confidence: 100,
                 timestamp_ms: 0,
-                expires_ms:   0,
+                expires_ms: 0,
             });
         }
         let list = db.annotation_list(sym);
@@ -1257,26 +1393,42 @@ mod tests {
         use crate::schema::OwnedAnnotationEntry;
         let mut db = LipDatabase::new();
         let file_uri = "lip://s/p@1/f.rs".to_owned();
-        let sym_uri  = format!("{file_uri}#foo");
+        let sym_uri = format!("{file_uri}#foo");
 
-        db.upsert_file(file_uri.clone(), "pub fn foo() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            file_uri.clone(),
+            "pub fn foo() {}".to_owned(),
+            "rust".to_owned(),
+        );
         db.annotation_set(OwnedAnnotationEntry {
-            symbol_uri:   sym_uri.clone(),
-            key:          "note".to_owned(),
-            value:        "fragile".to_owned(),
-            author_id:    "human:test".to_owned(),
-            confidence:   100,
+            symbol_uri: sym_uri.clone(),
+            key: "note".to_owned(),
+            value: "fragile".to_owned(),
+            author_id: "human:test".to_owned(),
+            confidence: 100,
             timestamp_ms: 0,
-            expires_ms:   0,
+            expires_ms: 0,
         });
 
         // Re-upsert and then remove the file — annotation must survive both.
-        db.upsert_file(file_uri.clone(), "pub fn foo() { /* changed */ }".to_owned(), "rust".to_owned());
-        assert_eq!(db.annotation_get(&sym_uri, "note").map(|e| e.value.as_str()), Some("fragile"));
+        db.upsert_file(
+            file_uri.clone(),
+            "pub fn foo() { /* changed */ }".to_owned(),
+            "rust".to_owned(),
+        );
+        assert_eq!(
+            db.annotation_get(&sym_uri, "note")
+                .map(|e| e.value.as_str()),
+            Some("fragile")
+        );
 
         db.remove_file(&file_uri);
-        assert_eq!(db.annotation_get(&sym_uri, "note").map(|e| e.value.as_str()), Some("fragile"),
-            "annotation must survive file removal");
+        assert_eq!(
+            db.annotation_get(&sym_uri, "note")
+                .map(|e| e.value.as_str()),
+            Some("fragile"),
+            "annotation must survive file removal"
+        );
     }
 
     // ── upgrade_file_symbols ──────────────────────────────────────────────
@@ -1285,28 +1437,41 @@ mod tests {
     fn upgrade_file_symbols_raises_confidence() {
         let mut db = LipDatabase::new();
         let uri = "lip://s/p@1/up.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn upgradable() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn upgradable() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         let syms_before = db.file_symbols(&uri);
         // Tier 1 should give confidence 30.
-        assert!(syms_before.iter().all(|s| s.confidence_score == 30),
-            "Tier 1 symbols should start at confidence 30");
+        assert!(
+            syms_before.iter().all(|s| s.confidence_score == 30),
+            "Tier 1 symbols should start at confidence 30"
+        );
 
         // Simulate Tier 2 upgrade.
-        let upgrades: Vec<_> = syms_before.iter().map(|s| {
-            let mut up = s.clone();
-            up.confidence_score = 70;
-            up.signature = Some("fn upgradable()".to_owned());
-            up
-        }).collect();
+        let upgrades: Vec<_> = syms_before
+            .iter()
+            .map(|s| {
+                let mut up = s.clone();
+                up.confidence_score = 70;
+                up.signature = Some("fn upgradable()".to_owned());
+                up
+            })
+            .collect();
 
         db.upgrade_file_symbols(&uri, &upgrades);
 
         let syms_after = db.file_symbols(&uri);
-        assert!(syms_after.iter().all(|s| s.confidence_score == 70),
-            "symbols should be upgraded to confidence 70");
-        assert!(syms_after.iter().any(|s| s.signature.is_some()),
-            "upgraded symbols should carry signatures");
+        assert!(
+            syms_after.iter().all(|s| s.confidence_score == 70),
+            "symbols should be upgraded to confidence 70"
+        );
+        assert!(
+            syms_after.iter().any(|s| s.signature.is_some()),
+            "upgraded symbols should carry signatures"
+        );
     }
 
     #[test]
@@ -1332,14 +1497,24 @@ impl Greeter {
     pub fn hello(&self) -> &str { "hello" }
     fn private_method(&self) {}
 }
-"#.to_owned(),
+"#
+            .to_owned(),
             "rust".to_owned(),
         );
         let syms = db.file_symbols(&uri);
         let names: Vec<&str> = syms.iter().map(|s| s.display_name.as_str()).collect();
-        assert!(names.contains(&"Greeter"), "struct should be extracted; got: {names:?}");
-        assert!(names.contains(&"hello"),   "pub method should be extracted; got: {names:?}");
-        assert!(names.contains(&"private_method"), "private method should be extracted; got: {names:?}");
+        assert!(
+            names.contains(&"Greeter"),
+            "struct should be extracted; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"hello"),
+            "pub method should be extracted; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"private_method"),
+            "private method should be extracted; got: {names:?}"
+        );
     }
 
     // ── reverse_deps ─────────────────────────────────────────────────────
@@ -1347,7 +1522,11 @@ impl Greeter {
     #[test]
     fn reverse_deps_empty_for_isolated_file() {
         let mut db = LipDatabase::new();
-        db.upsert_file("lip://s/p@1/solo.rs".to_owned(), "pub fn solo() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            "lip://s/p@1/solo.rs".to_owned(),
+            "pub fn solo() {}".to_owned(),
+            "rust".to_owned(),
+        );
         let deps = db.reverse_deps("lip://s/p@1/solo.rs");
         assert!(deps.is_empty(), "isolated file should have no reverse deps");
     }
@@ -1370,7 +1549,8 @@ impl Greeter {
             "rust".to_owned(),
         );
 
-        let helper_sym = db.file_symbols(&uri)
+        let helper_sym = db
+            .file_symbols(&uri)
             .iter()
             .find(|s| s.display_name == "helper")
             .map(|s| s.uri.clone())
@@ -1396,12 +1576,19 @@ impl Greeter {
         );
 
         // Re-upsert with no callers — CPG edge should be removed.
-        db.upsert_file(uri.clone(), "pub fn helper() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn helper() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         // Re-fetch the helper sym URI (unchanged after re-upsert).
-        let helper_sym2 = db.file_symbols(&uri)
-            .iter().find(|s| s.display_name == "helper")
-            .map(|s| s.uri.clone()).expect("helper symbol not found after re-upsert");
+        let helper_sym2 = db
+            .file_symbols(&uri)
+            .iter()
+            .find(|s| s.display_name == "helper")
+            .map(|s| s.uri.clone())
+            .expect("helper symbol not found after re-upsert");
 
         // blast_radius_for should now report an empty affected_files because the
         // caller was removed from the CPG index.
@@ -1421,13 +1608,22 @@ impl Greeter {
         // lip://local/lib.rs#helper. The callee_name_to_callers index should bridge
         // this gap and include caller.rs in the blast radius for helper.
         let mut db = LipDatabase::new();
-        let lib_uri    = "file:///project/lib.rs".to_owned();
+        let lib_uri = "file:///project/lib.rs".to_owned();
         let caller_uri = "file:///project/caller.rs".to_owned();
 
-        db.upsert_file(lib_uri.clone(),    "pub fn helper() {}".to_owned(), "rust".to_owned());
-        db.upsert_file(caller_uri.clone(), "pub fn main() { helper(); }".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            lib_uri.clone(),
+            "pub fn helper() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            caller_uri.clone(),
+            "pub fn main() { helper(); }".to_owned(),
+            "rust".to_owned(),
+        );
 
-        let helper_sym = db.file_symbols(&lib_uri)
+        let helper_sym = db
+            .file_symbols(&lib_uri)
             .iter()
             .find(|s| s.display_name == "helper")
             .map(|s| s.uri.clone())
@@ -1445,34 +1641,50 @@ impl Greeter {
     fn symbols_by_name_finds_definition() {
         let mut db = LipDatabase::new();
         let uri = "file:///project/api.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn my_func() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn my_func() {}".to_owned(),
+            "rust".to_owned(),
+        );
 
         let uris = db.symbols_by_name("my_func");
         assert!(!uris.is_empty(), "name_to_symbols should index my_func");
-        assert!(uris.iter().any(|u| u.contains("my_func")),
-            "returned URIs should contain my_func; got {uris:?}");
+        assert!(
+            uris.iter().any(|u| u.contains("my_func")),
+            "returned URIs should contain my_func; got {uris:?}"
+        );
     }
 
     #[test]
     fn symbols_by_name_cleared_on_remove() {
         let mut db = LipDatabase::new();
         let uri = "file:///project/api.rs".to_owned();
-        db.upsert_file(uri.clone(), "pub fn gone_fn() {}".to_owned(), "rust".to_owned());
+        db.upsert_file(
+            uri.clone(),
+            "pub fn gone_fn() {}".to_owned(),
+            "rust".to_owned(),
+        );
         assert!(!db.symbols_by_name("gone_fn").is_empty());
         db.remove_file(&uri);
-        assert!(db.symbols_by_name("gone_fn").is_empty(),
-            "name_to_symbols should be pruned on remove_file");
+        assert!(
+            db.symbols_by_name("gone_fn").is_empty(),
+            "name_to_symbols should be pruned on remove_file"
+        );
     }
 
     // ── Annotation expiry ─────────────────────────────────────────────────────
 
-    fn make_annotation(sym: &str, key: &str, expires_ms: i64) -> crate::schema::OwnedAnnotationEntry {
+    fn make_annotation(
+        sym: &str,
+        key: &str,
+        expires_ms: i64,
+    ) -> crate::schema::OwnedAnnotationEntry {
         crate::schema::OwnedAnnotationEntry {
-            symbol_uri:   sym.to_owned(),
-            key:          key.to_owned(),
-            value:        "v".to_owned(),
-            author_id:    "test".to_owned(),
-            confidence:   100,
+            symbol_uri: sym.to_owned(),
+            key: key.to_owned(),
+            value: "v".to_owned(),
+            author_id: "test".to_owned(),
+            confidence: 100,
             timestamp_ms: 0,
             expires_ms,
         }
@@ -1498,16 +1710,20 @@ impl Greeter {
         let mut db = LipDatabase::new();
         // expires_ms = 1 (1 ms past the Unix epoch) — definitely expired
         db.annotation_set(make_annotation("lip://s#f", "k", 1));
-        assert!(db.annotation_get("lip://s#f", "k").is_none(),
-            "expired annotation should not be returned by get");
-        assert!(db.annotation_list("lip://s#f").is_empty(),
-            "expired annotation should not be returned by list");
+        assert!(
+            db.annotation_get("lip://s#f", "k").is_none(),
+            "expired annotation should not be returned by get"
+        );
+        assert!(
+            db.annotation_list("lip://s#f").is_empty(),
+            "expired annotation should not be returned by list"
+        );
     }
 
     #[test]
     fn purge_expired_removes_only_expired() {
         let mut db = LipDatabase::new();
-        db.annotation_set(make_annotation("lip://s#f", "live",    0));
+        db.annotation_set(make_annotation("lip://s#f", "live", 0));
         db.annotation_set(make_annotation("lip://s#f", "expired", 1));
         let removed = db.purge_expired_annotations();
         assert_eq!(removed, 1);
@@ -1529,16 +1745,14 @@ impl Greeter {
     #[test]
     fn stale_files_unknown_uri_is_stale() {
         let db = LipDatabase::new();
-        let stale = db.stale_files(&[
-            ("file:///src/unknown.rs".into(), "deadbeef".into()),
-        ]);
+        let stale = db.stale_files(&[("file:///src/unknown.rs".into(), "deadbeef".into())]);
         assert_eq!(stale, vec!["file:///src/unknown.rs"]);
     }
 
     #[test]
     fn stale_files_matching_hash_is_clean() {
         let mut db = LipDatabase::new();
-        let uri  = "file:///src/main.rs".to_owned();
+        let uri = "file:///src/main.rs".to_owned();
         let text = "fn main() {}".to_owned();
         db.upsert_file(uri.clone(), text.clone(), "rust".to_owned());
         let hash = sha256_hex(text.as_bytes());
@@ -1564,14 +1778,22 @@ impl Greeter {
         let clean_text = "fn clean() {}".to_owned();
         let stale_text = "fn stale() {}".to_owned();
 
-        db.upsert_file("file:///src/clean.rs".into(), clean_text.clone(), "rust".into());
-        db.upsert_file("file:///src/stale.rs".into(), stale_text.clone(), "rust".into());
+        db.upsert_file(
+            "file:///src/clean.rs".into(),
+            clean_text.clone(),
+            "rust".into(),
+        );
+        db.upsert_file(
+            "file:///src/stale.rs".into(),
+            stale_text.clone(),
+            "rust".into(),
+        );
 
         let clean_hash = sha256_hex(clean_text.as_bytes());
         let stale = db.stale_files(&[
             ("file:///src/clean.rs".into(), clean_hash),
             ("file:///src/stale.rs".into(), "outdated_hash".into()),
-            ("file:///src/new.rs".into(),   "any_hash".into()),
+            ("file:///src/new.rs".into(), "any_hash".into()),
         ]);
         assert_eq!(stale.len(), 2);
         assert!(stale.contains(&"file:///src/stale.rs".to_owned()));
@@ -1581,118 +1803,177 @@ impl Greeter {
 
     // ── Slice mounting ────────────────────────────────────────────────────
 
-    fn make_slice(manager: &str, pkg: &str, ver: &str, syms: Vec<(&str, &str)>) -> OwnedDependencySlice {
+    fn make_slice(
+        manager: &str,
+        pkg: &str,
+        ver: &str,
+        syms: Vec<(&str, &str)>,
+    ) -> OwnedDependencySlice {
         OwnedDependencySlice {
-            manager:      manager.to_owned(),
+            manager: manager.to_owned(),
             package_name: pkg.to_owned(),
-            version:      ver.to_owned(),
+            version: ver.to_owned(),
             package_hash: "abc123".to_owned(),
             content_hash: "def456".to_owned(),
-            symbols: syms.into_iter().map(|(uri, name)| OwnedSymbolInfo {
-                uri:              uri.to_owned(),
-                display_name:     name.to_owned(),
-                kind:             SymbolKind::Function,
-                documentation:    None,
-                signature:        None,
-                confidence_score: 30,
-                relationships:    vec![],
-                runtime_p99_ms:   None,
-                call_rate_per_s:  None,
-                taint_labels:     vec![],
-                blast_radius:     0,
-            }).collect(),
-            slice_url:    String::new(),
-            built_at_ms:  0,
+            symbols: syms
+                .into_iter()
+                .map(|(uri, name)| OwnedSymbolInfo {
+                    uri: uri.to_owned(),
+                    display_name: name.to_owned(),
+                    kind: SymbolKind::Function,
+                    documentation: None,
+                    signature: None,
+                    confidence_score: 30,
+                    relationships: vec![],
+                    runtime_p99_ms: None,
+                    call_rate_per_s: None,
+                    taint_labels: vec![],
+                    blast_radius: 0,
+                })
+                .collect(),
+            slice_url: String::new(),
+            built_at_ms: 0,
         }
     }
 
     #[test]
     fn mount_slice_symbols_visible_in_workspace_symbols() {
         let mut db = LipDatabase::new();
-        let slice = make_slice("cargo", "serde", "1.0.0", vec![
-            ("lip://cargo/serde@1.0.0/src/lib.rs#Deserialize", "Deserialize"),
-            ("lip://cargo/serde@1.0.0/src/lib.rs#Serialize",   "Serialize"),
-        ]);
+        let slice = make_slice(
+            "cargo",
+            "serde",
+            "1.0.0",
+            vec![
+                (
+                    "lip://cargo/serde@1.0.0/src/lib.rs#Deserialize",
+                    "Deserialize",
+                ),
+                ("lip://cargo/serde@1.0.0/src/lib.rs#Serialize", "Serialize"),
+            ],
+        );
         db.mount_slice(&slice);
         assert_eq!(db.mounted_package_count(), 1);
 
         let results = db.workspace_symbols("Deserialize", 10);
-        assert!(results.iter().any(|s| s.display_name == "Deserialize"),
-            "mounted symbol should appear in workspace_symbols");
+        assert!(
+            results.iter().any(|s| s.display_name == "Deserialize"),
+            "mounted symbol should appear in workspace_symbols"
+        );
     }
 
     #[test]
     fn mount_slice_confidence_is_tier3() {
         let mut db = LipDatabase::new();
-        let slice = make_slice("npm", "react", "18.2.0", vec![
-            ("lip://npm/react@18.2.0/index.js#useState", "useState"),
-        ]);
+        let slice = make_slice(
+            "npm",
+            "react",
+            "18.2.0",
+            vec![("lip://npm/react@18.2.0/index.js#useState", "useState")],
+        );
         db.mount_slice(&slice);
         let sym = db.symbol_by_uri("lip://npm/react@18.2.0/index.js#useState");
         assert!(sym.is_some(), "symbol_by_uri should find mounted symbol");
-        assert_eq!(sym.unwrap().confidence_score, 100, "Tier 3 score must be 100");
+        assert_eq!(
+            sym.unwrap().confidence_score,
+            100,
+            "Tier 3 score must be 100"
+        );
     }
 
     #[test]
     fn mount_slice_is_idempotent() {
         let mut db = LipDatabase::new();
-        let slice = make_slice("cargo", "tokio", "1.0.0", vec![
-            ("lip://cargo/tokio@1.0.0/src/lib.rs#spawn", "spawn"),
-        ]);
+        let slice = make_slice(
+            "cargo",
+            "tokio",
+            "1.0.0",
+            vec![("lip://cargo/tokio@1.0.0/src/lib.rs#spawn", "spawn")],
+        );
         db.mount_slice(&slice);
         db.mount_slice(&slice); // second mount of same package
-        assert_eq!(db.mounted_package_count(), 1, "re-mount should not double-count package");
+        assert_eq!(
+            db.mounted_package_count(),
+            1,
+            "re-mount should not double-count package"
+        );
         let results = db.workspace_symbols("spawn", 10);
-        assert_eq!(results.iter().filter(|s| s.display_name == "spawn").count(), 1,
-            "symbol should appear exactly once after idempotent re-mount");
+        assert_eq!(
+            results.iter().filter(|s| s.display_name == "spawn").count(),
+            1,
+            "symbol should appear exactly once after idempotent re-mount"
+        );
     }
 
     #[test]
     fn mount_slice_def_index_populated() {
         let mut db = LipDatabase::new();
-        let slice = make_slice("pub", "flutter", "3.0.0", vec![
-            ("lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget", "StatefulWidget"),
-        ]);
+        let slice = make_slice(
+            "pub",
+            "flutter",
+            "3.0.0",
+            vec![(
+                "lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget",
+                "StatefulWidget",
+            )],
+        );
         db.mount_slice(&slice);
-        let loc = db.symbol_definition_location("lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget");
+        let loc = db.symbol_definition_location(
+            "lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget",
+        );
         assert!(loc.is_some(), "def_index must contain mounted symbol URI");
     }
 
     #[test]
     fn mount_slice_visible_in_similar_symbols() {
         let mut db = LipDatabase::new();
-        let slice = make_slice("npm", "lodash", "4.17.21", vec![
-            ("lip://npm/lodash@4.17.21/src/index.js#debounce", "debounce"),
-            ("lip://npm/lodash@4.17.21/src/index.js#throttle", "throttle"),
-        ]);
+        let slice = make_slice(
+            "npm",
+            "lodash",
+            "4.17.21",
+            vec![
+                ("lip://npm/lodash@4.17.21/src/index.js#debounce", "debounce"),
+                ("lip://npm/lodash@4.17.21/src/index.js#throttle", "throttle"),
+            ],
+        );
         db.mount_slice(&slice);
         // "debounce" and "debounc" should both hit via trigram similarity.
         let hits = db.similar_symbols("debounc", 10);
-        assert!(hits.iter().any(|s| s.name == "debounce"),
-            "mounted symbol should appear in similar_symbols results");
+        assert!(
+            hits.iter().any(|s| s.name == "debounce"),
+            "mounted symbol should appear in similar_symbols results"
+        );
     }
 
     #[test]
     fn remount_replaces_symbols_not_duplicates() {
         let mut db = LipDatabase::new();
         // First mount: two symbols.
-        let slice_v1 = make_slice("cargo", "anyhow", "1.0.0", vec![
-            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Error",   "Error"),
-            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Context", "Context"),
-        ]);
+        let slice_v1 = make_slice(
+            "cargo",
+            "anyhow",
+            "1.0.0",
+            vec![
+                ("lip://cargo/anyhow@1.0.0/src/lib.rs#Error", "Error"),
+                ("lip://cargo/anyhow@1.0.0/src/lib.rs#Context", "Context"),
+            ],
+        );
         db.mount_slice(&slice_v1);
 
         // Re-mount with only one symbol (simulates a trimmed re-build).
-        let slice_v2 = make_slice("cargo", "anyhow", "1.0.0", vec![
-            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Error", "Error"),
-        ]);
+        let slice_v2 = make_slice(
+            "cargo",
+            "anyhow",
+            "1.0.0",
+            vec![("lip://cargo/anyhow@1.0.0/src/lib.rs#Error", "Error")],
+        );
         db.mount_slice(&slice_v2);
 
         // Only one package should be tracked.
         assert_eq!(db.mounted_package_count(), 1);
         // The re-mount should have replaced, not accumulated.
         let results = db.workspace_symbols("", 100);
-        let anyhow_syms: Vec<_> = results.iter()
+        let anyhow_syms: Vec<_> = results
+            .iter()
             .filter(|s| s.uri.contains("anyhow"))
             .collect();
         assert_eq!(anyhow_syms.len(), 1, "re-mount should replace, not append");

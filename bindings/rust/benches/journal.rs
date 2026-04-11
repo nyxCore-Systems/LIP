@@ -11,8 +11,8 @@ use lip::query_graph::LipDatabase;
 
 fn make_upsert_entry(i: usize) -> JournalEntry {
     JournalEntry::UpsertFile {
-        uri:      format!("lip://local/proj@0.1/file{i}.rs"),
-        text:     "pub fn foo() { let x = 1 + 2; x }".to_owned(),
+        uri: format!("lip://local/proj@0.1/file{i}.rs"),
+        text: "pub fn foo() { let x = 1 + 2; x }".to_owned(),
         language: "rust".to_owned(),
     }
 }

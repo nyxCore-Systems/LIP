@@ -9,7 +9,13 @@ fn main() {
         Ok(flatc) => {
             let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
             let status = std::process::Command::new(flatc)
-                .args(["--rust", "--gen-all", "-o", &out_dir, schema.to_str().unwrap()])
+                .args([
+                    "--rust",
+                    "--gen-all",
+                    "-o",
+                    &out_dir,
+                    schema.to_str().unwrap(),
+                ])
                 .status()
                 .expect("failed to run flatc");
             if !status.success() {

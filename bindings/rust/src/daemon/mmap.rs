@@ -35,7 +35,7 @@ impl MmapHeader {
 /// `MmapHeader` over the socket. The client maps the same file with
 /// `MAP_PRIVATE` and reads the blob at the declared offset.
 pub struct SharedMmapRegion {
-    map:  MmapMut,
+    map: MmapMut,
     path: PathBuf,
     /// Cursor: byte offset for the next write.
     head: usize,
@@ -61,11 +61,13 @@ impl SharedMmapRegion {
     /// Returns the `MmapHeader` the client needs to locate the blob.
     pub fn write_blob(&mut self, data: &[u8]) -> anyhow::Result<MmapHeader> {
         let offset = self.head;
-        let end    = offset + data.len();
+        let end = offset + data.len();
         if end > self.map.len() {
             anyhow::bail!(
                 "mmap region full: need {} bytes at offset {}, capacity {}",
-                data.len(), offset, self.map.len()
+                data.len(),
+                offset,
+                self.map.len()
             );
         }
         self.map[offset..end].copy_from_slice(data);

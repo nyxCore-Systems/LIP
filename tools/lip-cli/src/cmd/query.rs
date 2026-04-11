@@ -8,7 +8,6 @@ use lip::query_graph::{ClientMessage, ServerMessage};
 
 use crate::output;
 
-
 #[derive(Args)]
 pub struct QueryArgs {
     /// Path to the daemon Unix socket.
@@ -22,11 +21,7 @@ pub struct QueryArgs {
 #[derive(Subcommand)]
 pub enum QueryKind {
     /// Find the definition of the symbol at (line, col) in a file.
-    Definition {
-        uri:  String,
-        line: u32,
-        col:  u32,
-    },
+    Definition { uri: String, line: u32, col: u32 },
     /// Find all references to a symbol URI.
     References {
         symbol_uri: String,
@@ -34,15 +29,9 @@ pub enum QueryKind {
         limit: usize,
     },
     /// Show hover info for the symbol at (line, col).
-    Hover {
-        uri:  String,
-        line: u32,
-        col:  u32,
-    },
+    Hover { uri: String, line: u32, col: u32 },
     /// Compute blast radius for a symbol URI.
-    BlastRadius {
-        symbol_uri: String,
-    },
+    BlastRadius { symbol_uri: String },
     /// Search workspace symbols by name.
     Symbols {
         query: String,
@@ -98,8 +87,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 buf
             }
         };
-        let files: Vec<(String, String)> = serde_json::from_slice(&raw)
-            .map_err(|e| anyhow::anyhow!("input must be a JSON array of [uri, sha256] pairs: {e}"))?;
+        let files: Vec<(String, String)> = serde_json::from_slice(&raw).map_err(|e| {
+            anyhow::anyhow!("input must be a JSON array of [uri, sha256] pairs: {e}")
+        })?;
         let msg = ClientMessage::QueryStaleFiles { files };
         let resp = send_recv(&args.socket, msg).await?;
         output::print_json(&resp)?;
@@ -117,8 +107,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 buf
             }
         };
-        let queries: Vec<ClientMessage> = serde_json::from_slice(&raw)
-            .map_err(|e| anyhow::anyhow!("batch input is not a valid JSON array of queries: {e}"))?;
+        let queries: Vec<ClientMessage> = serde_json::from_slice(&raw).map_err(|e| {
+            anyhow::anyhow!("batch input is not a valid JSON array of queries: {e}")
+        })?;
         let msg = ClientMessage::BatchQuery { queries };
         let resp = send_recv(&args.socket, msg).await?;
         output::print_json(&resp)?;
@@ -129,24 +120,18 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         QueryKind::Definition { uri, line, col } => {
             ClientMessage::QueryDefinition { uri, line, col }
         }
-        QueryKind::References { symbol_uri, limit } => {
-            ClientMessage::QueryReferences { symbol_uri, limit: Some(limit) }
-        }
-        QueryKind::Hover { uri, line, col } => {
-            ClientMessage::QueryHover { uri, line, col }
-        }
-        QueryKind::BlastRadius { symbol_uri } => {
-            ClientMessage::QueryBlastRadius { symbol_uri }
-        }
-        QueryKind::Symbols { query, limit } => {
-            ClientMessage::QueryWorkspaceSymbols { query, limit: Some(limit) }
-        }
-        QueryKind::DeadSymbols { limit } => {
-            ClientMessage::QueryDeadSymbols { limit: Some(limit) }
-        }
-        QueryKind::Similar { query, limit } => {
-            ClientMessage::SimilarSymbols { query, limit }
-        }
+        QueryKind::References { symbol_uri, limit } => ClientMessage::QueryReferences {
+            symbol_uri,
+            limit: Some(limit),
+        },
+        QueryKind::Hover { uri, line, col } => ClientMessage::QueryHover { uri, line, col },
+        QueryKind::BlastRadius { symbol_uri } => ClientMessage::QueryBlastRadius { symbol_uri },
+        QueryKind::Symbols { query, limit } => ClientMessage::QueryWorkspaceSymbols {
+            query,
+            limit: Some(limit),
+        },
+        QueryKind::DeadSymbols { limit } => ClientMessage::QueryDeadSymbols { limit: Some(limit) },
+        QueryKind::Similar { query, limit } => ClientMessage::SimilarSymbols { query, limit },
         QueryKind::StaleFiles { .. } => unreachable!("handled above"),
         QueryKind::Batch { .. } => unreachable!("handled above"),
     };
@@ -157,11 +142,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 }
 
 async fn send_recv(socket: &PathBuf, msg: ClientMessage) -> anyhow::Result<ServerMessage> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|e| {
-        anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket.display())
-    })?;
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket.display()))?;
     let body = serde_json::to_vec(&msg)?;
-    let len  = body.len() as u32;
+    let len = body.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&body).await?;
     let mut len_buf = [0u8; 4];

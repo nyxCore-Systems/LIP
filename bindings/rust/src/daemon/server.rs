@@ -18,24 +18,24 @@ const NOTIFY_CAPACITY: usize = 64;
 /// The LIP daemon — accepts Unix socket connections and dispatches sessions.
 pub struct LipDaemon {
     socket_path: PathBuf,
-    db:          Arc<Mutex<LipDatabase>>,
-    tier2_tx:    mpsc::Sender<VerificationJob>,
-    tier2_rx:    Option<mpsc::Receiver<VerificationJob>>,
+    db: Arc<Mutex<LipDatabase>>,
+    tier2_tx: mpsc::Sender<VerificationJob>,
+    tier2_rx: Option<mpsc::Receiver<VerificationJob>>,
     /// Whether to spawn the per-file filesystem watcher on startup.
     watch_files: bool,
     /// Broadcast sender for push notifications to all active sessions.
-    notify_tx:   broadcast::Sender<ServerMessage>,
+    notify_tx: broadcast::Sender<ServerMessage>,
 }
 
 impl LipDaemon {
     pub fn new(socket_path: impl AsRef<Path>) -> Self {
         let (tier2_tx, tier2_rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let (notify_tx, _)       = broadcast::channel(NOTIFY_CAPACITY);
+        let (notify_tx, _) = broadcast::channel(NOTIFY_CAPACITY);
         Self {
             socket_path: socket_path.as_ref().to_owned(),
-            db:          Arc::new(Mutex::new(LipDatabase::new())),
+            db: Arc::new(Mutex::new(LipDatabase::new())),
             tier2_tx,
-            tier2_rx:    Some(tier2_rx),
+            tier2_rx: Some(tier2_rx),
             watch_files: true,
             notify_tx,
         }
@@ -56,7 +56,8 @@ impl LipDaemon {
         // Open the write-ahead journal. The path mirrors the socket with a
         // `.journal` extension so they live in the same directory.
         let journal_path = {
-            let name = self.socket_path
+            let name = self
+                .socket_path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -71,17 +72,25 @@ impl LipDaemon {
             // Purge expired annotations before compacting so the rewritten
             // journal never contains entries that are already past their TTL.
             let purged = db.purge_expired_annotations();
-            if purged > 0 { info!("purged {purged} expired annotation(s) on startup"); }
+            if purged > 0 {
+                info!("purged {purged} expired annotation(s) on startup");
+            }
             if entries.len() >= COMPACT_THR {
                 match journal::compact(&journal_path, &db) {
                     Ok(n) => info!(
                         "compacted journal: {} entries → {} snapshot entries ({})",
-                        entries.len(), n, journal_path.display()
+                        entries.len(),
+                        n,
+                        journal_path.display()
                     ),
                     Err(e) => warn!("journal compaction failed: {e}"),
                 }
             } else if !entries.is_empty() {
-                info!("replayed {} journal entries from {}", entries.len(), journal_path.display());
+                info!(
+                    "replayed {} journal entries from {}",
+                    entries.len(),
+                    journal_path.display()
+                );
             }
         }
         // Re-open for appending (post-compaction file or original if below threshold).
@@ -93,7 +102,10 @@ impl LipDaemon {
 
         // Spawn the Tier 2 background manager. It is a separate task so Tier 2
         // verification never blocks session response latency.
-        let rx = self.tier2_rx.take().expect("tier2_rx consumed exactly once");
+        let rx = self
+            .tier2_rx
+            .take()
+            .expect("tier2_rx consumed exactly once");
         let manager = Tier2Manager::new(self.db.clone(), rx, self.notify_tx.clone());
         tokio::spawn(async move { manager.run().await });
 

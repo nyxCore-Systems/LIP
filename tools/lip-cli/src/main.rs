@@ -56,15 +56,15 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Daemon(args) => cmd::daemon::run(args).await,
-        Commands::Index(args)  => cmd::index::run(args).await,
-        Commands::Query(args)  => cmd::query::run(args).await,
+        Commands::Index(args) => cmd::index::run(args).await,
+        Commands::Query(args) => cmd::query::run(args).await,
         Commands::Import(args) => cmd::import::run(args).await,
         Commands::Export(args) => cmd::export::run(args).await,
-        Commands::Lsp(args)    => cmd::lsp::run(args).await,
-        Commands::Fetch(args)    => cmd::fetch::run(args).await,
-        Commands::Push(args)     => cmd::push::run(args).await,
+        Commands::Lsp(args) => cmd::lsp::run(args).await,
+        Commands::Fetch(args) => cmd::fetch::run(args).await,
+        Commands::Push(args) => cmd::push::run(args).await,
         Commands::Annotate(args) => cmd::annotate::run(args).await,
-        Commands::Mcp(args)      => cmd::mcp::run(args).await,
-        Commands::Slice(args)    => cmd::slice::run(args).await,
+        Commands::Mcp(args) => cmd::mcp::run(args).await,
+        Commands::Slice(args) => cmd::slice::run(args).await,
     }
 }

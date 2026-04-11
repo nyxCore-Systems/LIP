@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::{
-    Hover, HoverContents, Location, MarkupContent, MarkupKind, Position, Range,
-    SymbolInformation, SymbolKind as LspSymbolKind, Url,
+    Hover, HoverContents, Location, MarkupContent, MarkupKind, Position, Range, SymbolInformation,
+    SymbolKind as LspSymbolKind, Url,
 };
 
 use crate::schema::{OwnedOccurrence, OwnedRange, OwnedSymbolInfo, SymbolKind};
@@ -10,7 +10,7 @@ use crate::schema::{OwnedOccurrence, OwnedRange, OwnedSymbolInfo, SymbolKind};
 pub fn lip_range_to_lsp(r: &OwnedRange) -> Range {
     Range {
         start: Position::new(r.start_line.max(0) as u32, r.start_char.max(0) as u32),
-        end:   Position::new(r.end_line.max(0) as u32, r.end_char.max(0) as u32),
+        end: Position::new(r.end_line.max(0) as u32, r.end_char.max(0) as u32),
     }
 }
 
@@ -18,8 +18,8 @@ pub fn lsp_position_to_lip(pos: &Position) -> OwnedRange {
     OwnedRange {
         start_line: pos.line as i32,
         start_char: pos.character as i32,
-        end_line:   pos.line as i32,
-        end_char:   pos.character as i32,
+        end_line: pos.line as i32,
+        end_char: pos.character as i32,
     }
 }
 
@@ -27,21 +27,21 @@ pub fn lsp_position_to_lip(pos: &Position) -> OwnedRange {
 
 pub fn lip_kind_to_lsp(kind: SymbolKind) -> LspSymbolKind {
     match kind {
-        SymbolKind::Namespace     => LspSymbolKind::NAMESPACE,
-        SymbolKind::Class         => LspSymbolKind::CLASS,
-        SymbolKind::Interface     => LspSymbolKind::INTERFACE,
-        SymbolKind::Method        => LspSymbolKind::METHOD,
-        SymbolKind::Field         => LspSymbolKind::FIELD,
-        SymbolKind::Variable      => LspSymbolKind::VARIABLE,
-        SymbolKind::Function      => LspSymbolKind::FUNCTION,
+        SymbolKind::Namespace => LspSymbolKind::NAMESPACE,
+        SymbolKind::Class => LspSymbolKind::CLASS,
+        SymbolKind::Interface => LspSymbolKind::INTERFACE,
+        SymbolKind::Method => LspSymbolKind::METHOD,
+        SymbolKind::Field => LspSymbolKind::FIELD,
+        SymbolKind::Variable => LspSymbolKind::VARIABLE,
+        SymbolKind::Function => LspSymbolKind::FUNCTION,
         SymbolKind::TypeParameter => LspSymbolKind::TYPE_PARAMETER,
-        SymbolKind::Parameter     => LspSymbolKind::VARIABLE,
-        SymbolKind::Macro         => LspSymbolKind::FUNCTION,
-        SymbolKind::Enum          => LspSymbolKind::ENUM,
-        SymbolKind::EnumMember    => LspSymbolKind::ENUM_MEMBER,
-        SymbolKind::Constructor   => LspSymbolKind::CONSTRUCTOR,
-        SymbolKind::TypeAlias     => LspSymbolKind::TYPE_PARAMETER,
-        SymbolKind::Unknown       => LspSymbolKind::NULL,
+        SymbolKind::Parameter => LspSymbolKind::VARIABLE,
+        SymbolKind::Macro => LspSymbolKind::FUNCTION,
+        SymbolKind::Enum => LspSymbolKind::ENUM,
+        SymbolKind::EnumMember => LspSymbolKind::ENUM_MEMBER,
+        SymbolKind::Constructor => LspSymbolKind::CONSTRUCTOR,
+        SymbolKind::TypeAlias => LspSymbolKind::TYPE_PARAMETER,
+        SymbolKind::Unknown => LspSymbolKind::NULL,
     }
 }
 
@@ -92,7 +92,7 @@ pub fn symbol_to_hover(sym: &OwnedSymbolInfo) -> Hover {
     }
     Hover {
         contents: HoverContents::Markup(MarkupContent {
-            kind:  MarkupKind::Markdown,
+            kind: MarkupKind::Markdown,
             value: parts.join("\n\n"),
         }),
         range: None,
@@ -108,10 +108,10 @@ pub fn symbol_to_lsp_symbol_info(
     let location = symbol_to_location(sym, file_uri)?;
     #[allow(deprecated)]
     Some(SymbolInformation {
-        name:           sym.display_name.clone(),
-        kind:           lip_kind_to_lsp(sym.kind),
-        tags:           None,
-        deprecated:     None,
+        name: sym.display_name.clone(),
+        kind: lip_kind_to_lsp(sym.kind),
+        tags: None,
+        deprecated: None,
         location,
         container_name: None,
     })

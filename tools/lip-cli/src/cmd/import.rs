@@ -4,8 +4,8 @@ use clap::Args;
 use prost::Message;
 
 use lip::schema::{
-    sha256_hex, Action, OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence,
-    OwnedRange, OwnedSymbolInfo, Role, SymbolKind,
+    sha256_hex, Action, OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence, OwnedRange,
+    OwnedSymbolInfo, Role, SymbolKind,
 };
 
 use crate::output;
@@ -43,11 +43,7 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         args.scip_file.display()
     );
 
-    let mut deltas: Vec<OwnedDelta> = index
-        .documents
-        .into_iter()
-        .map(convert_document)
-        .collect();
+    let mut deltas: Vec<OwnedDelta> = index.documents.into_iter().map(convert_document).collect();
 
     // Also import external symbols as a synthetic document.
     if !index.external_symbols.is_empty() {
@@ -58,21 +54,21 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
             .collect();
 
         let doc = OwnedDocument {
-            uri:          "scip://external".to_owned(),
+            uri: "scip://external".to_owned(),
             content_hash: sha256_hex(b"external"),
-            language:     String::new(),
-            occurrences:  vec![],
+            language: String::new(),
+            occurrences: vec![],
             symbols,
-            merkle_path:  String::new(),
-            edges:        vec![],
-            source_text:  None,
+            merkle_path: String::new(),
+            edges: vec![],
+            source_text: None,
         };
         deltas.push(OwnedDelta {
-            action:      Action::Upsert,
+            action: Action::Upsert,
             commit_hash: String::new(),
-            document:    Some(doc),
-            symbol:      None,
-            slice:       None,
+            document: Some(doc),
+            symbol: None,
+            slice: None,
         });
     }
 
@@ -98,11 +94,7 @@ fn convert_document(doc: scip::Document) -> OwnedDelta {
     let uri = format!("file:///{}", doc.relative_path.trim_start_matches('/'));
     let content_hash = sha256_hex(doc.relative_path.as_bytes());
 
-    let symbols: Vec<OwnedSymbolInfo> = doc
-        .symbols
-        .iter()
-        .map(convert_symbol_info)
-        .collect();
+    let symbols: Vec<OwnedSymbolInfo> = doc.symbols.iter().map(convert_symbol_info).collect();
 
     let occurrences: Vec<OwnedOccurrence> = doc
         .occurrences
@@ -111,24 +103,24 @@ fn convert_document(doc: scip::Document) -> OwnedDelta {
         .collect();
 
     let lip_doc = OwnedDocument {
-        uri:          uri.clone(),
+        uri: uri.clone(),
         content_hash: content_hash.clone(),
-        language:     doc.language.clone(),
+        language: doc.language.clone(),
         occurrences,
         symbols,
-        merkle_path:  uri,
-        edges:        vec![],
-        source_text:  None, // SCIP imports have pre-computed symbols; no raw text
+        merkle_path: uri,
+        edges: vec![],
+        source_text: None, // SCIP imports have pre-computed symbols; no raw text
     };
 
     OwnedDelta {
-        action:      Action::Upsert,
+        action: Action::Upsert,
         // All imported symbols start at Tier 2 confidence (compiler-verified in SCIP)
         // pending daemon re-verification, per spec §10.2.
         commit_hash: content_hash,
-        document:    Some(lip_doc),
-        symbol:      None,
-        slice:       None,
+        document: Some(lip_doc),
+        symbol: None,
+        slice: None,
     }
 }
 
@@ -145,38 +137,38 @@ fn convert_symbol_info(sym: &scip::SymbolInformation) -> OwnedSymbolInfo {
     };
 
     let kind = scip_kind_to_lip(sym.kind);
-    let doc  = sym.documentation.join("\n\n");
+    let doc = sym.documentation.join("\n\n");
 
     OwnedSymbolInfo {
-        uri:              scip_symbol_to_lip_uri(&sym.symbol),
-        display_name:     display,
+        uri: scip_symbol_to_lip_uri(&sym.symbol),
+        display_name: display,
         kind,
-        documentation:    if doc.is_empty() { None } else { Some(doc) },
-        signature:        None,
+        documentation: if doc.is_empty() { None } else { Some(doc) },
+        signature: None,
         // Imported from SCIP → Tier 2 confidence (spec §10.2)
         confidence_score: 90,
-        relationships:    vec![],
-        runtime_p99_ms:   None,
-        call_rate_per_s:  None,
-        taint_labels:     vec![],
-        blast_radius:     0,
+        relationships: vec![],
+        runtime_p99_ms: None,
+        call_rate_per_s: None,
+        taint_labels: vec![],
+        blast_radius: 0,
     }
 }
 
 fn convert_occurrence(occ: &scip::Occurrence) -> Option<OwnedOccurrence> {
     let range = parse_scip_range(&occ.range)?;
-    let role  = if occ.symbol_roles & (scip::SymbolRole::Definition as i32) != 0 {
+    let role = if occ.symbol_roles & (scip::SymbolRole::Definition as i32) != 0 {
         Role::Definition
     } else {
         Role::Reference
     };
 
     Some(OwnedOccurrence {
-        symbol_uri:       scip_symbol_to_lip_uri(&occ.symbol),
+        symbol_uri: scip_symbol_to_lip_uri(&occ.symbol),
         range,
         confidence_score: 90,
         role,
-        override_doc:     if occ.override_documentation.is_empty() {
+        override_doc: if occ.override_documentation.is_empty() {
             None
         } else {
             Some(occ.override_documentation.join("\n"))
@@ -219,14 +211,14 @@ fn parse_scip_range(range: &[i32]) -> Option<OwnedRange> {
         3 => Some(OwnedRange {
             start_line: range[0],
             start_char: range[1],
-            end_line:   range[0],
-            end_char:   range[2],
+            end_line: range[0],
+            end_char: range[2],
         }),
         4 => Some(OwnedRange {
             start_line: range[0],
             start_char: range[1],
-            end_line:   range[2],
-            end_char:   range[3],
+            end_line: range[2],
+            end_char: range[3],
         }),
         _ => None,
     }
@@ -236,20 +228,25 @@ fn scip_kind_to_lip(kind: i32) -> SymbolKind {
     use scip::Kind;
     match Kind::try_from(kind).unwrap_or(Kind::KUnspecifiedKind) {
         Kind::KClass | Kind::KStruct | Kind::KObject => SymbolKind::Class,
-        Kind::KInterface | Kind::KProtocol            => SymbolKind::Interface,
-        Kind::KFunction | Kind::KAbstractMethod
-        | Kind::KMethod | Kind::KMethodAlias
-        | Kind::KStaticMethod | Kind::KPureVirtualMethod => SymbolKind::Function,
-        Kind::KEnum                                  => SymbolKind::Enum,
-        Kind::KEnumMember                            => SymbolKind::EnumMember,
-        Kind::KVariable | Kind::KConstant
-        | Kind::KStaticVariable | Kind::KField       => SymbolKind::Variable,
-        Kind::KModule | Kind::KNamespace
-        | Kind::KPackage | Kind::KPackageObject      => SymbolKind::Namespace,
-        Kind::KTypeAlias | Kind::KTypeParameter      => SymbolKind::TypeAlias,
-        Kind::KConstructor                           => SymbolKind::Constructor,
-        Kind::KMacro                                 => SymbolKind::Macro,
-        _                                            => SymbolKind::Unknown,
+        Kind::KInterface | Kind::KProtocol => SymbolKind::Interface,
+        Kind::KFunction
+        | Kind::KAbstractMethod
+        | Kind::KMethod
+        | Kind::KMethodAlias
+        | Kind::KStaticMethod
+        | Kind::KPureVirtualMethod => SymbolKind::Function,
+        Kind::KEnum => SymbolKind::Enum,
+        Kind::KEnumMember => SymbolKind::EnumMember,
+        Kind::KVariable | Kind::KConstant | Kind::KStaticVariable | Kind::KField => {
+            SymbolKind::Variable
+        }
+        Kind::KModule | Kind::KNamespace | Kind::KPackage | Kind::KPackageObject => {
+            SymbolKind::Namespace
+        }
+        Kind::KTypeAlias | Kind::KTypeParameter => SymbolKind::TypeAlias,
+        Kind::KConstructor => SymbolKind::Constructor,
+        Kind::KMacro => SymbolKind::Macro,
+        _ => SymbolKind::Unknown,
     }
 }
 
@@ -257,8 +254,8 @@ fn scip_kind_to_lip(kind: i32) -> SymbolKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::scip::Kind;
+    use super::*;
 
     fn kind(k: Kind) -> SymbolKind {
         scip_kind_to_lip(k as i32)
@@ -266,7 +263,7 @@ mod tests {
 
     #[test]
     fn class_variants_map_to_class() {
-        assert_eq!(kind(Kind::KClass),  SymbolKind::Class);
+        assert_eq!(kind(Kind::KClass), SymbolKind::Class);
         assert_eq!(kind(Kind::KStruct), SymbolKind::Class);
         assert_eq!(kind(Kind::KObject), SymbolKind::Class);
     }
@@ -274,43 +271,43 @@ mod tests {
     #[test]
     fn interface_variants_map_to_interface() {
         assert_eq!(kind(Kind::KInterface), SymbolKind::Interface);
-        assert_eq!(kind(Kind::KProtocol),  SymbolKind::Interface);
+        assert_eq!(kind(Kind::KProtocol), SymbolKind::Interface);
     }
 
     #[test]
     fn function_variants_map_to_function() {
-        assert_eq!(kind(Kind::KFunction),         SymbolKind::Function);
-        assert_eq!(kind(Kind::KAbstractMethod),   SymbolKind::Function);
-        assert_eq!(kind(Kind::KMethod),           SymbolKind::Function);
-        assert_eq!(kind(Kind::KStaticMethod),     SymbolKind::Function);
-        assert_eq!(kind(Kind::KPureVirtualMethod),SymbolKind::Function);
+        assert_eq!(kind(Kind::KFunction), SymbolKind::Function);
+        assert_eq!(kind(Kind::KAbstractMethod), SymbolKind::Function);
+        assert_eq!(kind(Kind::KMethod), SymbolKind::Function);
+        assert_eq!(kind(Kind::KStaticMethod), SymbolKind::Function);
+        assert_eq!(kind(Kind::KPureVirtualMethod), SymbolKind::Function);
     }
 
     #[test]
     fn enum_maps_correctly() {
-        assert_eq!(kind(Kind::KEnum),       SymbolKind::Enum);
+        assert_eq!(kind(Kind::KEnum), SymbolKind::Enum);
         assert_eq!(kind(Kind::KEnumMember), SymbolKind::EnumMember);
     }
 
     #[test]
     fn variable_variants_map_to_variable() {
-        assert_eq!(kind(Kind::KVariable),       SymbolKind::Variable);
-        assert_eq!(kind(Kind::KConstant),       SymbolKind::Variable);
+        assert_eq!(kind(Kind::KVariable), SymbolKind::Variable);
+        assert_eq!(kind(Kind::KConstant), SymbolKind::Variable);
         assert_eq!(kind(Kind::KStaticVariable), SymbolKind::Variable);
-        assert_eq!(kind(Kind::KField),          SymbolKind::Variable);
+        assert_eq!(kind(Kind::KField), SymbolKind::Variable);
     }
 
     #[test]
     fn namespace_variants_map_to_namespace() {
-        assert_eq!(kind(Kind::KModule),        SymbolKind::Namespace);
-        assert_eq!(kind(Kind::KNamespace),     SymbolKind::Namespace);
-        assert_eq!(kind(Kind::KPackage),       SymbolKind::Namespace);
+        assert_eq!(kind(Kind::KModule), SymbolKind::Namespace);
+        assert_eq!(kind(Kind::KNamespace), SymbolKind::Namespace);
+        assert_eq!(kind(Kind::KPackage), SymbolKind::Namespace);
         assert_eq!(kind(Kind::KPackageObject), SymbolKind::Namespace);
     }
 
     #[test]
     fn type_alias_variants() {
-        assert_eq!(kind(Kind::KTypeAlias),     SymbolKind::TypeAlias);
+        assert_eq!(kind(Kind::KTypeAlias), SymbolKind::TypeAlias);
         assert_eq!(kind(Kind::KTypeParameter), SymbolKind::TypeAlias);
     }
 
@@ -324,13 +321,16 @@ mod tests {
     #[test]
     fn constructor_and_macro() {
         assert_eq!(kind(Kind::KConstructor), SymbolKind::Constructor);
-        assert_eq!(kind(Kind::KMacro),       SymbolKind::Macro);
+        assert_eq!(kind(Kind::KMacro), SymbolKind::Macro);
     }
 
     #[test]
     fn scip_symbol_to_lip_uri_5field() {
         let uri = scip_symbol_to_lip_uri("scip-typescript npm react 18.2.0 React#Component.");
-        assert_eq!(uri, "lip://scip-typescript/npm/react@18.2.0/React#Component.");
+        assert_eq!(
+            uri,
+            "lip://scip-typescript/npm/react@18.2.0/React#Component."
+        );
     }
 
     #[test]

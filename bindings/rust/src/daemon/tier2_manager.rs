@@ -15,10 +15,10 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+use crate::indexer::tier2::dart_ls::DartBackend;
+use crate::indexer::tier2::py_ls::PythonBackend;
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
 use crate::indexer::tier2::ts_server::TypeScriptBackend;
-use crate::indexer::tier2::py_ls::PythonBackend;
-use crate::indexer::tier2::dart_ls::DartBackend;
 use crate::query_graph::{LipDatabase, ServerMessage};
 
 pub const CHANNEL_CAPACITY: usize = 64;
@@ -29,13 +29,13 @@ pub const CHANNEL_CAPACITY: usize = 64;
 #[derive(Debug)]
 pub struct VerificationJob {
     /// `file://` URI of the source file.
-    pub uri:            String,
+    pub uri: String,
     /// Full source text (same as what was sent in the Delta).
-    pub source:         String,
+    pub source: String,
     /// Repo root used to initialise rust-analyzer's workspace (Rust files only).
     pub workspace_root: Option<PathBuf>,
     /// Delta sequence number, reused as the LSP document version.
-    pub version:        i32,
+    pub version: i32,
 }
 
 // ─── Per-language backend state ───────────────────────────────────────────────
@@ -46,32 +46,32 @@ pub struct VerificationJob {
 /// failed). The `disabled_*` sentinels distinguish the two states so we don't
 /// retry a binary that is not installed.
 struct Tier2Backends {
-    rust:          Option<RustAnalyzerBackend>,
-    rust_ws:       Option<PathBuf>,   // workspace last used to init rust backend
+    rust: Option<RustAnalyzerBackend>,
+    rust_ws: Option<PathBuf>, // workspace last used to init rust backend
     rust_disabled: bool,
 
-    typescript:          Option<TypeScriptBackend>,
+    typescript: Option<TypeScriptBackend>,
     typescript_disabled: bool,
 
-    python:          Option<PythonBackend>,
+    python: Option<PythonBackend>,
     python_disabled: bool,
 
-    dart:          Option<DartBackend>,
+    dart: Option<DartBackend>,
     dart_disabled: bool,
 }
 
 impl Tier2Backends {
     fn new() -> Self {
         Self {
-            rust:                None,
-            rust_ws:             None,
-            rust_disabled:       false,
-            typescript:          None,
+            rust: None,
+            rust_ws: None,
+            rust_disabled: false,
+            typescript: None,
             typescript_disabled: false,
-            python:              None,
-            python_disabled:     false,
-            dart:                None,
-            dart_disabled:       false,
+            python: None,
+            python_disabled: false,
+            dart: None,
+            dart_disabled: false,
         }
     }
 }
@@ -79,23 +79,23 @@ impl Tier2Backends {
 // ─── Manager ─────────────────────────────────────────────────────────────────
 
 pub struct Tier2Manager {
-    db:        Arc<Mutex<LipDatabase>>,
-    rx:        mpsc::Receiver<VerificationJob>,
-    backends:  Tier2Backends,
+    db: Arc<Mutex<LipDatabase>>,
+    rx: mpsc::Receiver<VerificationJob>,
+    backends: Tier2Backends,
     /// Broadcast sender for push notifications. `None` when notifications are disabled.
     notify_tx: Option<broadcast::Sender<ServerMessage>>,
 }
 
 impl Tier2Manager {
     pub fn new(
-        db:        Arc<Mutex<LipDatabase>>,
-        rx:        mpsc::Receiver<VerificationJob>,
+        db: Arc<Mutex<LipDatabase>>,
+        rx: mpsc::Receiver<VerificationJob>,
         notify_tx: broadcast::Sender<ServerMessage>,
     ) -> Self {
         Self {
             db,
             rx,
-            backends:  Tier2Backends::new(),
+            backends: Tier2Backends::new(),
             notify_tx: Some(notify_tx),
         }
     }
@@ -126,7 +126,9 @@ impl Tier2Manager {
     // ── Rust ──────────────────────────────────────────────────────────────────
 
     async fn handle_rust(&mut self, job: VerificationJob) {
-        if self.backends.rust_disabled { return; }
+        if self.backends.rust_disabled {
+            return;
+        }
 
         // If the workspace changed, tear down the old backend.
         if let Some(root) = &job.workspace_root {
@@ -135,7 +137,7 @@ impl Tier2Manager {
                     debug!("tier2: workspace changed to {root:?}, reinitialising rust backend");
                 }
                 self.backends.rust_ws = Some(root.clone());
-                self.backends.rust    = None;
+                self.backends.rust = None;
             }
         }
 
@@ -157,14 +159,17 @@ impl Tier2Manager {
                 Err(e) => {
                     warn!("tier2: rust-analyzer unavailable, disabling: {e}");
                     self.backends.rust_disabled = true;
-                    self.backends.rust_ws       = None;
+                    self.backends.rust_ws = None;
                     return;
                 }
             }
         }
 
         let backend = self.backends.rust.as_mut().unwrap();
-        match backend.verify_file(&job.uri, &job.source, job.version).await {
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
@@ -183,7 +188,9 @@ impl Tier2Manager {
     // ── TypeScript ────────────────────────────────────────────────────────────
 
     async fn ensure_ts_backend(&mut self) {
-        if self.backends.typescript.is_some() || self.backends.typescript_disabled { return; }
+        if self.backends.typescript.is_some() || self.backends.typescript_disabled {
+            return;
+        }
 
         match TypeScriptBackend::new().await {
             Ok(b) => {
@@ -198,13 +205,20 @@ impl Tier2Manager {
     }
 
     async fn handle_typescript(&mut self, job: VerificationJob) {
-        if self.backends.typescript_disabled { return; }
+        if self.backends.typescript_disabled {
+            return;
+        }
 
         self.ensure_ts_backend().await;
-        if self.backends.typescript_disabled { return; }
+        if self.backends.typescript_disabled {
+            return;
+        }
 
         let backend = self.backends.typescript.as_mut().unwrap();
-        match backend.verify_file(&job.uri, &job.source, job.version).await {
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
@@ -222,7 +236,9 @@ impl Tier2Manager {
     // ── Python ────────────────────────────────────────────────────────────────
 
     async fn ensure_python_backend(&mut self) {
-        if self.backends.python.is_some() || self.backends.python_disabled { return; }
+        if self.backends.python.is_some() || self.backends.python_disabled {
+            return;
+        }
 
         match PythonBackend::new().await {
             Ok(b) => {
@@ -237,13 +253,20 @@ impl Tier2Manager {
     }
 
     async fn handle_python(&mut self, job: VerificationJob) {
-        if self.backends.python_disabled { return; }
+        if self.backends.python_disabled {
+            return;
+        }
 
         self.ensure_python_backend().await;
-        if self.backends.python_disabled { return; }
+        if self.backends.python_disabled {
+            return;
+        }
 
         let backend = self.backends.python.as_mut().unwrap();
-        match backend.verify_file(&job.uri, &job.source, job.version).await {
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
@@ -261,7 +284,9 @@ impl Tier2Manager {
     // ── Dart ──────────────────────────────────────────────────────────────────
 
     async fn ensure_dart_backend(&mut self) {
-        if self.backends.dart.is_some() || self.backends.dart_disabled { return; }
+        if self.backends.dart.is_some() || self.backends.dart_disabled {
+            return;
+        }
 
         match DartBackend::new().await {
             Ok(b) => {
@@ -276,13 +301,20 @@ impl Tier2Manager {
     }
 
     async fn handle_dart(&mut self, job: VerificationJob) {
-        if self.backends.dart_disabled { return; }
+        if self.backends.dart_disabled {
+            return;
+        }
 
         self.ensure_dart_backend().await;
-        if self.backends.dart_disabled { return; }
+        if self.backends.dart_disabled {
+            return;
+        }
 
         let backend = self.backends.dart.as_mut().unwrap();
-        match backend.verify_file(&job.uri, &job.source, job.version).await {
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
             Ok(result) => {
                 let upgraded = result.symbols.len();
                 let mut db = self.db.lock().await;
@@ -306,11 +338,15 @@ impl Tier2Manager {
         &self,
         file_uri: &str,
         upgrades: &[crate::schema::OwnedSymbolInfo],
-        db:       &mut LipDatabase,
+        db: &mut LipDatabase,
     ) {
-        let Some(ref tx) = self.notify_tx else { return; };
+        let Some(ref tx) = self.notify_tx else {
+            return;
+        };
         // If no receivers, skip the db read.
-        if tx.receiver_count() == 0 { return; }
+        if tx.receiver_count() == 0 {
+            return;
+        }
 
         let current_syms = db.file_symbols(file_uri);
         for up in upgrades {
@@ -321,7 +357,7 @@ impl Tier2Manager {
                 .unwrap_or(0);
             if up.confidence_score > old_confidence {
                 let msg = ServerMessage::SymbolUpgraded {
-                    uri:            up.uri.clone(),
+                    uri: up.uri.clone(),
                     old_confidence,
                     new_confidence: up.confidence_score,
                 };

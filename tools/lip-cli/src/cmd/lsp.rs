@@ -13,7 +13,7 @@ pub struct LspArgs {
 }
 
 pub async fn run(args: LspArgs) -> anyhow::Result<()> {
-    let stdin  = tokio::io::stdin();
+    let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let (service, messages) =

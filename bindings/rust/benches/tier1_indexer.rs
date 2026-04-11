@@ -178,25 +178,29 @@ fn bench_symbols(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier1/symbols");
 
     let cases: &[(&str, &str, Language)] = &[
-        ("rust",       "file.rs",  Language::Rust),
-        ("typescript", "file.ts",  Language::TypeScript),
-        ("python",     "file.py",  Language::Python),
+        ("rust", "file.rs", Language::Rust),
+        ("typescript", "file.ts", Language::TypeScript),
+        ("python", "file.py", Language::Python),
     ];
 
     for (name, uri, lang) in cases {
         let src = match *lang {
-            Language::Rust       => RUST_SRC,
+            Language::Rust => RUST_SRC,
             Language::TypeScript => TS_SRC,
-            Language::Python     => PY_SRC,
-            _                    => unreachable!(),
+            Language::Python => PY_SRC,
+            _ => unreachable!(),
         };
         group.throughput(Throughput::Bytes(src.len() as u64));
-        group.bench_with_input(BenchmarkId::new("symbols_for_source", name), src, |b, src| {
-            b.iter(|| {
-                let mut idx = Tier1Indexer::new();
-                black_box(idx.symbols_for_source(uri, black_box(src), *lang))
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("symbols_for_source", name),
+            src,
+            |b, src| {
+                b.iter(|| {
+                    let mut idx = Tier1Indexer::new();
+                    black_box(idx.symbols_for_source(uri, black_box(src), *lang))
+                })
+            },
+        );
     }
     group.finish();
 }
@@ -205,25 +209,29 @@ fn bench_occurrences(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier1/occurrences");
 
     let cases: &[(&str, &str, Language)] = &[
-        ("rust",       "file.rs", Language::Rust),
+        ("rust", "file.rs", Language::Rust),
         ("typescript", "file.ts", Language::TypeScript),
-        ("python",     "file.py", Language::Python),
+        ("python", "file.py", Language::Python),
     ];
 
     for (name, uri, lang) in cases {
         let src = match *lang {
-            Language::Rust       => RUST_SRC,
+            Language::Rust => RUST_SRC,
             Language::TypeScript => TS_SRC,
-            Language::Python     => PY_SRC,
-            _                    => unreachable!(),
+            Language::Python => PY_SRC,
+            _ => unreachable!(),
         };
         group.throughput(Throughput::Bytes(src.len() as u64));
-        group.bench_with_input(BenchmarkId::new("occurrences_for_source", name), src, |b, src| {
-            b.iter(|| {
-                let mut idx = Tier1Indexer::new();
-                black_box(idx.occurrences_for_source(uri, black_box(src), *lang))
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("occurrences_for_source", name),
+            src,
+            |b, src| {
+                b.iter(|| {
+                    let mut idx = Tier1Indexer::new();
+                    black_box(idx.occurrences_for_source(uri, black_box(src), *lang))
+                })
+            },
+        );
     }
     group.finish();
 }
@@ -234,17 +242,17 @@ fn bench_index_file(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier1/index_file");
 
     let cases: &[(&str, &str, Language)] = &[
-        ("rust",       "file.rs", Language::Rust),
+        ("rust", "file.rs", Language::Rust),
         ("typescript", "file.ts", Language::TypeScript),
-        ("python",     "file.py", Language::Python),
+        ("python", "file.py", Language::Python),
     ];
 
     for (name, uri, lang) in cases {
         let src = match *lang {
-            Language::Rust       => RUST_SRC,
+            Language::Rust => RUST_SRC,
             Language::TypeScript => TS_SRC,
-            Language::Python     => PY_SRC,
-            _                    => unreachable!(),
+            Language::Python => PY_SRC,
+            _ => unreachable!(),
         };
         group.throughput(Throughput::Bytes(src.len() as u64));
         group.bench_with_input(BenchmarkId::new("index_file", name), src, |b, src| {

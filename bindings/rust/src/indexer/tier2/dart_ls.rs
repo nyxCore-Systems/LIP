@@ -32,9 +32,9 @@ use super::rust_analyzer::VerificationResult;
 // ─── Backend ──────────────────────────────────────────────────────────────────
 
 pub struct DartBackend {
-    _child:  Child,
-    client:  LspClient,
-    opened:  HashSet<String>,
+    _child: Child,
+    client: LspClient,
+    opened: HashSet<String>,
 }
 
 impl DartBackend {
@@ -55,11 +55,15 @@ impl DartBackend {
                  `dart` is in PATH (https://dart.dev/get-dart)",
             )?;
 
-        let stdin  = child.stdin.take().context("no stdin")?;
+        let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
         let client = LspClient::new(stdin, stdout);
 
-        let mut backend = Self { _child: child, client, opened: HashSet::new() };
+        let mut backend = Self {
+            _child: child,
+            client,
+            opened: HashSet::new(),
+        };
         backend.initialize().await?;
         Ok(backend)
     }
@@ -67,29 +71,34 @@ impl DartBackend {
     // ── Private: LSP lifecycle ────────────────────────────────────────────────
 
     async fn initialize(&mut self) -> anyhow::Result<()> {
-        let result = self.client.request("initialize", json!({
-            "rootUri":  null,
-            "rootPath": null,
-            "capabilities": {
-                "textDocument": {
-                    "hover": {
-                        "contentFormat": ["markdown", "plaintext"]
+        let result = self
+            .client
+            .request(
+                "initialize",
+                json!({
+                    "rootUri":  null,
+                    "rootPath": null,
+                    "capabilities": {
+                        "textDocument": {
+                            "hover": {
+                                "contentFormat": ["markdown", "plaintext"]
+                            },
+                            "documentSymbol": {
+                                "hierarchicalDocumentSymbolSupport": true
+                            }
+                        },
+                        "window": {
+                            "workDoneProgress": false
+                        }
                     },
-                    "documentSymbol": {
-                        "hierarchicalDocumentSymbolSupport": true
+                    "initializationOptions": {
+                        // Suppress analysis-server diagnostics we don't need.
+                        "onlyAnalyzeProjectsWithOpenFiles": true,
+                        "suggestFromUnimportedLibraries": false
                     }
-                },
-                "window": {
-                    "workDoneProgress": false
-                }
-            },
-            "initializationOptions": {
-                // Suppress analysis-server diagnostics we don't need.
-                "onlyAnalyzeProjectsWithOpenFiles": true,
-                "suggestFromUnimportedLibraries": false
-            }
-        }))
-        .await?;
+                }),
+            )
+            .await?;
 
         info!(
             "dart language-server initialized (server: {:?})",
@@ -107,19 +116,29 @@ impl DartBackend {
 
     async fn sync_file(&mut self, uri: &str, source: &str, version: i32) -> anyhow::Result<()> {
         if self.opened.contains(uri) {
-            self.client.notify("textDocument/didChange", json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": source }]
-            })).await?;
+            self.client
+                .notify(
+                    "textDocument/didChange",
+                    json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": source }]
+                    }),
+                )
+                .await?;
         } else {
-            self.client.notify("textDocument/didOpen", json!({
-                "textDocument": {
-                    "uri":        uri,
-                    "languageId": "dart",
-                    "version":    version,
-                    "text":       source
-                }
-            })).await?;
+            self.client
+                .notify(
+                    "textDocument/didOpen",
+                    json!({
+                        "textDocument": {
+                            "uri":        uri,
+                            "languageId": "dart",
+                            "version":    version,
+                            "text":       source
+                        }
+                    }),
+                )
+                .await?;
             self.opened.insert(uri.to_owned());
         }
         // Dart's analysis server needs a moment to process before responding
@@ -129,32 +148,48 @@ impl DartBackend {
     }
 
     async fn document_symbols(&mut self, uri: &str) -> anyhow::Result<Vec<RawSymbol>> {
-        let result = self.client.request(
-            "textDocument/documentSymbol",
-            json!({ "textDocument": { "uri": uri } }),
-        ).await?;
+        let result = self
+            .client
+            .request(
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .await?;
 
-        let Value::Array(items) = result else { return Ok(vec![]); };
+        let Value::Array(items) = result else {
+            return Ok(vec![]);
+        };
 
         let mut out = vec![];
         collect_symbols(&items, &mut out);
         Ok(out)
     }
 
-    async fn hover_signature(&mut self, uri: &str, line: u32, col: u32) -> anyhow::Result<Option<String>> {
-        let result = self.client.request(
-            "textDocument/hover",
-            json!({
-                "textDocument": { "uri": uri },
-                "position":     { "line": line, "character": col }
-            }),
-        ).await?;
+    async fn hover_signature(
+        &mut self,
+        uri: &str,
+        line: u32,
+        col: u32,
+    ) -> anyhow::Result<Option<String>> {
+        let result = self
+            .client
+            .request(
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position":     { "line": line, "character": col }
+                }),
+            )
+            .await?;
 
-        if result.is_null() { return Ok(None); }
+        if result.is_null() {
+            return Ok(None);
+        }
 
         // The Dart analysis server returns markdown; extract the signature from
         // a fenced code block when present, otherwise take the first line.
-        let md = result.pointer("/contents/value")
+        let md = result
+            .pointer("/contents/value")
             .or_else(|| result.pointer("/contents"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -167,8 +202,8 @@ impl DartBackend {
     /// Run Tier 2 verification on a single Dart file.
     pub async fn verify_file(
         &mut self,
-        uri:     &str,
-        source:  &str,
+        uri: &str,
+        source: &str,
         version: i32,
     ) -> anyhow::Result<VerificationResult> {
         self.sync_file(uri, source, version).await?;
@@ -178,7 +213,9 @@ impl DartBackend {
 
         let mut symbols = Vec::with_capacity(raw.len());
         for sym in &raw {
-            let sig = self.hover_signature(uri, sym.line, sym.col).await
+            let sig = self
+                .hover_signature(uri, sym.line, sym.col)
+                .await
                 .ok()
                 .flatten();
 
@@ -186,21 +223,24 @@ impl DartBackend {
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
             symbols.push(OwnedSymbolInfo {
-                uri:              sym_uri,
-                display_name:     sym.name.clone(),
-                kind:             lsp_kind_to_lip(sym.kind),
-                documentation:    None,
-                signature:        sig,
+                uri: sym_uri,
+                display_name: sym.name.clone(),
+                kind: lsp_kind_to_lip(sym.kind),
+                documentation: None,
+                signature: sig,
                 confidence_score: 70,
-                relationships:    vec![],
-                runtime_p99_ms:   None,
-                call_rate_per_s:  None,
-                taint_labels:     vec![],
-                blast_radius:     0,
+                relationships: vec![],
+                runtime_p99_ms: None,
+                call_rate_per_s: None,
+                taint_labels: vec![],
+                blast_radius: 0,
             });
         }
 
-        Ok(VerificationResult { uri: uri.to_owned(), symbols })
+        Ok(VerificationResult {
+            uri: uri.to_owned(),
+            symbols,
+        })
     }
 }
 
@@ -210,7 +250,7 @@ struct RawSymbol {
     name: String,
     kind: u64,
     line: u32,
-    col:  u32,
+    col: u32,
 }
 
 /// Recursively collect symbols from `DocumentSymbol[]` (nested) or
@@ -218,18 +258,20 @@ struct RawSymbol {
 /// hierarchical form when `hierarchicalDocumentSymbolSupport` is true.
 fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
     for item in items {
-        let name = item.get("name")
+        let name = item
+            .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
 
-        let kind = item.get("kind")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let kind = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
 
         // Prefer selectionRange (DocumentSymbol) → location.range (SymbolInformation) → range.
-        let range_ptr = item.pointer("/selectionRange")
+        let range_ptr = item
+            .pointer("/selectionRange")
             .or_else(|| item.pointer("/location/range"))
             .or_else(|| item.get("range"));
         let line = range_ptr
@@ -241,7 +283,12 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        out.push(RawSymbol { name, kind, line, col });
+        out.push(RawSymbol {
+            name,
+            kind,
+            line,
+            col,
+        });
 
         // Recurse into nested children (classes contain methods, etc.).
         if let Some(Value::Array(children)) = item.get("children") {
@@ -262,7 +309,9 @@ fn extract_dart_signature(md: &str) -> Option<String> {
         let body = &after_fence[body_start..];
         if let Some(fence_end) = body.find("```") {
             let sig = body[..fence_end].trim().to_owned();
-            if !sig.is_empty() { return Some(sig); }
+            if !sig.is_empty() {
+                return Some(sig);
+            }
         }
     }
 
@@ -278,19 +327,19 @@ fn extract_dart_signature(md: &str) -> Option<String> {
 /// 11=Function, 13=Variable, 22=EnumMember, 25=TypeParameter.
 fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
     match kind {
-        2  => SymbolKind::Namespace,   // Module
-        3  => SymbolKind::Namespace,   // Namespace
-        5  => SymbolKind::Class,
-        6  => SymbolKind::Method,
-        7  => SymbolKind::Field,
-        8  => SymbolKind::Constructor,
-        9  => SymbolKind::Enum,
+        2 => SymbolKind::Namespace, // Module
+        3 => SymbolKind::Namespace, // Namespace
+        5 => SymbolKind::Class,
+        6 => SymbolKind::Method,
+        7 => SymbolKind::Field,
+        8 => SymbolKind::Constructor,
+        9 => SymbolKind::Enum,
         10 => SymbolKind::Interface,
         11 => SymbolKind::Function,
-        12 => SymbolKind::Variable,    // Constant
+        12 => SymbolKind::Variable, // Constant
         13 => SymbolKind::Variable,
         22 => SymbolKind::EnumMember,
         25 => SymbolKind::TypeParameter,
-        _  => SymbolKind::Unknown,
+        _ => SymbolKind::Unknown,
     }
 }

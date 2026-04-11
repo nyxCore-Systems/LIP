@@ -19,11 +19,11 @@ use super::translate;
 /// Runs as a standard LSP server (stdin/stdout) and forwards every LSP request
 /// to the LIP daemon over a Unix socket (spec §10.1).
 pub struct LipLspBackend {
-    client:        Client,
+    client: Client,
     daemon_socket: PathBuf,
-    conn:          Arc<Mutex<Option<UnixStream>>>,
+    conn: Arc<Mutex<Option<UnixStream>>>,
     /// Monotonically increasing Delta sequence counter. Echoed in DeltaAck.
-    seq:           Arc<AtomicU64>,
+    seq: Arc<AtomicU64>,
 }
 
 impl LipLspBackend {
@@ -32,7 +32,7 @@ impl LipLspBackend {
             client,
             daemon_socket,
             conn: Arc::new(Mutex::new(None)),
-            seq:  Arc::new(AtomicU64::new(0)),
+            seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -41,7 +41,9 @@ impl LipLspBackend {
     }
 
     /// Ensure a connection to the daemon exists, creating one if needed.
-    async fn daemon_stream(&self) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<UnixStream>>> {
+    async fn daemon_stream(
+        &self,
+    ) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<UnixStream>>> {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
             let stream = UnixStream::connect(&self.daemon_socket).await?;
@@ -53,7 +55,9 @@ impl LipLspBackend {
     /// Send a `ClientMessage` and receive a `ServerMessage`.
     async fn rpc(&self, msg: ClientMessage) -> anyhow::Result<ServerMessage> {
         let mut guard = self.daemon_stream().await?;
-        let stream = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no daemon connection"))?;
+        let stream = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no daemon connection"))?;
         write_client_message(stream, &msg).await?;
         let bytes = read_message(stream).await.map_err(|e| anyhow::anyhow!(e))?;
         let resp: ServerMessage = serde_json::from_slice(&bytes)?;
@@ -62,9 +66,9 @@ impl LipLspBackend {
 
     fn to_rpc_error(e: impl std::fmt::Display) -> tower_lsp::jsonrpc::Error {
         tower_lsp::jsonrpc::Error {
-            code:    tower_lsp::jsonrpc::ErrorCode::InternalError,
+            code: tower_lsp::jsonrpc::ErrorCode::InternalError,
             message: e.to_string().into(),
-            data:    None,
+            data: None,
         }
     }
 }
@@ -81,10 +85,10 @@ impl LanguageServer for LipLspBackend {
         // Send ManifestRequest to the daemon.
         let _ = self
             .rpc(ClientMessage::Manifest(ManifestRequest {
-                repo_root:     root,
-                merkle_root:   String::new(),
+                repo_root: root,
+                merkle_root: String::new(),
                 dep_tree_hash: String::new(),
-                lip_version:   env!("CARGO_PKG_VERSION").to_owned(),
+                lip_version: env!("CARGO_PKG_VERSION").to_owned(),
             }))
             .await;
 
@@ -100,17 +104,17 @@ impl LanguageServer for LipLspBackend {
                             include_text: Some(true),
                         })),
                         ..Default::default()
-                    }
+                    },
                 )),
-                definition_provider:       Some(OneOf::Left(true)),
-                references_provider:       Some(OneOf::Left(true)),
-                hover_provider:            Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
-                document_symbol_provider:  Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
-                name:    "lip-lsp-bridge".to_owned(),
+                name: "lip-lsp-bridge".to_owned(),
                 version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
         })
@@ -127,24 +131,24 @@ impl LanguageServer for LipLspBackend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri  = params.text_document.uri.to_string();
+        let uri = params.text_document.uri.to_string();
         let text = params.text_document.text;
         let lang = params.text_document.language_id;
 
         let doc = crate::schema::OwnedDocument {
-            uri:          uri.clone(),
+            uri: uri.clone(),
             content_hash: crate::schema::sha256_hex(text.as_bytes()),
-            language:     lang,
-            occurrences:  vec![],
-            symbols:      vec![],
-            merkle_path:  uri,
-            edges:        vec![],
-            source_text:  Some(text),
+            language: lang,
+            occurrences: vec![],
+            symbols: vec![],
+            merkle_path: uri,
+            edges: vec![],
+            source_text: Some(text),
         };
         let _ = self
             .rpc(ClientMessage::Delta {
-                seq:      self.next_seq(),
-                action:   crate::schema::Action::Upsert,
+                seq: self.next_seq(),
+                action: crate::schema::Action::Upsert,
                 document: doc,
             })
             .await;
@@ -152,22 +156,22 @@ impl LanguageServer for LipLspBackend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        if let Some(change) = params.content_changes.into_iter().last() {
+        if let Some(change) = params.content_changes.into_iter().next_back() {
             let text = change.text;
             let doc = crate::schema::OwnedDocument {
-                uri:          uri.clone(),
+                uri: uri.clone(),
                 content_hash: crate::schema::sha256_hex(text.as_bytes()),
-                language:     String::new(),
-                occurrences:  vec![],
-                symbols:      vec![],
-                merkle_path:  uri,
-                edges:        vec![],
-                source_text:  Some(text),
+                language: String::new(),
+                occurrences: vec![],
+                symbols: vec![],
+                merkle_path: uri,
+                edges: vec![],
+                source_text: Some(text),
             };
             let _ = self
                 .rpc(ClientMessage::Delta {
-                    seq:      self.next_seq(),
-                    action:   crate::schema::Action::Upsert,
+                    seq: self.next_seq(),
+                    action: crate::schema::Action::Upsert,
                     document: doc,
                 })
                 .await;
@@ -178,19 +182,19 @@ impl LanguageServer for LipLspBackend {
         if let Some(text) = params.text {
             let uri = params.text_document.uri.to_string();
             let doc = crate::schema::OwnedDocument {
-                uri:          uri.clone(),
+                uri: uri.clone(),
                 content_hash: crate::schema::sha256_hex(text.as_bytes()),
-                language:     String::new(),
-                occurrences:  vec![],
-                symbols:      vec![],
-                merkle_path:  uri,
-                edges:        vec![],
-                source_text:  Some(text),
+                language: String::new(),
+                occurrences: vec![],
+                symbols: vec![],
+                merkle_path: uri,
+                edges: vec![],
+                source_text: Some(text),
             };
             let _ = self
                 .rpc(ClientMessage::Delta {
-                    seq:      self.next_seq(),
-                    action:   crate::schema::Action::Upsert,
+                    seq: self.next_seq(),
+                    action: crate::schema::Action::Upsert,
                     document: doc,
                 })
                 .await;
@@ -200,19 +204,19 @@ impl LanguageServer for LipLspBackend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         let doc = crate::schema::OwnedDocument {
-            uri:          uri.clone(),
+            uri: uri.clone(),
             content_hash: String::new(),
-            language:     String::new(),
-            occurrences:  vec![],
-            symbols:      vec![],
-            merkle_path:  uri,
-            edges:        vec![],
-            source_text:  None,
+            language: String::new(),
+            occurrences: vec![],
+            symbols: vec![],
+            merkle_path: uri,
+            edges: vec![],
+            source_text: None,
         };
         let _ = self
             .rpc(ClientMessage::Delta {
-                seq:      0,
-                action:   crate::schema::Action::Delete,
+                seq: 0,
+                action: crate::schema::Action::Delete,
                 document: doc,
             })
             .await;
@@ -222,14 +226,18 @@ impl LanguageServer for LipLspBackend {
         &self,
         params: GotoDefinitionParams,
     ) -> RpcResult<Option<GotoDefinitionResponse>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let pos = params.text_document_position_params.position;
 
         let resp = self
             .rpc(ClientMessage::QueryDefinition {
                 uri: uri.clone(),
                 line: pos.line,
-                col:  pos.character,
+                col: pos.character,
             })
             .await
             .map_err(Self::to_rpc_error)?;
@@ -255,13 +263,15 @@ impl LanguageServer for LipLspBackend {
             .rpc(ClientMessage::QueryDefinition {
                 uri: uri.clone(),
                 line: pos.line,
-                col:  pos.character,
+                col: pos.character,
             })
             .await
             .map_err(Self::to_rpc_error)?;
 
         let symbol_uri = match def_resp {
-            ServerMessage::DefinitionResult { symbol: Some(sym), .. } => sym.uri,
+            ServerMessage::DefinitionResult {
+                symbol: Some(sym), ..
+            } => sym.uri,
             _ => return Ok(None),
         };
 
@@ -284,14 +294,18 @@ impl LanguageServer for LipLspBackend {
     }
 
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let pos = params.text_document_position_params.position;
 
         let resp = self
             .rpc(ClientMessage::QueryHover {
                 uri,
                 line: pos.line,
-                col:  pos.character,
+                col: pos.character,
             })
             .await
             .map_err(Self::to_rpc_error)?;
@@ -321,7 +335,11 @@ impl LanguageServer for LipLspBackend {
             .iter()
             .filter_map(|s| translate::symbol_to_lsp_symbol_info(s, ""))
             .collect();
-        Ok(if lsp_syms.is_empty() { None } else { Some(DocumentSymbolResponse::Flat(lsp_syms)) })
+        Ok(if lsp_syms.is_empty() {
+            None
+        } else {
+            Some(DocumentSymbolResponse::Flat(lsp_syms))
+        })
     }
 
     async fn symbol(
@@ -346,7 +364,11 @@ impl LanguageServer for LipLspBackend {
             .filter_map(|s| translate::symbol_to_lsp_symbol_info(s, ""))
             .collect();
 
-        Ok(if lsp_syms.is_empty() { None } else { Some(lsp_syms) })
+        Ok(if lsp_syms.is_empty() {
+            None
+        } else {
+            Some(lsp_syms)
+        })
     }
 }
 
@@ -385,8 +407,14 @@ mod tests {
         let reported = env!("CARGO_PKG_VERSION");
         // Sanity: must be non-empty and start with a digit.
         assert!(!reported.is_empty());
-        assert!(reported.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false),
-            "CARGO_PKG_VERSION should start with a digit, got: {reported}");
+        assert!(
+            reported
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false),
+            "CARGO_PKG_VERSION should start with a digit, got: {reported}"
+        );
         // The bridge now uses env!("CARGO_PKG_VERSION") — this test will fail to
         // compile if the macro is removed, giving us a compile-time regression guard.
         let _ = env!("CARGO_PKG_VERSION");

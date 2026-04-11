@@ -34,29 +34,31 @@ pub struct McpArgs {
 }
 
 pub async fn run(args: McpArgs) -> anyhow::Result<()> {
-    let mut lines  = BufReader::new(tokio::io::stdin()).lines();
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::BufWriter::new(tokio::io::stdout());
 
     while let Some(line) = lines.next_line().await? {
         let line = line.trim().to_owned();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let msg: Value = match serde_json::from_str(&line) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(_) => continue,
         };
 
         // Notifications carry no "id" — no response required.
         let id = match msg.get("id") {
             Some(id) => id.clone(),
-            None     => continue,
+            None => continue,
         };
 
         let method = msg["method"].as_str().unwrap_or("").to_owned();
         let result = dispatch(&method, &msg["params"], &args.socket).await;
 
         let response = match result {
-            Ok(r)  => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
+            Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
             Err(e) => json!({
                 "jsonrpc": "2.0",
                 "id":      id,
@@ -90,7 +92,7 @@ async fn dispatch(method: &str, params: &Value, socket: &Path) -> anyhow::Result
 
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
-            let srv  = daemon_call(name, &params["arguments"], socket).await?;
+            let srv = daemon_call(name, &params["arguments"], socket).await?;
             let text = format_response(name, &srv);
             Ok(json!({ "content": [{ "type": "text", "text": text }] }))
         }
@@ -111,18 +113,18 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             limit: args["limit"].as_u64().map(|n| n as usize).or(Some(50)),
         },
         "lip_definition" => ClientMessage::QueryDefinition {
-            uri:  req_str(args, "uri")?,
+            uri: req_str(args, "uri")?,
             line: req_u32(args, "line")?,
-            col:  req_u32(args, "col")?,
+            col: req_u32(args, "col")?,
         },
         "lip_references" => ClientMessage::QueryReferences {
             symbol_uri: req_str(args, "symbol_uri")?,
             limit: args["limit"].as_u64().map(|n| n as usize).or(Some(50)),
         },
         "lip_hover" => ClientMessage::QueryHover {
-            uri:  req_str(args, "uri")?,
+            uri: req_str(args, "uri")?,
             line: req_u32(args, "line")?,
-            col:  req_u32(args, "col")?,
+            col: req_u32(args, "col")?,
         },
         "lip_document_symbols" => ClientMessage::QueryDocumentSymbols {
             uri: req_str(args, "uri")?,
@@ -132,19 +134,22 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
         },
         "lip_annotation_get" => ClientMessage::AnnotationGet {
             symbol_uri: req_str(args, "symbol_uri")?,
-            key:        req_str(args, "key")?,
+            key: req_str(args, "key")?,
         },
         "lip_annotation_set" => ClientMessage::AnnotationSet {
             symbol_uri: req_str(args, "symbol_uri")?,
-            key:        req_str(args, "key")?,
-            value:      req_str(args, "value")?,
-            author_id:  req_str(args, "author_id")?,
+            key: req_str(args, "key")?,
+            value: req_str(args, "value")?,
+            author_id: req_str(args, "author_id")?,
         },
         "lip_batch_query" => {
-            let queries_val = args.get("queries")
+            let queries_val = args
+                .get("queries")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument `queries`"))?;
-            let queries: Vec<ClientMessage> = serde_json::from_value(queries_val.clone())
-                .map_err(|e| anyhow::anyhow!("queries is not a valid array of query objects: {e}"))?;
+            let queries: Vec<ClientMessage> =
+                serde_json::from_value(queries_val.clone()).map_err(|e| {
+                    anyhow::anyhow!("queries is not a valid array of query objects: {e}")
+                })?;
             ClientMessage::BatchQuery { queries }
         }
         "lip_similar_symbols" => ClientMessage::SimilarSymbols {
@@ -155,17 +160,22 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             key_prefix: args["key_prefix"].as_str().unwrap_or("").to_owned(),
         },
         "lip_stale_files" => {
-            let files_val = args.get("files")
+            let files_val = args
+                .get("files")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument `files`"))?;
-            let files: Vec<(String, String)> = serde_json::from_value(files_val.clone())
-                .map_err(|e| anyhow::anyhow!("`files` must be an array of [uri, sha256] pairs: {e}"))?;
+            let files: Vec<(String, String)> =
+                serde_json::from_value(files_val.clone()).map_err(|e| {
+                    anyhow::anyhow!("`files` must be an array of [uri, sha256] pairs: {e}")
+                })?;
             ClientMessage::QueryStaleFiles { files }
         }
         "lip_load_slice" => {
-            let slice_val = args.get("slice")
+            let slice_val = args
+                .get("slice")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument `slice`"))?;
-            let slice = serde_json::from_value(slice_val.clone())
-                .map_err(|e| anyhow::anyhow!("`slice` must be an OwnedDependencySlice JSON object: {e}"))?;
+            let slice = serde_json::from_value(slice_val.clone()).map_err(|e| {
+                anyhow::anyhow!("`slice` must be an OwnedDependencySlice JSON object: {e}")
+            })?;
             ClientMessage::LoadSlice { slice }
         }
         other => anyhow::bail!("unknown LIP tool: {other}"),
@@ -194,8 +204,11 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             if !r.direct_items.is_empty() {
                 out.push_str("\n\ndirect (distance 1):");
                 for item in &r.direct_items {
-                    let sym = if item.symbol_uri.is_empty() { String::new() }
-                              else { format!("  #{}", item.symbol_uri.split('#').last().unwrap_or("")) };
+                    let sym = if item.symbol_uri.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  #{}", item.symbol_uri.split('#').next_back().unwrap_or(""))
+                    };
                     out.push_str(&format!("\n  {}{}", item.file_uri, sym));
                 }
             }
@@ -217,35 +230,47 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             if symbols.is_empty() {
                 return "No symbols found.".into();
             }
-            symbols.iter()
-                .map(|s| format!("{:<30} {:<12}  {}", s.display_name, format!("{:?}", s.kind), s.uri))
+            symbols
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{:<30} {:<12}  {}",
+                        s.display_name,
+                        format!("{:?}", s.kind),
+                        s.uri
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        ServerMessage::DefinitionResult { symbol, location_uri, location_range } => {
-            match (symbol, location_uri) {
-                (Some(sym), Some(uri)) => {
-                    let pos = location_range.as_ref()
-                        .map(|r| format!("{}:{}", r.start_line + 1, r.start_char + 1))
-                        .unwrap_or_default();
-                    let sig = sym.signature.as_deref().unwrap_or(&sym.display_name);
-                    format!("{uri}:{pos}\n```\n{sig}\n```")
-                }
-                _ => "Definition not found.".into(),
+        ServerMessage::DefinitionResult {
+            symbol,
+            location_uri,
+            location_range,
+        } => match (symbol, location_uri) {
+            (Some(sym), Some(uri)) => {
+                let pos = location_range
+                    .as_ref()
+                    .map(|r| format!("{}:{}", r.start_line + 1, r.start_char + 1))
+                    .unwrap_or_default();
+                let sig = sym.signature.as_deref().unwrap_or(&sym.display_name);
+                format!("{uri}:{pos}\n```\n{sig}\n```")
             }
-        }
+            _ => "Definition not found.".into(),
+        },
         ServerMessage::ReferencesResult { occurrences } => {
             if occurrences.is_empty() {
                 return "No references found.".into();
             }
-            occurrences.iter()
+            occurrences
+                .iter()
                 .map(|o| format!("{}  line {}", o.symbol_uri, o.range.start_line + 1))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
         ServerMessage::HoverResult { symbol } => match symbol {
             Some(s) => {
-                let sig  = s.signature.as_deref().unwrap_or(&s.display_name);
+                let sig = s.signature.as_deref().unwrap_or(&s.display_name);
                 let docs = s.documentation.as_deref().unwrap_or("").trim();
                 if docs.is_empty() {
                     format!("```\n{sig}\n```")
@@ -256,7 +281,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             None => "No hover information available.".into(),
         },
         ServerMessage::DocumentSymbolsResult { symbols }
-        | ServerMessage::DeadSymbolsResult   { symbols } => {
+        | ServerMessage::DeadSymbolsResult { symbols } => {
             if symbols.is_empty() {
                 return if tool == "lip_dead_symbols" {
                     "No dead symbols found.".into()
@@ -264,7 +289,8 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                     "No symbols in file.".into()
                 };
             }
-            symbols.iter()
+            symbols
+                .iter()
                 .map(|s| format!("{:<30} {:?}", s.display_name, s.kind))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -274,51 +300,64 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             value.clone().unwrap_or_else(|| "(not set)".into())
         }
         // BatchQuery → per-slot ok/error results
-        ServerMessage::BatchQueryResponse { results } => {
-            results.iter().enumerate()
-                .map(|(i, r)| {
-                    let header = format!("[{i}]");
-                    match &r.ok {
-                        Some(msg) => format!("{header}\n{}", format_response(tool, msg)),
-                        None => format!("{header} error: {}",
-                            r.error.as_deref().unwrap_or("unknown error")),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n---\n")
-        }
+        ServerMessage::BatchQueryResponse { results } => results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let header = format!("[{i}]");
+                match &r.ok {
+                    Some(msg) => format!("{header}\n{}", format_response(tool, msg)),
+                    None => format!(
+                        "{header} error: {}",
+                        r.error.as_deref().unwrap_or("unknown error")
+                    ),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n"),
         // Batch → one ServerMessage per request
-        ServerMessage::BatchResult { results } => {
-            results.iter().enumerate()
-                .map(|(i, msg)| match msg {
-                    ServerMessage::Error { message } =>
-                        format!("[{i}] error: {message}"),
-                    other =>
-                        format!("[{i}]\n{}", format_response(tool, other)),
-                })
-                .collect::<Vec<_>>()
-                .join("\n---\n")
-        }
+        ServerMessage::BatchResult { results } => results
+            .iter()
+            .enumerate()
+            .map(|(i, msg)| match msg {
+                ServerMessage::Error { message } => format!("[{i}] error: {message}"),
+                other => format!("[{i}]\n{}", format_response(tool, other)),
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n"),
         ServerMessage::SimilarSymbolsResult { symbols } => {
-            if symbols.is_empty() { return "No similar symbols found.".into(); }
-            symbols.iter()
-                .map(|s| format!(
-                    "{:<30} {:<12}  score={:.2}  {}",
-                    s.name,
-                    s.kind,
-                    s.score,
-                    s.uri,
-                ))
+            if symbols.is_empty() {
+                return "No similar symbols found.".into();
+            }
+            symbols
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{:<30} {:<12}  score={:.2}  {}",
+                        s.name, s.kind, s.score, s.uri,
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         }
         ServerMessage::StaleFilesResult { stale_uris } => {
-            if stale_uris.is_empty() { return "All files are up to date.".into(); }
-            let mut out = format!("{} stale file(s) — re-send Delta::Upsert for each:\n", stale_uris.len());
-            for uri in stale_uris { out.push_str(&format!("  {uri}\n")); }
+            if stale_uris.is_empty() {
+                return "All files are up to date.".into();
+            }
+            let mut out = format!(
+                "{} stale file(s) — re-send Delta::Upsert for each:\n",
+                stale_uris.len()
+            );
+            for uri in stale_uris {
+                out.push_str(&format!("  {uri}\n"));
+            }
             out
         }
-        ServerMessage::SymbolUpgraded { uri, old_confidence, new_confidence } => {
+        ServerMessage::SymbolUpgraded {
+            uri,
+            old_confidence,
+            new_confidence,
+        } => {
             format!("upgraded {uri}: confidence {old_confidence} → {new_confidence}")
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
@@ -340,7 +379,7 @@ async fn query_daemon(socket: &Path, msg: ClientMessage) -> anyhow::Result<Serve
     })?;
 
     let body = serde_json::to_vec(&msg)?;
-    let len  = body.len() as u32;
+    let len = body.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&body).await?;
 
@@ -356,13 +395,15 @@ async fn query_daemon(socket: &Path, msg: ClientMessage) -> anyhow::Result<Serve
 // ── Argument helpers ──────────────────────────────────────────────────────────
 
 fn req_str(args: &Value, key: &str) -> anyhow::Result<String> {
-    args[key].as_str()
+    args[key]
+        .as_str()
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("missing required argument `{key}`"))
 }
 
 fn req_u32(args: &Value, key: &str) -> anyhow::Result<u32> {
-    args[key].as_u64()
+    args[key]
+        .as_u64()
         .map(|n| n as u32)
         .ok_or_else(|| anyhow::anyhow!("missing required argument `{key}`"))
 }

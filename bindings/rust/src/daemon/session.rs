@@ -16,13 +16,13 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 
 /// Per-connection session state.
 pub struct Session {
-    pub db:        Arc<Mutex<LipDatabase>>,
+    pub db: Arc<Mutex<LipDatabase>>,
     /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
-    pub tier2_tx:  Option<mpsc::Sender<VerificationJob>>,
+    pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
     /// Shared write-ahead journal. `None` when persistence is disabled.
-    pub journal:   Option<Arc<StdMutex<Journal>>>,
+    pub journal: Option<Arc<StdMutex<Journal>>>,
     /// Handle to the filesystem watcher. `None` when watching is disabled.
-    pub watcher:   Option<FileWatcherHandle>,
+    pub watcher: Option<FileWatcherHandle>,
     /// Broadcast sender for push notifications (e.g. `SymbolUpgraded`).
     /// Kept so we can subscribe receivers for newly forked sessions.
     pub notify_tx: Option<broadcast::Sender<ServerMessage>>,
@@ -30,13 +30,19 @@ pub struct Session {
 
 impl Session {
     pub fn new(
-        db:        Arc<Mutex<LipDatabase>>,
-        tier2_tx:  Option<mpsc::Sender<VerificationJob>>,
-        journal:   Option<Arc<StdMutex<Journal>>>,
-        watcher:   Option<FileWatcherHandle>,
+        db: Arc<Mutex<LipDatabase>>,
+        tier2_tx: Option<mpsc::Sender<VerificationJob>>,
+        journal: Option<Arc<StdMutex<Journal>>>,
+        watcher: Option<FileWatcherHandle>,
         notify_tx: Option<broadcast::Sender<ServerMessage>>,
     ) -> Self {
-        Self { db, tier2_tx, journal, watcher, notify_tx }
+        Self {
+            db,
+            tier2_tx,
+            journal,
+            watcher,
+            notify_tx,
+        }
     }
 
     fn journal_write(&self, entry: JournalEntry) {
@@ -58,7 +64,7 @@ impl Session {
 
         loop {
             let msg_bytes = match read_message(&mut stream).await {
-                Ok(b)  => b,
+                Ok(b) => b,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!("client disconnected");
                     break;
@@ -70,10 +76,12 @@ impl Session {
             };
 
             let msg: ClientMessage = match serde_json::from_slice(&msg_bytes) {
-                Ok(m)  => m,
+                Ok(m) => m,
                 Err(e) => {
                     warn!("parse error: {e}");
-                    let err = ServerMessage::Error { message: e.to_string() };
+                    let err = ServerMessage::Error {
+                        message: e.to_string(),
+                    };
                     let _ = write_message(&mut stream, &err).await;
                     continue;
                 }
@@ -130,22 +138,30 @@ impl Session {
                     IndexingState::Cold
                 };
                 db.set_merkle_root(req.merkle_root.clone());
-                self.journal_write(JournalEntry::SetMerkleRoot { root: req.merkle_root.clone() });
+                self.journal_write(JournalEntry::SetMerkleRoot {
+                    root: req.merkle_root.clone(),
+                });
                 if !req.repo_root.is_empty() {
                     db.set_workspace_root(PathBuf::from(&req.repo_root));
-                    self.journal_write(JournalEntry::SetWorkspaceRoot { path: req.repo_root.clone() });
+                    self.journal_write(JournalEntry::SetWorkspaceRoot {
+                        path: req.repo_root.clone(),
+                    });
                 }
                 ServerMessage::ManifestResponse(ManifestResponse {
                     cached_merkle_root: req.merkle_root,
-                    missing_slices:     vec![],
-                    indexing_state:     state,
+                    missing_slices: vec![],
+                    indexing_state: state,
                 })
             }
 
             // ── File update ───────────────────────────────────────────────
-            ClientMessage::Delta { seq, action, document } => {
-                let uri        = document.uri.clone();
-                let lang       = document.language.clone();
+            ClientMessage::Delta {
+                seq,
+                action,
+                document,
+            } => {
+                let uri = document.uri.clone();
+                let lang = document.language.clone();
                 let source_opt = document.source_text.clone();
 
                 let workspace_root = {
@@ -154,8 +170,8 @@ impl Session {
                         Action::Upsert => {
                             let text = source_opt.clone().unwrap_or_default();
                             self.journal_write(JournalEntry::UpsertFile {
-                                uri:      uri.clone(),
-                                text:     text.clone(),
+                                uri: uri.clone(),
+                                text: text.clone(),
                                 language: lang.clone(),
                             });
                             db.upsert_file(uri.clone(), text, lang.clone());
@@ -187,17 +203,22 @@ impl Session {
 
                 // Enqueue Tier 2 verification for supported languages on upsert.
                 if matches!(action, Action::Upsert) {
-                    let needs_tier2 = lang == "rust"       || uri.ends_with(".rs")
-                        || lang == "typescript" || uri.ends_with(".ts") || uri.ends_with(".tsx")
-                        || lang == "python"     || uri.ends_with(".py")
-                        || lang == "dart"       || uri.ends_with(".dart");
+                    let needs_tier2 = lang == "rust"
+                        || uri.ends_with(".rs")
+                        || lang == "typescript"
+                        || uri.ends_with(".ts")
+                        || uri.ends_with(".tsx")
+                        || lang == "python"
+                        || uri.ends_with(".py")
+                        || lang == "dart"
+                        || uri.ends_with(".dart");
                     if needs_tier2 {
                         if let (Some(tx), Some(source)) = (&self.tier2_tx, source_opt) {
                             let job = VerificationJob {
-                                uri:            uri.clone(),
+                                uri: uri.clone(),
                                 source,
                                 workspace_root,
-                                version:        seq as i32,
+                                version: seq as i32,
                             };
                             // try_send: non-blocking; drop job if channel full rather
                             // than blocking the session loop.
@@ -210,7 +231,11 @@ impl Session {
 
                 // Spec §6.5: send DeltaAck immediately on receipt, before analysis.
                 // v0.2 will stream DeltaStream on a separate framing slot after analysis.
-                ServerMessage::DeltaAck { seq, accepted: true, error: None }
+                ServerMessage::DeltaAck {
+                    seq,
+                    accepted: true,
+                    error: None,
+                }
             }
 
             // ── Queries ───────────────────────────────────────────────────
@@ -225,14 +250,14 @@ impl Session {
                             .symbol_definition_location(su)
                             .unwrap_or_else(|| (uri.clone(), OwnedRange::default()));
                         ServerMessage::DefinitionResult {
-                            symbol:         sym,
-                            location_uri:   Some(loc_uri),
+                            symbol: sym,
+                            location_uri: Some(loc_uri),
                             location_range: Some(loc_range),
                         }
                     }
                     None => ServerMessage::DefinitionResult {
-                        symbol:         None,
-                        location_uri:   None,
+                        symbol: None,
+                        location_uri: None,
                         location_range: None,
                     },
                 }
@@ -247,7 +272,9 @@ impl Session {
                     for occ in db.file_occurrences(u).iter() {
                         if occ.symbol_uri == symbol_uri {
                             occs.push(occ.clone());
-                            if occs.len() >= limit { break 'outer; }
+                            if occs.len() >= limit {
+                                break 'outer;
+                            }
                         }
                     }
                 }
@@ -287,10 +314,15 @@ impl Session {
             }
 
             // ── Annotations ───────────────────────────────────────────────
-            ClientMessage::AnnotationSet { symbol_uri, key, value, author_id } => {
+            ClientMessage::AnnotationSet {
+                symbol_uri,
+                key,
+                value,
+                author_id,
+            } => {
                 let entry = OwnedAnnotationEntry {
                     symbol_uri: symbol_uri.clone(),
-                    key:        key.clone(),
+                    key: key.clone(),
                     value,
                     author_id,
                     confidence: 100,
@@ -300,7 +332,9 @@ impl Session {
                         .unwrap_or(0),
                     expires_ms: 0,
                 };
-                self.journal_write(JournalEntry::AnnotationSet { entry: entry.clone() });
+                self.journal_write(JournalEntry::AnnotationSet {
+                    entry: entry.clone(),
+                });
                 let mut db = self.db.lock().await;
                 db.annotation_set(entry);
                 ServerMessage::AnnotationAck
@@ -308,7 +342,8 @@ impl Session {
 
             ClientMessage::AnnotationGet { symbol_uri, key } => {
                 let db = self.db.lock().await;
-                let value = db.annotation_get(&symbol_uri, &key)
+                let value = db
+                    .annotation_get(&symbol_uri, &key)
                     .map(|e| e.value.clone());
                 ServerMessage::AnnotationValue { value }
             }
@@ -386,7 +421,11 @@ impl Session {
                 let mut db = self.db.lock().await;
                 db.mount_slice(&slice);
                 info!("mounted slice {pkg} ({count} symbols)");
-                ServerMessage::DeltaAck { seq: 0, accepted: true, error: None }
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
             }
         }
     }
@@ -400,23 +439,25 @@ impl Session {
 /// `AnnotationSet` entries are committed to the db and their entries are
 /// appended to `annotation_writes` for journal persistence after the lock is released.
 fn process_query_sync(
-    q:                  ClientMessage,
-    db:                 &mut LipDatabase,
-    annotation_writes:  &mut Vec<OwnedAnnotationEntry>,
+    q: ClientMessage,
+    db: &mut LipDatabase,
+    annotation_writes: &mut Vec<OwnedAnnotationEntry>,
 ) -> BatchQueryResult {
-    let ok = |msg: ServerMessage| BatchQueryResult { ok: Some(msg), error: None };
-    let err = |msg: &str| BatchQueryResult { ok: None, error: Some(msg.into()) };
+    let ok = |msg: ServerMessage| BatchQueryResult {
+        ok: Some(msg),
+        error: None,
+    };
+    let err = |msg: &str| BatchQueryResult {
+        ok: None,
+        error: Some(msg.into()),
+    };
 
     match q {
         // Not permitted in a batch.
-        ClientMessage::Manifest(_) =>
-            err("Manifest is not permitted inside a BatchQuery"),
-        ClientMessage::Delta { .. } =>
-            err("Delta is not permitted inside a BatchQuery"),
-        ClientMessage::BatchQuery { .. } =>
-            err("nested BatchQuery is not supported"),
-        ClientMessage::Batch { .. } =>
-            err("nested Batch is not supported"),
+        ClientMessage::Manifest(_) => err("Manifest is not permitted inside a BatchQuery"),
+        ClientMessage::Delta { .. } => err("Delta is not permitted inside a BatchQuery"),
+        ClientMessage::BatchQuery { .. } => err("nested BatchQuery is not supported"),
+        ClientMessage::Batch { .. } => err("nested Batch is not supported"),
 
         // ── Queries ───────────────────────────────────────────────────────
         ClientMessage::QueryDefinition { uri, line, col } => {
@@ -428,14 +469,14 @@ fn process_query_sync(
                         .symbol_definition_location(su)
                         .unwrap_or_else(|| (uri.clone(), OwnedRange::default()));
                     ok(ServerMessage::DefinitionResult {
-                        symbol:         sym,
-                        location_uri:   Some(loc_uri),
+                        symbol: sym,
+                        location_uri: Some(loc_uri),
                         location_range: Some(loc_range),
                     })
                 }
                 None => ok(ServerMessage::DefinitionResult {
-                    symbol:         None,
-                    location_uri:   None,
+                    symbol: None,
+                    location_uri: None,
                     location_range: None,
                 }),
             }
@@ -449,7 +490,9 @@ fn process_query_sync(
                 for occ in db.file_occurrences(u).iter() {
                     if occ.symbol_uri == symbol_uri {
                         occs.push(occ.clone());
-                        if occs.len() >= limit { break 'outer; }
+                        if occs.len() >= limit {
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -484,10 +527,15 @@ fn process_query_sync(
         }
 
         // ── Annotations ───────────────────────────────────────────────────
-        ClientMessage::AnnotationSet { symbol_uri, key, value, author_id } => {
+        ClientMessage::AnnotationSet {
+            symbol_uri,
+            key,
+            value,
+            author_id,
+        } => {
             let entry = OwnedAnnotationEntry {
                 symbol_uri: symbol_uri.clone(),
-                key:        key.clone(),
+                key: key.clone(),
                 value,
                 author_id,
                 confidence: 100,
@@ -503,7 +551,8 @@ fn process_query_sync(
         }
 
         ClientMessage::AnnotationGet { symbol_uri, key } => {
-            let value = db.annotation_get(&symbol_uri, &key)
+            let value = db
+                .annotation_get(&symbol_uri, &key)
                 .map(|e| e.value.clone());
             ok(ServerMessage::AnnotationValue { value })
         }
@@ -529,8 +578,7 @@ fn process_query_sync(
         }
 
         // LoadSlice requires mutable db access and is not permitted in a read-only batch.
-        ClientMessage::LoadSlice { .. } =>
-            err("LoadSlice is not permitted inside a BatchQuery"),
+        ClientMessage::LoadSlice { .. } => err("LoadSlice is not permitted inside a BatchQuery"),
     }
 }
 
@@ -582,7 +630,9 @@ mod tests {
         // UnixStream::from_std wraps a std::os::unix::net::UnixStream, which
         // requires a real socket pair. Use a real socketpair instead.
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
-        let msg = ServerMessage::Error { message: "hello framing".to_owned() };
+        let msg = ServerMessage::Error {
+            message: "hello framing".to_owned(),
+        };
 
         // Writer task.
         let msg_clone = msg.clone();
@@ -606,7 +656,9 @@ mod tests {
     #[tokio::test]
     async fn framing_large_payload() {
         let payload = "x".repeat(65_536);
-        let msg = ServerMessage::Error { message: payload.clone() };
+        let msg = ServerMessage::Error {
+            message: payload.clone(),
+        };
 
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let write_task = tokio::spawn(async move {
@@ -632,7 +684,9 @@ mod tests {
         let write_task = tokio::spawn(async move {
             let mut a = a;
             for i in 0u32..5 {
-                let msg = ServerMessage::Error { message: i.to_string() };
+                let msg = ServerMessage::Error {
+                    message: i.to_string(),
+                };
                 write_message(&mut a, &msg).await.unwrap();
             }
         });

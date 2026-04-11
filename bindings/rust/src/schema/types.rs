@@ -143,17 +143,17 @@ pub enum IndexingState {
 pub struct OwnedRange {
     pub start_line: i32,
     pub start_char: i32,
-    pub end_line:   i32,
-    pub end_char:   i32,
+    pub end_line: i32,
+    pub end_char: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedRelationship {
-    pub target_uri:         String,
-    pub is_implementation:  bool,
-    pub is_reference:       bool,
+    pub target_uri: String,
+    pub is_implementation: bool,
+    pub is_reference: bool,
     pub is_type_definition: bool,
-    pub is_override:        bool,
+    pub is_override: bool,
 }
 
 /// Heap-allocated SymbolInfo.
@@ -163,31 +163,31 @@ pub struct OwnedRelationship {
 /// salsa's early-cutoff can fire purely on the structural intelligence fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedSymbolInfo {
-    pub uri:              String,
-    pub display_name:     String,
-    pub kind:             SymbolKind,
-    pub documentation:    Option<String>,
-    pub signature:        Option<String>,
+    pub uri: String,
+    pub display_name: String,
+    pub kind: SymbolKind,
+    pub documentation: Option<String>,
+    pub signature: Option<String>,
     pub confidence_score: u8,
-    pub relationships:    Vec<OwnedRelationship>,
+    pub relationships: Vec<OwnedRelationship>,
     // Telemetry — excluded from Eq; see below.
-    pub runtime_p99_ms:   Option<f32>,
-    pub call_rate_per_s:  Option<f32>,
-    pub taint_labels:     Vec<String>,
-    pub blast_radius:     u32,
+    pub runtime_p99_ms: Option<f32>,
+    pub call_rate_per_s: Option<f32>,
+    pub taint_labels: Vec<String>,
+    pub blast_radius: u32,
 }
 
 impl PartialEq for OwnedSymbolInfo {
     fn eq(&self, other: &Self) -> bool {
-        self.uri              == other.uri
-            && self.display_name  == other.display_name
-            && self.kind          == other.kind
+        self.uri == other.uri
+            && self.display_name == other.display_name
+            && self.kind == other.kind
             && self.documentation == other.documentation
-            && self.signature     == other.signature
+            && self.signature == other.signature
             && self.confidence_score == other.confidence_score
             && self.relationships == other.relationships
-            && self.taint_labels  == other.taint_labels
-            && self.blast_radius  == other.blast_radius
+            && self.taint_labels == other.taint_labels
+            && self.blast_radius == other.blast_radius
         // runtime_p99_ms / call_rate_per_s intentionally omitted
     }
 }
@@ -221,11 +221,11 @@ impl OwnedSymbolInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedOccurrence {
-    pub symbol_uri:       String,
-    pub range:            OwnedRange,
+    pub symbol_uri: String,
+    pub range: OwnedRange,
     pub confidence_score: u8,
-    pub role:             Role,
-    pub override_doc:     Option<String>,
+    pub role: Role,
+    pub override_doc: Option<String>,
 }
 
 /// Edge kind in the Code Property Graph (spec §4.1, §8.5).
@@ -248,8 +248,8 @@ pub enum EdgeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedGraphEdge {
     pub from_uri: String,
-    pub to_uri:   String,
-    pub kind:     EdgeKind,
+    pub to_uri: String,
+    pub kind: EdgeKind,
     /// Source range where the edge originates (call site, assignment, etc.).
     pub at_range: OwnedRange,
 }
@@ -260,65 +260,65 @@ pub struct OwnedGraphEdge {
 /// and CI runs. The key namespace determines how the annotation is interpreted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedAnnotationEntry {
-    pub symbol_uri:   String,
+    pub symbol_uri: String,
     /// Namespaced key, e.g. `"lip:fragile"`, `"agent:note"`, `"team:owner"`.
-    pub key:          String,
+    pub key: String,
     /// Markdown string or JSON blob.
-    pub value:        String,
+    pub value: String,
     /// `"human:<email>"` or `"agent:<model-id>"`.
-    pub author_id:    String,
-    pub confidence:   u8,
+    pub author_id: String,
+    pub confidence: u8,
     pub timestamp_ms: i64,
     /// Unix ms timestamp after which this entry may be garbage-collected.
     /// `0` means permanent.
-    pub expires_ms:   i64,
+    pub expires_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedDocument {
-    pub uri:          String,
+    pub uri: String,
     pub content_hash: String,
-    pub language:     String,
-    pub occurrences:  Vec<OwnedOccurrence>,
-    pub symbols:      Vec<OwnedSymbolInfo>,
-    pub merkle_path:  String,
+    pub language: String,
+    pub occurrences: Vec<OwnedOccurrence>,
+    pub symbols: Vec<OwnedSymbolInfo>,
+    pub merkle_path: String,
     /// CPG edges originating from this file.
     /// Empty in Tier 1 documents; populated by Tier 2 verification.
-    pub edges:        Vec<OwnedGraphEdge>,
+    pub edges: Vec<OwnedGraphEdge>,
     /// Raw UTF-8 source bytes.
     /// Present when the client sends a file update so the daemon can drive
     /// the Tier 1 indexer. `None` in registry slices and SCIP imports where
     /// symbols are already pre-computed.
-    pub source_text:  Option<String>,
+    pub source_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedDependencySlice {
-    pub manager:      String,
+    pub manager: String,
     pub package_name: String,
-    pub version:      String,
+    pub version: String,
     pub package_hash: String,
     pub content_hash: String,
-    pub symbols:      Vec<OwnedSymbolInfo>,
-    pub slice_url:    String,
-    pub built_at_ms:  i64,
+    pub symbols: Vec<OwnedSymbolInfo>,
+    pub slice_url: String,
+    pub built_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedDelta {
-    pub action:      Action,
+    pub action: Action,
     pub commit_hash: String,
-    pub document:    Option<OwnedDocument>,
-    pub symbol:      Option<OwnedSymbolInfo>,
-    pub slice:       Option<OwnedDependencySlice>,
+    pub document: Option<OwnedDocument>,
+    pub symbol: Option<OwnedSymbolInfo>,
+    pub slice: Option<OwnedDependencySlice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedEventStream {
-    pub deltas:         Vec<OwnedDelta>,
+    pub deltas: Vec<OwnedDelta>,
     pub schema_version: u16,
-    pub emitter_id:     String,
-    pub timestamp_ms:   i64,
+    pub emitter_id: String,
+    pub timestamp_ms: i64,
 }
 
 impl OwnedEventStream {
@@ -347,10 +347,10 @@ mod tests {
     #[test]
     fn uri_valid_full() {
         let uri = LipUri::parse("lip://npm/react@18.2.0/src/index.js#createElement").unwrap();
-        assert_eq!(uri.scope(),      Some("npm"));
-        assert_eq!(uri.package(),    Some("react"));
-        assert_eq!(uri.version(),    Some("18.2.0"));
-        assert_eq!(uri.path(),       Some("src/index.js"));
+        assert_eq!(uri.scope(), Some("npm"));
+        assert_eq!(uri.package(), Some("react"));
+        assert_eq!(uri.version(), Some("18.2.0"));
+        assert_eq!(uri.path(), Some("src/index.js"));
         assert_eq!(uri.descriptor(), Some("createElement"));
     }
 
@@ -358,7 +358,7 @@ mod tests {
     fn uri_valid_no_descriptor() {
         let uri = LipUri::parse("lip://cargo/serde@1.0.0/src/lib.rs").unwrap();
         assert_eq!(uri.descriptor(), None);
-        assert_eq!(uri.path(),       Some("src/lib.rs"));
+        assert_eq!(uri.path(), Some("src/lib.rs"));
     }
 
     #[test]
@@ -403,8 +403,8 @@ mod tests {
     fn symbol_eq_ignores_telemetry_fields() {
         let mut a = OwnedSymbolInfo::new("lip://s/p@1/f.rs#foo", "foo");
         let mut b = OwnedSymbolInfo::new("lip://s/p@1/f.rs#foo", "foo");
-        a.runtime_p99_ms  = Some(1.0);
-        b.runtime_p99_ms  = Some(999.0);
+        a.runtime_p99_ms = Some(1.0);
+        b.runtime_p99_ms = Some(999.0);
         a.call_rate_per_s = Some(0.1);
         b.call_rate_per_s = Some(50000.0);
         assert_eq!(a, b);

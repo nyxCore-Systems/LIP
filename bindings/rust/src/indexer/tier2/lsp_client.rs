@@ -19,8 +19,8 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tracing::debug;
 
 pub struct LspClient {
-    writer:  ChildStdin,
-    reader:  BufReader<ChildStdout>,
+    writer: ChildStdin,
+    reader: BufReader<ChildStdout>,
     next_id: u64,
 }
 
@@ -28,7 +28,7 @@ impl LspClient {
     pub fn new(writer: ChildStdin, stdout: ChildStdout) -> Self {
         Self {
             writer,
-            reader:  BufReader::new(stdout),
+            reader: BufReader::new(stdout),
             next_id: 0,
         }
     }
@@ -86,18 +86,21 @@ impl LspClient {
             | "client/unregisterCapability"
             | "workspace/applyEdit" => {
                 if let Some(id) = msg.get("id") {
-                    self.write_msg(&json!({"jsonrpc":"2.0","id":id,"result":null})).await?;
+                    self.write_msg(&json!({"jsonrpc":"2.0","id":id,"result":null}))
+                        .await?;
                 }
             }
             // rust-analyzer asks for workspace config; return empty objects.
             "workspace/configuration" => {
                 if let Some(id) = msg.get("id") {
-                    let count = msg.pointer("/params/items")
+                    let count = msg
+                        .pointer("/params/items")
                         .and_then(|v| v.as_array())
                         .map(|a| a.len())
                         .unwrap_or(0);
                     let empties: Vec<Value> = vec![Value::Object(Default::default()); count];
-                    self.write_msg(&json!({"jsonrpc":"2.0","id":id,"result":empties})).await?;
+                    self.write_msg(&json!({"jsonrpc":"2.0","id":id,"result":empties}))
+                        .await?;
                 }
             }
             // All other notifications (publishDiagnostics, logMessage, etc.): discard.

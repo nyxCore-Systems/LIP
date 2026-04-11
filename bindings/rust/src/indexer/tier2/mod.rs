@@ -21,13 +21,13 @@
 //! permanently disables that language's Tier 2 work for the session. Tier 1
 //! results remain fully functional.
 
+pub mod dart_ls;
 pub mod lsp_client;
+pub mod py_ls;
 pub mod rust_analyzer;
 pub mod ts_server;
-pub mod py_ls;
-pub mod dart_ls;
 
+pub use dart_ls::DartBackend;
+pub use py_ls::PythonBackend;
 pub use rust_analyzer::VerificationResult;
 pub use ts_server::TypeScriptBackend;
-pub use py_ls::PythonBackend;
-pub use dart_ls::DartBackend;

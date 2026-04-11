@@ -1,20 +1,26 @@
 use tree_sitter::{Node, Tree};
 
-use crate::schema::{EdgeKind, OwnedGraphEdge, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
+use crate::schema::{
+    EdgeKind, OwnedGraphEdge, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind,
+};
 
 use super::language::Language;
 
 /// Walks a tree-sitter parse tree and extracts LIP symbols and occurrences.
 /// Produces Tier 1 results: confidence_score in the 1–50 range.
 pub struct SymbolExtractor<'a> {
-    source:   &'a [u8],
+    source: &'a [u8],
     language: Language,
     file_uri: &'a str,
 }
 
 impl<'a> SymbolExtractor<'a> {
     pub fn new(source: &'a [u8], language: Language, file_uri: &'a str) -> Self {
-        Self { source, language, file_uri }
+        Self {
+            source,
+            language,
+            file_uri,
+        }
     }
 
     pub fn extract_symbols(&self, tree: &Tree) -> Vec<OwnedSymbolInfo> {
@@ -41,33 +47,33 @@ impl<'a> SymbolExtractor<'a> {
 
     fn walk_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
         match self.language {
-            Language::Rust       => self.rust_calls(node, caller, edges),
+            Language::Rust => self.rust_calls(node, caller, edges),
             Language::TypeScript => self.ts_calls(node, caller, edges),
-            Language::Python     => self.py_calls(node, caller, edges),
-            Language::Dart       => self.dart_calls(node, caller, edges),
-            Language::Unknown    => {}
+            Language::Python => self.py_calls(node, caller, edges),
+            Language::Dart => self.dart_calls(node, caller, edges),
+            Language::Unknown => {}
         }
     }
 
     fn node_text(&self, node: &Node) -> &str {
-        std::str::from_utf8(&self.source[node.start_byte()..node.end_byte()])
-            .unwrap_or("")
+        std::str::from_utf8(&self.source[node.start_byte()..node.end_byte()]).unwrap_or("")
     }
 
     fn node_range(node: &Node) -> OwnedRange {
         let start = node.start_position();
-        let end   = node.end_position();
+        let end = node.end_position();
         OwnedRange {
             start_line: start.row as i32,
             start_char: start.column as i32,
-            end_line:   end.row as i32,
-            end_char:   end.column as i32,
+            end_line: end.row as i32,
+            end_char: end.column as i32,
         }
     }
 
     fn lip_uri(&self, name: &str) -> String {
         // Strip the file:// scheme so we don't produce lip://local/file:///abs/path#Name.
-        let path = self.file_uri
+        let path = self
+            .file_uri
             .strip_prefix("file://")
             .unwrap_or(self.file_uri);
         format!("lip://local/{path}#{name}")
@@ -77,21 +83,21 @@ impl<'a> SymbolExtractor<'a> {
 
     fn walk_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
         match self.language {
-            Language::Rust       => self.rust_symbols(node, out),
+            Language::Rust => self.rust_symbols(node, out),
             Language::TypeScript => self.ts_symbols(node, out),
-            Language::Python     => self.py_symbols(node, out),
-            Language::Dart       => self.dart_symbols(node, out),
-            Language::Unknown    => {}
+            Language::Python => self.py_symbols(node, out),
+            Language::Dart => self.dart_symbols(node, out),
+            Language::Unknown => {}
         }
     }
 
     fn walk_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
         match self.language {
-            Language::Rust       => self.rust_occurrences(node, out),
+            Language::Rust => self.rust_occurrences(node, out),
             Language::TypeScript => self.ts_occurrences(node, out),
-            Language::Python     => self.py_occurrences(node, out),
-            Language::Dart       => self.dart_occurrences(node, out),
-            Language::Unknown    => {}
+            Language::Python => self.py_occurrences(node, out),
+            Language::Dart => self.dart_occurrences(node, out),
+            Language::Unknown => {}
         }
     }
 
@@ -99,13 +105,13 @@ impl<'a> SymbolExtractor<'a> {
 
     fn rust_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
         let (kind, name_field) = match node.kind() {
-            "function_item"    => (SymbolKind::Function, "name"),
-            "struct_item"      => (SymbolKind::Class,    "name"),
-            "enum_item"        => (SymbolKind::Enum,     "name"),
-            "trait_item"       => (SymbolKind::Interface,"name"),
-            "type_item"        => (SymbolKind::TypeAlias,"name"),
-            "mod_item"         => (SymbolKind::Namespace,"name"),
-            "macro_definition" => (SymbolKind::Macro,    "name"),
+            "function_item" => (SymbolKind::Function, "name"),
+            "struct_item" => (SymbolKind::Class, "name"),
+            "enum_item" => (SymbolKind::Enum, "name"),
+            "trait_item" => (SymbolKind::Interface, "name"),
+            "type_item" => (SymbolKind::TypeAlias, "name"),
+            "mod_item" => (SymbolKind::Namespace, "name"),
+            "macro_definition" => (SymbolKind::Macro, "name"),
             _ => {
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i) {
@@ -120,8 +126,8 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
                 out.push(OwnedSymbolInfo {
-                    uri:              self.lip_uri(name),
-                    display_name:     name.to_owned(),
+                    uri: self.lip_uri(name),
+                    display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
                     ..OwnedSymbolInfo::new("", "")
@@ -146,21 +152,32 @@ impl<'a> SymbolExtractor<'a> {
                 let role = node.parent().map_or(Role::Reference, |parent| {
                     let is_decl = matches!(
                         parent.kind(),
-                        "function_item"    | "struct_item"   | "enum_item"  |
-                        "trait_item"       | "type_item"     | "mod_item"   |
-                        "macro_definition" | "field_declaration" | "variant"
+                        "function_item"
+                            | "struct_item"
+                            | "enum_item"
+                            | "trait_item"
+                            | "type_item"
+                            | "mod_item"
+                            | "macro_definition"
+                            | "field_declaration"
+                            | "variant"
                     );
-                    let is_name = parent.child_by_field_name("name")
+                    let is_name = parent
+                        .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                    if is_decl && is_name {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
-                    symbol_uri:       self.lip_uri(name),
-                    range:            Self::node_range(&node),
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
                     confidence_score: 20,
                     role,
-                    override_doc:     None,
+                    override_doc: None,
                 });
             }
         }
@@ -175,13 +192,13 @@ impl<'a> SymbolExtractor<'a> {
 
     fn ts_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
         let (kind, name_field) = match node.kind() {
-            "function_declaration"         => (SymbolKind::Function,  "name"),
-            "method_definition"            => (SymbolKind::Method,    "name"),
-            "class_declaration"            => (SymbolKind::Class,     "name"),
-            "interface_declaration"        => (SymbolKind::Interface, "name"),
-            "type_alias_declaration"       => (SymbolKind::TypeAlias, "name"),
-            "enum_declaration"             => (SymbolKind::Enum,      "name"),
-            "lexical_declaration"          => {
+            "function_declaration" => (SymbolKind::Function, "name"),
+            "method_definition" => (SymbolKind::Method, "name"),
+            "class_declaration" => (SymbolKind::Class, "name"),
+            "interface_declaration" => (SymbolKind::Interface, "name"),
+            "type_alias_declaration" => (SymbolKind::TypeAlias, "name"),
+            "enum_declaration" => (SymbolKind::Enum, "name"),
+            "lexical_declaration" => {
                 // May contain const/let variable declarators.
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i) {
@@ -195,9 +212,9 @@ impl<'a> SymbolExtractor<'a> {
                     let name = self.node_text(&name_node);
                     if !name.is_empty() {
                         out.push(OwnedSymbolInfo {
-                            uri:              self.lip_uri(name),
-                            display_name:     name.to_owned(),
-                            kind:             SymbolKind::Variable,
+                            uri: self.lip_uri(name),
+                            display_name: name.to_owned(),
+                            kind: SymbolKind::Variable,
                             confidence_score: 25,
                             ..OwnedSymbolInfo::new("", "")
                         });
@@ -219,8 +236,8 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
                 out.push(OwnedSymbolInfo {
-                    uri:              self.lip_uri(name),
-                    display_name:     name.to_owned(),
+                    uri: self.lip_uri(name),
+                    display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
                     ..OwnedSymbolInfo::new("", "")
@@ -242,21 +259,30 @@ impl<'a> SymbolExtractor<'a> {
                 let role = node.parent().map_or(Role::Reference, |parent| {
                     let is_decl = matches!(
                         parent.kind(),
-                        "function_declaration" | "method_definition"   | "class_declaration"   |
-                        "interface_declaration"| "type_alias_declaration" | "enum_declaration"  |
-                        "variable_declarator"
+                        "function_declaration"
+                            | "method_definition"
+                            | "class_declaration"
+                            | "interface_declaration"
+                            | "type_alias_declaration"
+                            | "enum_declaration"
+                            | "variable_declarator"
                     );
-                    let is_name = parent.child_by_field_name("name")
+                    let is_name = parent
+                        .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                    if is_decl && is_name {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
-                    symbol_uri:       self.lip_uri(name),
-                    range:            Self::node_range(&node),
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
                     confidence_score: 20,
                     role,
-                    override_doc:     None,
+                    override_doc: None,
                 });
             }
         }
@@ -271,9 +297,9 @@ impl<'a> SymbolExtractor<'a> {
 
     fn py_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
         let (kind, name_field) = match node.kind() {
-            "function_definition"   => (SymbolKind::Function,  "name"),
-            "class_definition"      => (SymbolKind::Class,     "name"),
-            "decorated_definition"  => {
+            "function_definition" => (SymbolKind::Function, "name"),
+            "class_definition" => (SymbolKind::Class, "name"),
+            "decorated_definition" => {
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i) {
                         self.py_symbols(child, out);
@@ -295,8 +321,8 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
                 out.push(OwnedSymbolInfo {
-                    uri:              self.lip_uri(name),
-                    display_name:     name.to_owned(),
+                    uri: self.lip_uri(name),
+                    display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
                     ..OwnedSymbolInfo::new("", "")
@@ -316,21 +342,24 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&node);
             if !name.is_empty() {
                 let role = node.parent().map_or(Role::Reference, |parent| {
-                    let is_decl = matches!(
-                        parent.kind(),
-                        "function_definition" | "class_definition"
-                    );
-                    let is_name = parent.child_by_field_name("name")
+                    let is_decl =
+                        matches!(parent.kind(), "function_definition" | "class_definition");
+                    let is_name = parent
+                        .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                    if is_decl && is_name {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
-                    symbol_uri:       self.lip_uri(name),
-                    range:            Self::node_range(&node),
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
                     confidence_score: 20,
                     role,
-                    override_doc:     None,
+                    override_doc: None,
                 });
             }
         }
@@ -345,14 +374,14 @@ impl<'a> SymbolExtractor<'a> {
 
     fn dart_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
         let (kind, name_field) = match node.kind() {
-            "function_declaration"  => (SymbolKind::Function,    "name"),
-            "method_declaration"    => (SymbolKind::Method,      "name"),
-            "class_declaration"     => (SymbolKind::Class,       "name"),
+            "function_declaration" => (SymbolKind::Function, "name"),
+            "method_declaration" => (SymbolKind::Method, "name"),
+            "class_declaration" => (SymbolKind::Class, "name"),
             "constructor_declaration" => (SymbolKind::Constructor, "name"),
-            "getter_signature"      => (SymbolKind::Method,      "name"),
-            "setter_signature"      => (SymbolKind::Method,      "name"),
-            "mixin_declaration"     => (SymbolKind::Class,       "name"),
-            "extension_declaration" => (SymbolKind::Namespace,   "name"),
+            "getter_signature" => (SymbolKind::Method, "name"),
+            "setter_signature" => (SymbolKind::Method, "name"),
+            "mixin_declaration" => (SymbolKind::Class, "name"),
+            "extension_declaration" => (SymbolKind::Namespace, "name"),
             _ => {
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i) {
@@ -367,8 +396,8 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
                 out.push(OwnedSymbolInfo {
-                    uri:              self.lip_uri(name),
-                    display_name:     name.to_owned(),
+                    uri: self.lip_uri(name),
+                    display_name: name.to_owned(),
                     kind,
                     confidence_score: 30,
                     ..OwnedSymbolInfo::new("", "")
@@ -391,26 +420,31 @@ impl<'a> SymbolExtractor<'a> {
                     let is_decl = matches!(
                         parent.kind(),
                         "function_declaration"
-                        | "method_declaration"
-                        | "class_declaration"
-                        | "constructor_declaration"
-                        | "getter_signature"
-                        | "setter_signature"
-                        | "mixin_declaration"
-                        | "extension_declaration"
-                        | "variable_declarator"
+                            | "method_declaration"
+                            | "class_declaration"
+                            | "constructor_declaration"
+                            | "getter_signature"
+                            | "setter_signature"
+                            | "mixin_declaration"
+                            | "extension_declaration"
+                            | "variable_declarator"
                     );
-                    let is_name = parent.child_by_field_name("name")
+                    let is_name = parent
+                        .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_decl && is_name { Role::Definition } else { Role::Reference }
+                    if is_decl && is_name {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
-                    symbol_uri:       self.lip_uri(name),
-                    range:            Self::node_range(&node),
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
                     confidence_score: 20,
                     role,
-                    override_doc:     None,
+                    override_doc: None,
                 });
             }
         }
@@ -423,10 +457,9 @@ impl<'a> SymbolExtractor<'a> {
 
     fn dart_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
         let new_caller: Option<String> = match node.kind() {
-            "function_declaration" | "method_declaration" | "constructor_declaration" => {
-                node.child_by_field_name("name")
-                    .map(|n| self.node_text(&n).to_owned())
-            }
+            "function_declaration" | "method_declaration" | "constructor_declaration" => node
+                .child_by_field_name("name")
+                .map(|n| self.node_text(&n).to_owned()),
             _ => None,
         };
         let effective = new_caller.or_else(|| caller.clone());
@@ -449,8 +482,8 @@ impl<'a> SymbolExtractor<'a> {
                         if !c.is_empty() {
                             edges.push(OwnedGraphEdge {
                                 from_uri: self.lip_uri(c),
-                                to_uri:   self.lip_uri(callee),
-                                kind:     EdgeKind::Calls,
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
                                 at_range: Self::node_range(&node),
                             });
                         }
@@ -496,8 +529,8 @@ impl<'a> SymbolExtractor<'a> {
                         if !c.is_empty() {
                             edges.push(OwnedGraphEdge {
                                 from_uri: self.lip_uri(c),
-                                to_uri:   self.lip_uri(callee),
-                                kind:     EdgeKind::Calls,
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
                                 at_range: Self::node_range(&node),
                             });
                         }
@@ -536,8 +569,8 @@ impl<'a> SymbolExtractor<'a> {
                         if !c.is_empty() {
                             edges.push(OwnedGraphEdge {
                                 from_uri: self.lip_uri(c),
-                                to_uri:   self.lip_uri(callee),
-                                kind:     EdgeKind::Calls,
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
                                 at_range: Self::node_range(&node),
                             });
                         }
@@ -577,8 +610,8 @@ impl<'a> SymbolExtractor<'a> {
                         if !c.is_empty() {
                             edges.push(OwnedGraphEdge {
                                 from_uri: self.lip_uri(c),
-                                to_uri:   self.lip_uri(callee),
-                                kind:     EdgeKind::Calls,
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
                                 at_range: Self::node_range(&node),
                             });
                         }

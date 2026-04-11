@@ -17,7 +17,9 @@ fn make_rt() -> Runtime {
 }
 
 fn make_message(payload_bytes: usize) -> ServerMessage {
-    ServerMessage::Error { message: "x".repeat(payload_bytes) }
+    ServerMessage::Error {
+        message: "x".repeat(payload_bytes),
+    }
 }
 
 // ── Single message round-trip ─────────────────────────────────────────────────
@@ -93,5 +95,10 @@ fn bench_burst(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_roundtrip, bench_serialize, bench_burst);
+criterion_group!(
+    benches,
+    bench_single_roundtrip,
+    bench_serialize,
+    bench_burst
+);
 criterion_main!(benches);

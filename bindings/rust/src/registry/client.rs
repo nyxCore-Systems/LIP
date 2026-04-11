@@ -12,8 +12,8 @@ use super::cache::SliceCache;
 /// v0.1: plain HTTPS GET. v0.3 will switch to gRPC streaming.
 pub struct RegistryClient {
     base_urls: Vec<String>,
-    http:      reqwest::Client,
-    cache:     Arc<SliceCache>,
+    http: reqwest::Client,
+    cache: Arc<SliceCache>,
 }
 
 impl RegistryClient {
@@ -23,7 +23,11 @@ impl RegistryClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build HTTP client");
-        Self { base_urls: registry_urls, http, cache }
+        Self {
+            base_urls: registry_urls,
+            http,
+            cache,
+        }
     }
 
     /// Return a cached slice for `package_hash`, fetching from the registry if needed.
@@ -69,7 +73,10 @@ impl RegistryClient {
 
             info!(
                 "fetched slice {}/{}@{} ({} bytes)",
-                slice.manager, slice.package_name, slice.version, blob.len()
+                slice.manager,
+                slice.package_name,
+                slice.version,
+                blob.len()
             );
             self.cache.insert(slice.clone())?;
             return Ok(Arc::new(slice));
@@ -84,11 +91,14 @@ impl RegistryClient {
     /// `content_hash` field inside the JSON. Returns the content hash on success.
     pub async fn push_slice(&self, raw: Vec<u8>) -> anyhow::Result<String> {
         let hash = sha256_hex(&raw);
-        let base = self.base_urls.first()
+        let base = self
+            .base_urls
+            .first()
             .ok_or_else(|| anyhow::anyhow!("no registry URL configured"))?;
-        let url  = format!("{base}/slices/{hash}");
+        let url = format!("{base}/slices/{hash}");
 
-        let resp = self.http
+        let resp = self
+            .http
             .put(&url)
             .header("Content-Type", "application/json")
             .body(raw)

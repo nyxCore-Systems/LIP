@@ -27,9 +27,9 @@ pub enum RiskLevel {
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Low    => f.write_str("low"),
+            Self::Low => f.write_str("low"),
             Self::Medium => f.write_str("medium"),
-            Self::High   => f.write_str("high"),
+            Self::High => f.write_str("high"),
         }
     }
 }
@@ -39,13 +39,13 @@ impl std::fmt::Display for RiskLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactItem {
     /// File URI of the affected file (`file:///…` or `lip://…`).
-    pub file_uri:   String,
+    pub file_uri: String,
     /// URI of the specific symbol in that file that depends on the target.
     /// Empty when only file-level dependency graph data is available.
     pub symbol_uri: String,
     /// Distance from the target symbol in the call / dependency graph.
     /// `1` = direct caller, `2` = caller of caller, etc.
-    pub distance:   u32,
+    pub distance: u32,
     /// Confidence that this dependency is real.
     /// Decreases with distance: 0.95 → 0.85 → 0.75 → 0.50 (floor).
     pub confidence: f32,
@@ -66,35 +66,35 @@ impl ImpactItem {
 /// A single fuzzy-search hit returned by `ClientMessage::SimilarSymbols`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimilarSymbol {
-    pub uri:        String,
-    pub name:       String,
-    pub kind:       String,
-    pub score:      f32,
-    pub doc:        Option<String>,
+    pub uri: String,
+    pub name: String,
+    pub kind: String,
+    pub score: f32,
+    pub doc: Option<String>,
     pub confidence: u8,
 }
 
 /// Result of `blast_radius(symbol_uri)`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlastRadiusResult {
-    pub symbol_uri:            String,
+    pub symbol_uri: String,
     /// Number of files that directly depend on the target symbol's file.
     /// Kept for backwards compatibility; prefer `direct_items.len()`.
-    pub direct_dependents:     u32,
+    pub direct_dependents: u32,
     /// Total number of transitively affected files.
     /// Kept for backwards compatibility; prefer `direct_items.len() + transitive_items.len()`.
     pub transitive_dependents: u32,
     /// All affected file URIs (direct + transitive), deduplicated.
     /// Kept for backwards compatibility; prefer `direct_items` + `transitive_items`.
-    pub affected_files:        Vec<String>,
+    pub affected_files: Vec<String>,
     /// Direct callers / dependents (distance = 1), richly typed.
-    pub direct_items:          Vec<ImpactItem>,
+    pub direct_items: Vec<ImpactItem>,
     /// Transitive callers / dependents (distance ≥ 2), richly typed.
-    pub transitive_items:      Vec<ImpactItem>,
+    pub transitive_items: Vec<ImpactItem>,
     /// `true` when BFS was cut off by the depth or node limit.
-    pub truncated:             bool,
+    pub truncated: bool,
     /// Composite risk level derived from caller count and spread.
-    pub risk_level:            RiskLevel,
+    pub risk_level: RiskLevel,
 }
 
 /// Result for a single sub-query inside a [`ClientMessage::BatchQuery`].
@@ -103,7 +103,7 @@ pub struct BlastRadiusResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchQueryResult {
     /// Successful response. `None` when `error` is set.
-    pub ok:    Option<ServerMessage>,
+    pub ok: Option<ServerMessage>,
     /// Human-readable error. `None` when `ok` is set.
     pub error: Option<String>,
 }
@@ -117,48 +117,74 @@ pub enum ServerMessage {
     /// before analysis completes, so the client can detect dropped messages.
     DeltaAck {
         /// Mirrors the `seq` field from the corresponding `Delta` message.
-        seq:      u64,
+        seq: u64,
         accepted: bool,
         /// Set when `accepted` is false; describes why the delta was rejected.
-        error:    Option<String>,
+        error: Option<String>,
     },
-    DeltaStream { deltas: Vec<crate::schema::OwnedDelta> },
+    DeltaStream {
+        deltas: Vec<crate::schema::OwnedDelta>,
+    },
     DefinitionResult {
-        symbol:         Option<OwnedSymbolInfo>,
+        symbol: Option<OwnedSymbolInfo>,
         /// URI of the file that contains the definition occurrence.
         /// `None` when no definition was found.
-        location_uri:   Option<String>,
+        location_uri: Option<String>,
         /// Byte-offset range of the definition occurrence within `location_uri`.
         location_range: Option<OwnedRange>,
     },
-    ReferencesResult { occurrences: Vec<crate::schema::OwnedOccurrence> },
-    HoverResult { symbol: Option<OwnedSymbolInfo> },
+    ReferencesResult {
+        occurrences: Vec<crate::schema::OwnedOccurrence>,
+    },
+    HoverResult {
+        symbol: Option<OwnedSymbolInfo>,
+    },
     BlastRadiusResult(BlastRadiusResult),
-    WorkspaceSymbolsResult { symbols: Vec<OwnedSymbolInfo> },
-    DocumentSymbolsResult { symbols: Vec<OwnedSymbolInfo> },
-    DeadSymbolsResult { symbols: Vec<OwnedSymbolInfo> },
+    WorkspaceSymbolsResult {
+        symbols: Vec<OwnedSymbolInfo>,
+    },
+    DocumentSymbolsResult {
+        symbols: Vec<OwnedSymbolInfo>,
+    },
+    DeadSymbolsResult {
+        symbols: Vec<OwnedSymbolInfo>,
+    },
     AnnotationAck,
-    AnnotationValue { value: Option<String> },
-    AnnotationEntries { entries: Vec<crate::schema::OwnedAnnotationEntry> },
+    AnnotationValue {
+        value: Option<String>,
+    },
+    AnnotationEntries {
+        entries: Vec<crate::schema::OwnedAnnotationEntry>,
+    },
     /// Response to a [`ClientMessage::BatchQuery`]. One result per input query, in order.
-    BatchQueryResponse { results: Vec<BatchQueryResult> },
+    BatchQueryResponse {
+        results: Vec<BatchQueryResult>,
+    },
     /// Response to a [`ClientMessage::Batch`]. One `ServerMessage` per request, in order.
-    BatchResult { results: Vec<ServerMessage> },
+    BatchResult {
+        results: Vec<ServerMessage>,
+    },
     /// Push notification: a symbol's confidence score was raised by Tier 2 verification.
     SymbolUpgraded {
-        uri:            String,
+        uri: String,
         old_confidence: u8,
         new_confidence: u8,
     },
     /// Response to a [`ClientMessage::SimilarSymbols`] fuzzy search.
-    SimilarSymbolsResult { symbols: Vec<SimilarSymbol> },
+    SimilarSymbolsResult {
+        symbols: Vec<SimilarSymbol>,
+    },
     /// Response to [`ClientMessage::QueryStaleFiles`].
     ///
     /// `stale_uris` — files where the daemon's content hash differs from the
     /// client's, or that the daemon has never indexed. The client should
     /// re-send a `Delta::Upsert` for each URI in this list.
-    StaleFilesResult { stale_uris: Vec<String> },
-    Error { message: String },
+    StaleFilesResult {
+        stale_uris: Vec<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Wire envelope for client → daemon messages.
@@ -169,23 +195,23 @@ pub enum ClientMessage {
     Delta {
         /// Monotonically increasing client-side counter.
         /// The daemon echoes this in `DeltaAck.seq`.
-        seq:      u64,
-        action:   crate::schema::Action,
+        seq: u64,
+        action: crate::schema::Action,
         document: crate::schema::OwnedDocument,
     },
     QueryDefinition {
-        uri:  String,
+        uri: String,
         line: u32,
-        col:  u32,
+        col: u32,
     },
     QueryReferences {
         symbol_uri: String,
-        limit:      Option<usize>,
+        limit: Option<usize>,
     },
     QueryHover {
-        uri:  String,
+        uri: String,
         line: u32,
-        col:  u32,
+        col: u32,
     },
     QueryBlastRadius {
         symbol_uri: String,
@@ -194,22 +220,30 @@ pub enum ClientMessage {
         query: String,
         limit: Option<usize>,
     },
-    QueryDocumentSymbols { uri: String },
-    QueryDeadSymbols { limit: Option<usize> },
+    QueryDocumentSymbols {
+        uri: String,
+    },
+    QueryDeadSymbols {
+        limit: Option<usize>,
+    },
     AnnotationSet {
         symbol_uri: String,
-        key:        String,
-        value:      String,
-        author_id:  String,
+        key: String,
+        value: String,
+        author_id: String,
     },
     AnnotationGet {
         symbol_uri: String,
-        key:        String,
+        key: String,
     },
-    AnnotationList { symbol_uri: String },
+    AnnotationList {
+        symbol_uri: String,
+    },
     /// Return all non-expired annotations whose key starts with `key_prefix`,
     /// across every tracked symbol. Pass `""` to list everything.
-    AnnotationWorkspaceList { key_prefix: String },
+    AnnotationWorkspaceList {
+        key_prefix: String,
+    },
     /// Execute multiple queries in a single Unix socket round-trip.
     ///
     /// The daemon processes each sub-query under a single db lock acquisition and
@@ -217,22 +251,33 @@ pub enum ClientMessage {
     ///
     /// Restrictions: `Manifest`, `Delta`, and nested `BatchQuery` entries are
     /// rejected with an error entry rather than aborting the whole batch.
-    BatchQuery { queries: Vec<ClientMessage> },
+    BatchQuery {
+        queries: Vec<ClientMessage>,
+    },
     /// Simple batch: execute multiple requests and return one `ServerMessage` per
     /// request, in order. Nested `Batch` entries are rejected immediately.
-    Batch { requests: Vec<ClientMessage> },
+    Batch {
+        requests: Vec<ClientMessage>,
+    },
     /// Trigram fuzzy-search across all tracked symbol names and documentation.
-    SimilarSymbols { query: String, limit: usize },
+    SimilarSymbols {
+        query: String,
+        limit: usize,
+    },
     /// Merkle sync probe: given the client's per-file content hashes, returns the
     /// URIs whose daemon-side hash differs or that the daemon has never seen.
     /// One round-trip on reconnect tells the client exactly which files to re-Delta.
-    QueryStaleFiles { files: Vec<(String, String)> },
+    QueryStaleFiles {
+        files: Vec<(String, String)>,
+    },
     /// Load a pre-built dependency slice into the daemon's symbol graph.
     ///
     /// All symbols in the slice are merged at Tier 3 confidence (score=100).
     /// Idempotent: re-loading the same package key replaces prior symbols.
     /// Returns `DeltaAck { seq: 0, accepted: true }` on success.
-    LoadSlice { slice: crate::schema::OwnedDependencySlice },
+    LoadSlice {
+        slice: crate::schema::OwnedDependencySlice,
+    },
 }
 
 impl ClientMessage {
@@ -240,6 +285,9 @@ impl ClientMessage {
     /// A `Batch` itself is excluded to prevent nesting. `LoadSlice` is also excluded
     /// because it requires mutable database access outside the read-only batch lock.
     pub fn is_batchable(&self) -> bool {
-        !matches!(self, ClientMessage::Batch { .. } | ClientMessage::LoadSlice { .. })
+        !matches!(
+            self,
+            ClientMessage::Batch { .. } | ClientMessage::LoadSlice { .. }
+        )
     }
 }

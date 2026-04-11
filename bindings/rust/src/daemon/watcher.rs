@@ -67,10 +67,7 @@ impl FileWatcherHandle {
 /// Spawn the OS watcher thread + the async event-processor task.
 ///
 /// Returns a handle that callers use to add/remove watched paths.
-pub fn spawn(
-    db:      Arc<Mutex<LipDatabase>>,
-    journal: Arc<StdMutex<Journal>>,
-) -> FileWatcherHandle {
+pub fn spawn(db: Arc<Mutex<LipDatabase>>, journal: Arc<StdMutex<Journal>>) -> FileWatcherHandle {
     // Channel: tokio → watcher thread (commands).
     // Bounded to 1024 so a burst of adds from startup replay doesn't grow unbounded.
     let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<WatchCmd>(1024);
@@ -82,14 +79,15 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("lip-watcher".into())
         .spawn(move || {
-            let (notify_tx, notify_rx) =
-                std::sync::mpsc::channel::<notify::Result<Event>>();
+            let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
             let mut watcher = match RecommendedWatcher::new(
-                move |res| { let _ = notify_tx.send(res); },
+                move |res| {
+                    let _ = notify_tx.send(res);
+                },
                 Config::default(),
             ) {
-                Ok(w)  => w,
+                Ok(w) => w,
                 Err(e) => {
                     warn!("file watcher could not be initialised: {e}");
                     return;
@@ -102,10 +100,7 @@ pub fn spawn(
                 // Wait up to 50 ms for a notify event, then check for commands.
                 match notify_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(Ok(event)) => {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_)
-                        ) {
+                        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                             for path in event.paths {
                                 if let Some(uri) = path_to_uri.get(&path) {
                                     let _ = event_tx.send((uri.clone(), path));
@@ -130,10 +125,7 @@ pub fn spawn(
                                     debug!("watching {}", canonical.display());
                                     path_to_uri.insert(canonical, uri);
                                 }
-                                Err(e) => warn!(
-                                    "could not watch {}: {e}",
-                                    canonical.display()
-                                ),
+                                Err(e) => warn!("could not watch {}: {e}", canonical.display()),
                             }
                         }
                         Ok(WatchCmd::Remove { path }) => {
@@ -158,9 +150,9 @@ pub fn spawn(
 // ─── Event processor ─────────────────────────────────────────────────────────
 
 async fn event_processor(
-    db:       Arc<Mutex<LipDatabase>>,
-    journal:  Arc<StdMutex<Journal>>,
-    mut rx:   mpsc::UnboundedReceiver<(String, PathBuf)>,
+    db: Arc<Mutex<LipDatabase>>,
+    journal: Arc<StdMutex<Journal>>,
+    mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>,
 ) {
     while let Some((uri, path)) = rx.recv().await {
         handle_change(uri, path, &db, &journal).await;
@@ -168,13 +160,13 @@ async fn event_processor(
 }
 
 async fn handle_change(
-    uri:     String,
-    path:    PathBuf,
-    db:      &Arc<Mutex<LipDatabase>>,
+    uri: String,
+    path: PathBuf,
+    db: &Arc<Mutex<LipDatabase>>,
     journal: &Arc<StdMutex<Journal>>,
 ) {
     let new_text = match tokio::fs::read_to_string(&path).await {
-        Ok(t)  => t,
+        Ok(t) => t,
         Err(e) => {
             debug!("watcher: could not read {}: {e}", path.display());
             return;
@@ -198,8 +190,8 @@ async fn handle_change(
     // Write journal entry before mutating db (WAL guarantee).
     if let Ok(mut j) = journal.lock() {
         let _ = j.append(&JournalEntry::UpsertFile {
-            uri:      uri.clone(),
-            text:     new_text.clone(),
+            uri: uri.clone(),
+            text: new_text.clone(),
             language: language.clone(),
         });
     }
@@ -291,7 +283,7 @@ mod tests {
         // Create a real file and seed the db with its initial content.
         let mut tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_owned();
-        let uri  = format!("file://{}", path.display());
+        let uri = format!("file://{}", path.display());
         write!(tmp, "fn original() {{}}").unwrap();
         tmp.flush().unwrap();
 

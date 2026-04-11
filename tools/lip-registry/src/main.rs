@@ -81,10 +81,7 @@ impl AppState {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// `GET /slices/{hash}` — fetch a slice by its SHA-256 content hash.
-async fn get_slice(
-    AxumPath(hash): AxumPath<String>,
-    State(state): State<AppState>,
-) -> Response {
+async fn get_slice(AxumPath(hash): AxumPath<String>, State(state): State<AppState>) -> Response {
     if !is_valid_hash(&hash) {
         return (StatusCode::BAD_REQUEST, "invalid hash format").into_response();
     }
@@ -159,16 +156,27 @@ async fn put_slice(
     // Idempotent: if it already exists, return 200.
     if path.exists() {
         info!("slice {hash} already present — idempotent PUT");
-        return (StatusCode::OK, Json(json!({"stored": false, "reason": "already exists"}))).into_response();
+        return (
+            StatusCode::OK,
+            Json(json!({"stored": false, "reason": "already exists"})),
+        )
+            .into_response();
     }
 
     match tokio::fs::write(&path, &body).await {
         Ok(()) => {
             info!(
                 "stored slice {}/{} v{} ({} bytes)",
-                slice.manager, slice.package_name, slice.version, body.len()
+                slice.manager,
+                slice.package_name,
+                slice.version,
+                body.len()
             );
-            (StatusCode::CREATED, Json(json!({"stored": true, "hash": hash}))).into_response()
+            (
+                StatusCode::CREATED,
+                Json(json!({"stored": true, "hash": hash})),
+            )
+                .into_response()
         }
         Err(e) => {
             warn!("failed to write slice {hash}: {e}");
@@ -217,14 +225,17 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/slices/:hash", get(get_slice).put(put_slice))
-        .route("/health",       get(health))
+        .route("/health", get(health))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()
         .context("invalid bind address")?;
 
-    info!("lip-registry listening on http://{addr}  store={}", args.store.display());
+    info!(
+        "lip-registry listening on http://{addr}  store={}",
+        args.store.display()
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

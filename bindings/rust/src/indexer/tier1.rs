@@ -15,7 +15,9 @@ pub struct Tier1Indexer {
 
 impl Tier1Indexer {
     pub fn new() -> Self {
-        Self { parser: Parser::new() }
+        Self {
+            parser: Parser::new(),
+        }
     }
 
     /// Extract symbols from source text.
@@ -79,26 +81,21 @@ impl Tier1Indexer {
     }
 
     /// Index a full file and produce an `OwnedDocument`.
-    pub fn index_file(
-        &mut self,
-        uri: &str,
-        source: &str,
-        language: Language,
-    ) -> OwnedDocument {
+    pub fn index_file(&mut self, uri: &str, source: &str, language: Language) -> OwnedDocument {
         let content_hash = sha256_hex(source.as_bytes());
-        let symbols     = self.symbols_for_source(uri, source, language);
+        let symbols = self.symbols_for_source(uri, source, language);
         let occurrences = self.occurrences_for_source(uri, source, language);
-        let edges       = self.edges_for_source(uri, source, language);
+        let edges = self.edges_for_source(uri, source, language);
 
         OwnedDocument {
-            uri:          uri.to_owned(),
+            uri: uri.to_owned(),
             content_hash,
-            language:     language.as_str().to_owned(),
+            language: language.as_str().to_owned(),
             occurrences,
             symbols,
-            merkle_path:  uri.to_owned(),
+            merkle_path: uri.to_owned(),
             edges,
-            source_text:  Some(source.to_owned()),
+            source_text: Some(source.to_owned()),
         }
     }
 }

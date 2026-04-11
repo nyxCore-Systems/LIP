@@ -12,9 +12,7 @@ use lip::schema::{Action, IndexingState, OwnedDocument};
 
 async fn send(stream: &mut UnixStream, msg: &ClientMessage) -> anyhow::Result<()> {
     let body = serde_json::to_vec(msg)?;
-    stream
-        .write_all(&(body.len() as u32).to_be_bytes())
-        .await?;
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
     stream.write_all(&body).await?;
     Ok(())
 }
@@ -32,14 +30,14 @@ async fn recv(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
 
 fn make_doc(uri: &str, source: &str) -> OwnedDocument {
     OwnedDocument {
-        uri:          uri.to_owned(),
+        uri: uri.to_owned(),
         content_hash: lip::schema::sha256_hex(source.as_bytes()),
-        language:     "rust".to_owned(),
-        occurrences:  vec![],
-        symbols:      vec![],
-        merkle_path:  uri.to_owned(),
-        edges:        vec![],
-        source_text:  Some(source.to_owned()),
+        language: "rust".to_owned(),
+        occurrences: vec![],
+        symbols: vec![],
+        merkle_path: uri.to_owned(),
+        edges: vec![],
+        source_text: Some(source.to_owned()),
     }
 }
 
@@ -70,10 +68,10 @@ async fn daemon_full_pipeline() {
     send(
         &mut client,
         &ClientMessage::Manifest(lip::daemon::ManifestRequest {
-            repo_root:     "/tmp/test-repo".to_owned(),
-            merkle_root:   "abc123".to_owned(),
+            repo_root: "/tmp/test-repo".to_owned(),
+            merkle_root: "abc123".to_owned(),
             dep_tree_hash: "def456".to_owned(),
-            lip_version:   "0.1.0".to_owned(),
+            lip_version: "0.1.0".to_owned(),
         }),
     )
     .await
@@ -103,8 +101,8 @@ impl Greeter {
     send(
         &mut client,
         &ClientMessage::Delta {
-            seq:      42,
-            action:   Action::Upsert,
+            seq: 42,
+            action: Action::Upsert,
             document: make_doc(uri, source),
         },
     )
@@ -124,9 +122,9 @@ impl Greeter {
     send(
         &mut client,
         &ClientMessage::QueryDefinition {
-            uri:  uri.to_owned(),
+            uri: uri.to_owned(),
             line: 0,
-            col:  0,
+            col: 0,
         },
     )
     .await
@@ -145,8 +143,8 @@ impl Greeter {
     send(
         &mut client,
         &ClientMessage::Delta {
-            seq:      43,
-            action:   Action::Delete,
+            seq: 43,
+            action: Action::Delete,
             document: make_doc(uri, ""),
         },
     )
@@ -178,19 +176,18 @@ async fn daemon_workspace_symbols() {
     let daemon_task = tokio::spawn(async move { daemon.run().await.ok() });
 
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let mut client = UnixStream::connect(&socket_path)
-        .await
-        .expect("connect");
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
 
     // Index two files.
     for i in 0..2 {
-        let source = format!("pub struct Widget{i}; pub fn make_{i}() -> Widget{i} {{ Widget{i} }}");
+        let source =
+            format!("pub struct Widget{i}; pub fn make_{i}() -> Widget{i} {{ Widget{i} }}");
         let uri = format!("lip://local/test@0.1/w{i}.rs");
         send(
             &mut client,
             &ClientMessage::Delta {
-                seq:      i as u64,
-                action:   Action::Upsert,
+                seq: i as u64,
+                action: Action::Upsert,
                 document: make_doc(&uri, &source),
             },
         )
@@ -233,16 +230,16 @@ async fn daemon_workspace_symbols() {
 /// Delta. This is the primary correctness test for the write-ahead journal.
 #[tokio::test]
 async fn daemon_restart_restores_journal() {
-    let dir         = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("lip_journal.sock");
 
     let source = "pub fn persisted_fn() {}";
-    let uri    = "lip://local/test@0.1/persist.rs";
+    let uri = "lip://local/test@0.1/persist.rs";
 
     // ── First daemon run ─────────────────────────────────────────────────────
     {
         let daemon = LipDaemon::new(&socket_path);
-        let task   = tokio::spawn(async move { daemon.run().await.ok() });
+        let task = tokio::spawn(async move { daemon.run().await.ok() });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -251,8 +248,8 @@ async fn daemon_restart_restores_journal() {
         send(
             &mut client,
             &ClientMessage::Delta {
-                seq:      1,
-                action:   Action::Upsert,
+                seq: 1,
+                action: Action::Upsert,
                 document: make_doc(uri, source),
             },
         )
@@ -264,10 +261,10 @@ async fn daemon_restart_restores_journal() {
         send(
             &mut client,
             &ClientMessage::Manifest(lip::daemon::ManifestRequest {
-                repo_root:     "/tmp/persist-repo".into(),
-                merkle_root:   "persist-hash".into(),
+                repo_root: "/tmp/persist-repo".into(),
+                merkle_root: "persist-hash".into(),
                 dep_tree_hash: String::new(),
-                lip_version:   "0.1.0".into(),
+                lip_version: "0.1.0".into(),
             }),
         )
         .await
@@ -285,7 +282,7 @@ async fn daemon_restart_restores_journal() {
     // ── Second daemon run — same directory, same journal ─────────────────────
     {
         let daemon = LipDaemon::new(&socket_path);
-        let task   = tokio::spawn(async move { daemon.run().await.ok() });
+        let task = tokio::spawn(async move { daemon.run().await.ok() });
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -321,10 +318,10 @@ async fn daemon_restart_restores_journal() {
         send(
             &mut client,
             &ClientMessage::Manifest(lip::daemon::ManifestRequest {
-                repo_root:     "/tmp/persist-repo".into(),
-                merkle_root:   "persist-hash".into(),
+                repo_root: "/tmp/persist-repo".into(),
+                merkle_root: "persist-hash".into(),
                 dep_tree_hash: String::new(),
-                lip_version:   "0.1.0".into(),
+                lip_version: "0.1.0".into(),
             }),
         )
         .await
@@ -352,11 +349,11 @@ async fn daemon_restart_restores_journal() {
 
 #[tokio::test]
 async fn daemon_query_dead_symbols() {
-    let dir         = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("lip_dead.sock");
 
     let daemon = LipDaemon::new(&socket_path);
-    let task   = tokio::spawn(async move { daemon.run().await.ok() });
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -364,8 +361,8 @@ async fn daemon_query_dead_symbols() {
     send(
         &mut client,
         &ClientMessage::Delta {
-            seq:      1,
-            action:   Action::Upsert,
+            seq: 1,
+            action: Action::Upsert,
             document: make_doc(
                 "lip://local/test@0.1/dead.rs",
                 "pub fn orphan_a() {} pub fn orphan_b() {}",
@@ -376,9 +373,12 @@ async fn daemon_query_dead_symbols() {
     .unwrap();
     let _ = recv(&mut client).await.unwrap();
 
-    send(&mut client, &ClientMessage::QueryDeadSymbols { limit: Some(50) })
-        .await
-        .unwrap();
+    send(
+        &mut client,
+        &ClientMessage::QueryDeadSymbols { limit: Some(50) },
+    )
+    .await
+    .unwrap();
 
     let resp = recv(&mut client).await.unwrap();
     match resp {
@@ -396,11 +396,11 @@ async fn daemon_query_dead_symbols() {
 
 #[tokio::test]
 async fn daemon_query_references() {
-    let dir         = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("lip_refs.sock");
 
     let daemon = LipDaemon::new(&socket_path);
-    let task   = tokio::spawn(async move { daemon.run().await.ok() });
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -409,18 +409,26 @@ async fn daemon_query_references() {
     send(
         &mut client,
         &ClientMessage::Delta {
-            seq:      1,
-            action:   Action::Upsert,
-            document: make_doc(uri, "pub fn referenced() {} pub fn caller() { referenced(); }"),
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(
+                uri,
+                "pub fn referenced() {} pub fn caller() { referenced(); }",
+            ),
         },
     )
     .await
     .unwrap();
     let _ = recv(&mut client).await.unwrap();
 
-    send(&mut client, &ClientMessage::QueryDocumentSymbols { uri: uri.to_owned() })
-        .await
-        .unwrap();
+    send(
+        &mut client,
+        &ClientMessage::QueryDocumentSymbols {
+            uri: uri.to_owned(),
+        },
+    )
+    .await
+    .unwrap();
     let syms_resp = recv(&mut client).await.unwrap();
     let sym_uri = match syms_resp {
         ServerMessage::DocumentSymbolsResult { symbols } if !symbols.is_empty() => {
@@ -435,7 +443,10 @@ async fn daemon_query_references() {
 
     send(
         &mut client,
-        &ClientMessage::QueryReferences { symbol_uri: sym_uri, limit: Some(20) },
+        &ClientMessage::QueryReferences {
+            symbol_uri: sym_uri,
+            limit: Some(20),
+        },
     )
     .await
     .unwrap();
@@ -454,14 +465,14 @@ async fn daemon_query_references() {
 
 #[tokio::test]
 async fn daemon_annotations_survive_restart() {
-    let dir         = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("lip_annot.sock");
-    let sym_uri     = "lip://local/test@0.1/annot.rs#annotated_fn";
+    let sym_uri = "lip://local/test@0.1/annot.rs#annotated_fn";
 
     // ── Write annotation ─────────────────────────────────────────────────────
     {
         let daemon = LipDaemon::new(&socket_path);
-        let task   = tokio::spawn(async move { daemon.run().await.ok() });
+        let task = tokio::spawn(async move { daemon.run().await.ok() });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -469,9 +480,9 @@ async fn daemon_annotations_survive_restart() {
             &mut client,
             &ClientMessage::AnnotationSet {
                 symbol_uri: sym_uri.into(),
-                key:        "team:owner".into(),
-                value:      "platform".into(),
-                author_id:  "human:test".into(),
+                key: "team:owner".into(),
+                value: "platform".into(),
+                author_id: "human:test".into(),
             },
         )
         .await
@@ -487,7 +498,7 @@ async fn daemon_annotations_survive_restart() {
     // ── Restart and read annotation back ─────────────────────────────────────
     {
         let daemon = LipDaemon::new(&socket_path);
-        let task   = tokio::spawn(async move { daemon.run().await.ok() });
+        let task = tokio::spawn(async move { daemon.run().await.ok() });
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         let mut client = UnixStream::connect(&socket_path).await.unwrap();
@@ -495,7 +506,7 @@ async fn daemon_annotations_survive_restart() {
             &mut client,
             &ClientMessage::AnnotationGet {
                 symbol_uri: sym_uri.into(),
-                key:        "team:owner".into(),
+                key: "team:owner".into(),
             },
         )
         .await
