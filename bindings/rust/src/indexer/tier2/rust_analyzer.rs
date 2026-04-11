@@ -267,7 +267,10 @@ impl RustAnalyzerBackend {
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
             // Infer visibility from hover signature: Rust public items start with "pub".
-            let is_exported = sig.as_deref().map(|s| s.starts_with("pub")).unwrap_or(false);
+            let is_exported = sig
+                .as_deref()
+                .map(|s| s.starts_with("pub"))
+                .unwrap_or(false);
             symbols.push(OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),

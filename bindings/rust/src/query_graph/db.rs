@@ -503,11 +503,8 @@ impl LipDatabase {
         }
 
         let symbols = self.file_symbols(uri);
-        let public: Vec<OwnedSymbolInfo> = symbols
-            .iter()
-            .filter(|s| s.is_exported)
-            .cloned()
-            .collect();
+        let public: Vec<OwnedSymbolInfo> =
+            symbols.iter().filter(|s| s.is_exported).cloned().collect();
 
         let surface_text = public
             .iter()
@@ -2067,11 +2064,17 @@ impl Greeter {
         );
         let surface = db.file_api_surface(&uri);
         assert!(
-            surface.symbols.iter().any(|s| s.display_name == "public_fn"),
+            surface
+                .symbols
+                .iter()
+                .any(|s| s.display_name == "public_fn"),
             "public_fn must appear in API surface"
         );
         assert!(
-            !surface.symbols.iter().any(|s| s.display_name == "private_fn"),
+            !surface
+                .symbols
+                .iter()
+                .any(|s| s.display_name == "private_fn"),
             "private_fn must not appear in API surface"
         );
     }

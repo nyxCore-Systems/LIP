@@ -98,10 +98,7 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     // ── CI batch push: stream deltas directly to a running daemon ──────────────
     if let Some(socket_path) = args.push_to_daemon {
         let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-            anyhow::anyhow!(
-                "cannot connect to daemon at {}: {e}",
-                socket_path.display()
-            )
+            anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
         })?;
         let total = deltas.len();
         for (seq, delta) in deltas.into_iter().enumerate() {
@@ -121,11 +118,22 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
             let mut resp_bytes = vec![0u8; resp_len];
             stream.read_exact(&mut resp_bytes).await?;
             let resp: ServerMessage = serde_json::from_slice(&resp_bytes)?;
-            if let ServerMessage::DeltaAck { accepted: false, error, .. } = &resp {
-                anyhow::bail!("daemon rejected delta {seq}: {}", error.as_deref().unwrap_or("?"));
+            if let ServerMessage::DeltaAck {
+                accepted: false,
+                error,
+                ..
+            } = &resp
+            {
+                anyhow::bail!(
+                    "daemon rejected delta {seq}: {}",
+                    error.as_deref().unwrap_or("?")
+                );
             }
         }
-        eprintln!("pushed {total} deltas to daemon at {}", socket_path.display());
+        eprintln!(
+            "pushed {total} deltas to daemon at {}",
+            socket_path.display()
+        );
         return Ok(());
     }
 
