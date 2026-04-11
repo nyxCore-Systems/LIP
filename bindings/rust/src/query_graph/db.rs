@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::schema::{EdgeKind};
 use crate::query_graph::types::{ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel, SimilarSymbol};
-use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
+use crate::schema::{sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -135,6 +135,11 @@ pub struct LipDatabase {
     /// file is stored here under key `"foo"`, so blast_radius on the canonical
     /// definition `lip://local/Y#foo` still finds all callers.
     callee_name_to_callers: HashMap<String, Vec<String>>,
+    /// Pre-built symbols from mounted dependency slices (Tier 3, score=100).
+    /// Keyed by symbol URI. Not derived from source text — set directly by `mount_slice`.
+    mounted_symbols: HashMap<String, OwnedSymbolInfo>,
+    /// Tracks which package keys (e.g. "cargo/serde@1.0.0") have been mounted.
+    mounted_packages: HashMap<String, (String, String, String)>,
 }
 
 impl LipDatabase {
@@ -153,6 +158,8 @@ impl LipDatabase {
             file_call_edges:        HashMap::new(),
             name_to_symbols:        HashMap::new(),
             callee_name_to_callers: HashMap::new(),
+            mounted_symbols:        HashMap::new(),
+            mounted_packages:       HashMap::new(),
         }
     }
 
@@ -664,8 +671,12 @@ impl LipDatabase {
         self.def_index.get(symbol_uri).cloned()
     }
 
-    /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files.
+    /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files and mounted slices.
     pub fn symbol_by_uri(&mut self, symbol_uri: &str) -> Option<OwnedSymbolInfo> {
+        // Fast path: check mounted slice symbols first (O(1)).
+        if let Some(sym) = self.mounted_symbols.get(symbol_uri) {
+            return Some(sym.clone());
+        }
         let uris = self.tracked_uris();
         for uri in &uris {
             let syms = self.file_symbols(&uri.clone());
@@ -759,6 +770,67 @@ impl LipDatabase {
             .collect()
     }
 
+    // ── Slice mounting ────────────────────────────────────────────────────
+
+    /// Mount a pre-built dependency slice into the database.
+    ///
+    /// All symbols in the slice are inserted into the in-memory symbol store
+    /// at Tier 3 confidence (score=100). Definitions are registered in
+    /// `def_index` and `name_to_symbols` so blast-radius and symbol search
+    /// queries can resolve them cross-file.
+    ///
+    /// Mounting is idempotent: re-mounting the same package key overwrites
+    /// all prior symbols from that package rather than duplicating them.
+    pub fn mount_slice(&mut self, slice: &OwnedDependencySlice) {
+        let pkg_key = format!("{}/{}@{}", slice.manager, slice.package_name, slice.version);
+
+        // Remove stale mounted symbols for this package so re-mount is idempotent.
+        if self.mounted_packages.contains_key(&pkg_key) {
+            self.mounted_symbols.retain(|uri, _| {
+                !uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name))
+            });
+            self.def_index.retain(|uri, (file_uri, _)| {
+                let is_slice_sym = uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
+                let is_slice_file = file_uri.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name));
+                !(is_slice_sym || is_slice_file)
+            });
+            self.name_to_symbols.values_mut().for_each(|uris| {
+                uris.retain(|u| !u.starts_with(&format!("lip://{}/{}", slice.manager, slice.package_name)));
+            });
+            self.name_to_symbols.retain(|_, uris| !uris.is_empty());
+        }
+
+        // Insert symbols, then register definitions.
+        for sym in &slice.symbols {
+            let mut sym = sym.clone();
+            sym.confidence_score = 100; // Tier 3
+            let name = extract_name(&sym.uri).to_owned();
+            // Synthetic file URI: everything up to the # fragment.
+            let file_uri = sym.uri
+                .find('#')
+                .map(|i| sym.uri[..i].to_owned())
+                .unwrap_or_else(|| sym.uri.clone());
+            self.def_index.insert(
+                sym.uri.clone(),
+                (file_uri, OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 0 }),
+            );
+            if !name.is_empty() {
+                self.name_to_symbols.entry(name).or_default().push(sym.uri.clone());
+            }
+            self.mounted_symbols.insert(sym.uri.clone(), sym);
+        }
+
+        self.mounted_packages.insert(
+            pkg_key,
+            (slice.manager.clone(), slice.package_name.clone(), slice.version.clone()),
+        );
+    }
+
+    /// Return the number of mounted packages.
+    pub fn mounted_package_count(&self) -> usize {
+        self.mounted_packages.len()
+    }
+
     /// All annotations across every symbol URI — used by journal compaction.
     pub fn all_annotations(&self) -> Vec<OwnedAnnotationEntry> {
         self.annotations
@@ -767,7 +839,7 @@ impl LipDatabase {
             .collect()
     }
 
-    /// Symbol search across all tracked files.
+    /// Symbol search across all tracked files and mounted slices.
     pub fn workspace_symbols(&mut self, query: &str, limit: usize) -> Vec<OwnedSymbolInfo> {
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
         let q = query.to_lowercase();
@@ -782,10 +854,18 @@ impl LipDatabase {
                 }
             }
         }
+        if matches.len() < limit {
+            for sym in self.mounted_symbols.values() {
+                if sym.display_name.to_lowercase().contains(&q) {
+                    matches.push(sym.clone());
+                    if matches.len() >= limit { break; }
+                }
+            }
+        }
         matches
     }
 
-    /// Trigram fuzzy search across all tracked symbols.
+    /// Trigram fuzzy search across all tracked symbols and mounted slices.
     ///
     /// Scores each symbol by Jaccard similarity of 3-char windows between
     /// `query` and the symbol name (and optionally its documentation at 0.6×
@@ -795,14 +875,18 @@ impl LipDatabase {
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
         let mut hits: Vec<SimilarSymbol> = Vec::new();
 
+        let score_sym = |sym: &OwnedSymbolInfo| -> f32 {
+            let name_score = trigram_similarity(query, &sym.display_name);
+            let doc_score  = sym.documentation
+                .as_deref()
+                .map(|d| trigram_similarity(query, d) * 0.6)
+                .unwrap_or(0.0);
+            name_score.max(doc_score)
+        };
+
         for uri in &uris {
             for sym in self.file_symbols(uri).iter() {
-                let name_score = trigram_similarity(query, &sym.display_name);
-                let doc_score  = sym.documentation
-                    .as_deref()
-                    .map(|d| trigram_similarity(query, d) * 0.6)
-                    .unwrap_or(0.0);
-                let score = name_score.max(doc_score);
+                let score = score_sym(sym);
                 if score >= 0.2 {
                     hits.push(SimilarSymbol {
                         uri:        sym.uri.clone(),
@@ -813,6 +897,20 @@ impl LipDatabase {
                         confidence: sym.confidence_score,
                     });
                 }
+            }
+        }
+
+        for sym in self.mounted_symbols.values() {
+            let score = score_sym(sym);
+            if score >= 0.2 {
+                hits.push(SimilarSymbol {
+                    uri:        sym.uri.clone(),
+                    name:       sym.display_name.clone(),
+                    kind:       format!("{:?}", sym.kind).to_lowercase(),
+                    score,
+                    doc:        sym.documentation.clone(),
+                    confidence: sym.confidence_score,
+                });
             }
         }
 
@@ -1479,5 +1577,124 @@ impl Greeter {
         assert!(stale.contains(&"file:///src/stale.rs".to_owned()));
         assert!(stale.contains(&"file:///src/new.rs".to_owned()));
         assert!(!stale.contains(&"file:///src/clean.rs".to_owned()));
+    }
+
+    // ── Slice mounting ────────────────────────────────────────────────────
+
+    fn make_slice(manager: &str, pkg: &str, ver: &str, syms: Vec<(&str, &str)>) -> OwnedDependencySlice {
+        OwnedDependencySlice {
+            manager:      manager.to_owned(),
+            package_name: pkg.to_owned(),
+            version:      ver.to_owned(),
+            package_hash: "abc123".to_owned(),
+            content_hash: "def456".to_owned(),
+            symbols: syms.into_iter().map(|(uri, name)| OwnedSymbolInfo {
+                uri:              uri.to_owned(),
+                display_name:     name.to_owned(),
+                kind:             SymbolKind::Function,
+                documentation:    None,
+                signature:        None,
+                confidence_score: 30,
+                relationships:    vec![],
+                runtime_p99_ms:   None,
+                call_rate_per_s:  None,
+                taint_labels:     vec![],
+                blast_radius:     0,
+            }).collect(),
+            slice_url:    String::new(),
+            built_at_ms:  0,
+        }
+    }
+
+    #[test]
+    fn mount_slice_symbols_visible_in_workspace_symbols() {
+        let mut db = LipDatabase::new();
+        let slice = make_slice("cargo", "serde", "1.0.0", vec![
+            ("lip://cargo/serde@1.0.0/src/lib.rs#Deserialize", "Deserialize"),
+            ("lip://cargo/serde@1.0.0/src/lib.rs#Serialize",   "Serialize"),
+        ]);
+        db.mount_slice(&slice);
+        assert_eq!(db.mounted_package_count(), 1);
+
+        let results = db.workspace_symbols("Deserialize", 10);
+        assert!(results.iter().any(|s| s.display_name == "Deserialize"),
+            "mounted symbol should appear in workspace_symbols");
+    }
+
+    #[test]
+    fn mount_slice_confidence_is_tier3() {
+        let mut db = LipDatabase::new();
+        let slice = make_slice("npm", "react", "18.2.0", vec![
+            ("lip://npm/react@18.2.0/index.js#useState", "useState"),
+        ]);
+        db.mount_slice(&slice);
+        let sym = db.symbol_by_uri("lip://npm/react@18.2.0/index.js#useState");
+        assert!(sym.is_some(), "symbol_by_uri should find mounted symbol");
+        assert_eq!(sym.unwrap().confidence_score, 100, "Tier 3 score must be 100");
+    }
+
+    #[test]
+    fn mount_slice_is_idempotent() {
+        let mut db = LipDatabase::new();
+        let slice = make_slice("cargo", "tokio", "1.0.0", vec![
+            ("lip://cargo/tokio@1.0.0/src/lib.rs#spawn", "spawn"),
+        ]);
+        db.mount_slice(&slice);
+        db.mount_slice(&slice); // second mount of same package
+        assert_eq!(db.mounted_package_count(), 1, "re-mount should not double-count package");
+        let results = db.workspace_symbols("spawn", 10);
+        assert_eq!(results.iter().filter(|s| s.display_name == "spawn").count(), 1,
+            "symbol should appear exactly once after idempotent re-mount");
+    }
+
+    #[test]
+    fn mount_slice_def_index_populated() {
+        let mut db = LipDatabase::new();
+        let slice = make_slice("pub", "flutter", "3.0.0", vec![
+            ("lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget", "StatefulWidget"),
+        ]);
+        db.mount_slice(&slice);
+        let loc = db.symbol_definition_location("lip://pub/flutter@3.0.0/lib/src/widgets.dart#StatefulWidget");
+        assert!(loc.is_some(), "def_index must contain mounted symbol URI");
+    }
+
+    #[test]
+    fn mount_slice_visible_in_similar_symbols() {
+        let mut db = LipDatabase::new();
+        let slice = make_slice("npm", "lodash", "4.17.21", vec![
+            ("lip://npm/lodash@4.17.21/src/index.js#debounce", "debounce"),
+            ("lip://npm/lodash@4.17.21/src/index.js#throttle", "throttle"),
+        ]);
+        db.mount_slice(&slice);
+        // "debounce" and "debounc" should both hit via trigram similarity.
+        let hits = db.similar_symbols("debounc", 10);
+        assert!(hits.iter().any(|s| s.name == "debounce"),
+            "mounted symbol should appear in similar_symbols results");
+    }
+
+    #[test]
+    fn remount_replaces_symbols_not_duplicates() {
+        let mut db = LipDatabase::new();
+        // First mount: two symbols.
+        let slice_v1 = make_slice("cargo", "anyhow", "1.0.0", vec![
+            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Error",   "Error"),
+            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Context", "Context"),
+        ]);
+        db.mount_slice(&slice_v1);
+
+        // Re-mount with only one symbol (simulates a trimmed re-build).
+        let slice_v2 = make_slice("cargo", "anyhow", "1.0.0", vec![
+            ("lip://cargo/anyhow@1.0.0/src/lib.rs#Error", "Error"),
+        ]);
+        db.mount_slice(&slice_v2);
+
+        // Only one package should be tracked.
+        assert_eq!(db.mounted_package_count(), 1);
+        // The re-mount should have replaced, not accumulated.
+        let results = db.workspace_symbols("", 100);
+        let anyhow_syms: Vec<_> = results.iter()
+            .filter(|s| s.uri.contains("anyhow"))
+            .collect();
+        assert_eq!(anyhow_syms.len(), 1, "re-mount should replace, not append");
     }
 }

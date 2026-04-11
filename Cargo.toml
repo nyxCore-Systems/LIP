@@ -5,3 +5,11 @@ members  = [
     "tools/lip-cli",
     "tools/lip-registry",
 ]
+
+[workspace.package]
+version    = "1.2.0"
+edition    = "2021"
+authors    = ["Lisa Welsch <lisa@tastehub.io>"]
+license    = "MIT"
+repository = "https://github.com/SimplyLiz/LIP"
+homepage   = "https://lisawelsch.com"

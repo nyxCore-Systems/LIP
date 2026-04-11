@@ -227,12 +227,19 @@ pub enum ClientMessage {
     /// URIs whose daemon-side hash differs or that the daemon has never seen.
     /// One round-trip on reconnect tells the client exactly which files to re-Delta.
     QueryStaleFiles { files: Vec<(String, String)> },
+    /// Load a pre-built dependency slice into the daemon's symbol graph.
+    ///
+    /// All symbols in the slice are merged at Tier 3 confidence (score=100).
+    /// Idempotent: re-loading the same package key replaces prior symbols.
+    /// Returns `DeltaAck { seq: 0, accepted: true }` on success.
+    LoadSlice { slice: crate::schema::OwnedDependencySlice },
 }
 
 impl ClientMessage {
     /// Returns `true` for any message that may appear inside a [`ClientMessage::Batch`].
-    /// A `Batch` itself is excluded to prevent nesting.
+    /// A `Batch` itself is excluded to prevent nesting. `LoadSlice` is also excluded
+    /// because it requires mutable database access outside the read-only batch lock.
     pub fn is_batchable(&self) -> bool {
-        !matches!(self, ClientMessage::Batch { .. })
+        !matches!(self, ClientMessage::Batch { .. } | ClientMessage::LoadSlice { .. })
     }
 }

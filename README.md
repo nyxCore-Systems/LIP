@@ -290,10 +290,10 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.1 — Dart Tier 2 backend, `lip query similar`, trigram fuzzy search. Wire format is JSON; FlatBuffers IPC is planned for v1.2.
+v1.2 — Slice mounting (`lip fetch --mount`, `lip_load_slice`), LSP bridge fixes, MIT license, crates.io publish pipeline. Wire format is JSON; FlatBuffers IPC is planned for v1.3.
 
 ---
 
 ## License
 
-Apache 2.0
+MIT — © [Lisa Welsch](https://lisawelsch.com)

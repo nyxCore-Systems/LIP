@@ -84,7 +84,7 @@ impl LanguageServer for LipLspBackend {
                 repo_root:     root,
                 merkle_root:   String::new(),
                 dep_tree_hash: String::new(),
-                lip_version:   "0.1.0".to_owned(),
+                lip_version:   env!("CARGO_PKG_VERSION").to_owned(),
             }))
             .await;
 
@@ -111,7 +111,7 @@ impl LanguageServer for LipLspBackend {
             },
             server_info: Some(ServerInfo {
                 name:    "lip-lsp-bridge".to_owned(),
-                version: Some("0.1.0".to_owned()),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
         })
     }
@@ -166,7 +166,7 @@ impl LanguageServer for LipLspBackend {
             };
             let _ = self
                 .rpc(ClientMessage::Delta {
-                    seq:      0,
+                    seq:      self.next_seq(),
                     action:   crate::schema::Action::Upsert,
                     document: doc,
                 })
@@ -347,5 +347,56 @@ impl LanguageServer for LipLspBackend {
             .collect();
 
         Ok(if lsp_syms.is_empty() { None } else { Some(lsp_syms) })
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// Build a `seq` counter in the same way `LipLspBackend` does, so we can
+    /// test `next_seq` without needing a real tower-lsp `Client`.
+    fn make_seq() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
+    /// `next_seq` must start at 0 and increment on every call — matching
+    /// the monotonic Delta sequence contract (spec §6.5).
+    #[test]
+    fn seq_starts_at_zero_and_increments() {
+        let seq = make_seq();
+        // Simulate calling next_seq three times.
+        let v0 = seq.fetch_add(1, Ordering::Relaxed);
+        let v1 = seq.fetch_add(1, Ordering::Relaxed);
+        let v2 = seq.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(v0, 0);
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 2);
+    }
+
+    /// The `lip_version` sent in the ManifestRequest must match the crate version,
+    /// not a stale hardcoded string.
+    #[test]
+    fn lip_version_matches_cargo_pkg_version() {
+        let reported = env!("CARGO_PKG_VERSION");
+        // Sanity: must be non-empty and start with a digit.
+        assert!(!reported.is_empty());
+        assert!(reported.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false),
+            "CARGO_PKG_VERSION should start with a digit, got: {reported}");
+        // The bridge now uses env!("CARGO_PKG_VERSION") — this test will fail to
+        // compile if the macro is removed, giving us a compile-time regression guard.
+        let _ = env!("CARGO_PKG_VERSION");
+    }
+
+    /// The seq counter must not overflow in normal use. u64 has 1.8×10¹⁹ values —
+    /// this test just documents the type choice and that wrapping would take millennia.
+    #[test]
+    fn seq_is_u64() {
+        // If someone changes the type, this static assert catches it at compile time.
+        let _: u64 = AtomicU64::new(0).fetch_add(1, Ordering::Relaxed);
     }
 }

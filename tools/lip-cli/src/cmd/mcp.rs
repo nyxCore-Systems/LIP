@@ -161,6 +161,13 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
                 .map_err(|e| anyhow::anyhow!("`files` must be an array of [uri, sha256] pairs: {e}"))?;
             ClientMessage::QueryStaleFiles { files }
         }
+        "lip_load_slice" => {
+            let slice_val = args.get("slice")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `slice`"))?;
+            let slice = serde_json::from_value(slice_val.clone())
+                .map_err(|e| anyhow::anyhow!("`slice` must be an OwnedDependencySlice JSON object: {e}"))?;
+            ClientMessage::LoadSlice { slice }
+        }
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -546,6 +553,24 @@ fn tools_manifest() -> Value {
                     }
                 },
                 "required": ["files"]
+            }
+        },
+        {
+            "name": "lip_load_slice",
+            "description": "Mount a pre-built dependency slice into the daemon's symbol graph. \
+                            All symbols are loaded at Tier 3 confidence (score=100). \
+                            Idempotent — re-loading the same package replaces prior symbols. \
+                            Pass the OwnedDependencySlice JSON object returned by lip_fetch or \
+                            fetched from the registry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slice": {
+                        "type": "object",
+                        "description": "OwnedDependencySlice JSON (from lip fetch or registry)"
+                    }
+                },
+                "required": ["slice"]
             }
         },
         {

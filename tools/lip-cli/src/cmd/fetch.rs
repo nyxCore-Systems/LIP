@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
+use lip::query_graph::{ClientMessage, ServerMessage};
 use lip::registry::{cache::SliceCache, client::RegistryClient};
 
 use crate::output;
@@ -19,6 +22,14 @@ pub struct FetchArgs {
     /// Local slice cache directory.
     #[arg(long, default_value = "~/.cache/lip/slices")]
     pub cache_dir: PathBuf,
+
+    /// After fetching, mount the slice into a running daemon.
+    #[arg(long)]
+    pub mount: bool,
+
+    /// Daemon socket to mount into (requires --mount).
+    #[arg(long, default_value = "/tmp/lip-daemon.sock")]
+    pub socket: PathBuf,
 }
 
 pub async fn run(args: FetchArgs) -> anyhow::Result<()> {
@@ -34,6 +45,24 @@ pub async fn run(args: FetchArgs) -> anyhow::Result<()> {
     let client = RegistryClient::new(args.registries, cache);
     let slice  = client.fetch_slice(&args.package_hash).await?;
 
-    output::print_json(&*slice)?;
+    if args.mount {
+        let mut stream = UnixStream::connect(&args.socket).await.map_err(|e| {
+            anyhow::anyhow!("cannot connect to daemon at {}: {e}", args.socket.display())
+        })?;
+        let msg = ClientMessage::LoadSlice { slice: (*slice).clone() };
+        let body = serde_json::to_vec(&msg)?;
+        stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+        stream.write_all(&body).await?;
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        let mut resp_bytes = vec![0u8; resp_len];
+        stream.read_exact(&mut resp_bytes).await?;
+        let resp: ServerMessage = serde_json::from_slice(&resp_bytes)?;
+        output::print_json(&resp)?;
+    } else {
+        output::print_json(&*slice)?;
+    }
     Ok(())
 }

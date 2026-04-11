@@ -131,6 +131,37 @@ Find symbols defined but never referenced.
 lip query dead-symbols [--limit <n>]
 ```
 
+### lip query similar
+
+Trigram fuzzy-search across all symbol names and documentation. Useful when you don't know the exact name.
+
+```bash
+lip query similar <query> [--limit <n>]
+```
+
+```bash
+lip query similar "verif"       # matches verifyToken, verifySession, …
+lip query similar "auth" --limit 5
+```
+
+Results are ranked by Jaccard trigram score (score ≥ 0.2 shown).
+
+### lip query stale-files
+
+Merkle sync probe — given a JSON file or stdin array of `[uri, sha256_hex]` pairs, returns the URIs that the daemon hasn't seen or whose content hash differs. One round-trip on reconnect tells the client exactly which files to re-send.
+
+```bash
+lip query stale-files [FILE]
+```
+
+```bash
+# From stdin
+echo '[["file:///src/main.rs","abc123..."]]' | lip query stale-files
+
+# From file
+lip query stale-files ./hashes.json
+```
+
 ### lip query batch
 
 Execute multiple queries in a single round-trip. Reads a JSON array of query objects from a file or stdin.
@@ -190,7 +221,7 @@ Reads JSON-RPC 2.0 from stdin, writes to stdout (stdio transport). Add to your M
 }
 ```
 
-Exposed tools: `lip_blast_radius`, `lip_workspace_symbols`, `lip_definition`, `lip_references`, `lip_hover`, `lip_document_symbols`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`.
+Exposed tools: `lip_blast_radius`, `lip_workspace_symbols`, `lip_references`, `lip_definition`, `lip_hover`, `lip_document_symbols`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`, `lip_annotation_workspace_list`, `lip_similar_symbols`, `lip_stale_files`, `lip_load_slice`, `lip_batch_query`.
 
 See [mcp-integration.md](mcp-integration.md).
 
@@ -227,13 +258,24 @@ lip export --to-scip <output.scip> [--socket <path>]
 Download a dependency slice from the registry.
 
 ```bash
-lip fetch <sha256-hash> [--registry <url>] [--cache-dir <path>]
+lip fetch <sha256-hash> [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--registry` | `https://registry.lip.dev` | Registry URL |
 | `--cache-dir` | `~/.cache/lip/slices` | Local slice cache |
+| `--mount` | — | After fetching, load the slice into a running daemon |
+| `--socket` | `/tmp/lip-daemon.sock` | Daemon socket (requires `--mount`) |
+
+```bash
+# Download and print JSON
+lip fetch abc123def456…
+
+# Download and immediately mount into the running daemon
+lip fetch abc123def456… --mount
+lip fetch abc123def456… --mount --socket /tmp/my-daemon.sock
+```
 
 ---
 
@@ -270,9 +312,12 @@ lip slice [OPTIONS]
 | `--cargo [Cargo.toml]` | `./Cargo.toml` | Slice Cargo dependencies |
 | `--npm [package.json]` | `./package.json` | Slice npm dependencies |
 | `--pub [pubspec.yaml]` | `./pubspec.yaml` | Slice pub (Dart) dependencies |
+| `--pip` | — | Slice pip-installed packages (current Python env) |
 | `--output <dir>` | `~/.cache/lip/slices` | Write slices to this directory |
 | `--push` | — | Push slices to registry after building |
 | `--registry <url>` | `https://registry.lip.dev` | Registry URL for `--push` |
+
+All symbols in a slice are stamped at Tier 3 confidence (score=100).
 
 ```bash
 # Build Cargo slices locally
@@ -283,6 +328,9 @@ lip slice --cargo --push --registry https://registry.lip.dev
 
 # Build slices for a monorepo with multiple package managers
 lip slice --cargo --npm --pub
+
+# Build pip slices for the active Python environment
+lip slice --pip
 ```
 
 See [registry.md](registry.md).
@@ -291,17 +339,49 @@ See [registry.md](registry.md).
 
 ## lip annotate
 
-Attach a persistent key/value annotation to a symbol.
+Read and write persistent key/value annotations on symbols. Annotations survive daemon restarts, file changes, and re-indexes — stored in the WAL journal.
 
 ```bash
-lip annotate <symbol_uri> <key> <value> [--author <id>] [--socket <path>]
+lip annotate [--socket <path>] <subcommand>
+```
+
+### lip annotate set
+
+```bash
+lip annotate set <symbol_uri> <key> <value> [--author <id>]
 ```
 
 ```bash
-lip annotate "lip://local/src/payments.rs#processCharge" \
+lip annotate set "lip://local/src/payments.rs#processCharge" \
   "lip:fragile" \
   "Uses deprecated Stripe v1 API — do not refactor without platform review" \
   --author "human:alice"
 ```
 
-Annotations survive daemon restarts, file changes, and re-indexes. They are stored in the WAL journal alongside file data.
+### lip annotate get
+
+```bash
+lip annotate get <symbol_uri> <key>
+```
+
+### lip annotate list
+
+List all annotations on a symbol.
+
+```bash
+lip annotate list <symbol_uri>
+```
+
+### lip annotate search
+
+Search annotations workspace-wide by key prefix. Pass an empty string to list all annotations.
+
+```bash
+lip annotate search <key_prefix>
+```
+
+```bash
+lip annotate search "lip:fragile"     # all fragile symbols
+lip annotate search "agent:"          # all agent annotations
+lip annotate search ""                # every annotation in the workspace
+```

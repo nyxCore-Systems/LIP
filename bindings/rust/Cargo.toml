@@ -1,9 +1,14 @@
 [package]
 name        = "lip"
-version     = "1.1.0"
-edition     = "2021"
-license     = "Apache-2.0"
-description = "LIP — Linked Incremental Protocol: Rust reference implementation"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+repository.workspace = true
+homepage.workspace  = true
+description = "LIP — Linked Incremental Protocol: persistent live code intelligence graph"
+keywords    = ["code-intelligence", "lsp", "tree-sitter", "incremental", "mcp"]
+categories  = ["development-tools", "parser-implementations"]
 
 [dependencies]
 # Tree-sitter (Tier 1 indexer)

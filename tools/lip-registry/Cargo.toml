@@ -1,9 +1,14 @@
 [package]
 name        = "lip-registry"
-version     = "1.1.0"
-edition     = "2021"
-license     = "Apache-2.0"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+repository.workspace = true
+homepage.workspace  = true
 description = "LIP registry server — serves pre-built dependency slices over HTTPS"
+keywords    = ["code-intelligence", "registry", "dependencies", "mcp"]
+categories  = ["development-tools", "web-programming::http-server"]
 
 [[bin]]
 name = "lip-registry"

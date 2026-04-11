@@ -378,6 +378,16 @@ impl Session {
                 let entries = db.annotations_by_key_prefix(&key_prefix);
                 ServerMessage::AnnotationEntries { entries }
             }
+
+            // ── Slice mount ───────────────────────────────────────────────
+            ClientMessage::LoadSlice { slice } => {
+                let pkg = format!("{}/{}@{}", slice.manager, slice.package_name, slice.version);
+                let count = slice.symbols.len();
+                let mut db = self.db.lock().await;
+                db.mount_slice(&slice);
+                info!("mounted slice {pkg} ({count} symbols)");
+                ServerMessage::DeltaAck { seq: 0, accepted: true, error: None }
+            }
         }
     }
 }
@@ -517,6 +527,10 @@ fn process_query_sync(
             let entries = db.annotations_by_key_prefix(&key_prefix);
             ok(ServerMessage::AnnotationEntries { entries })
         }
+
+        // LoadSlice requires mutable db access and is not permitted in a read-only batch.
+        ClientMessage::LoadSlice { .. } =>
+            err("LoadSlice is not permitted inside a BatchQuery"),
     }
 }
 
