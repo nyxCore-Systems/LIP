@@ -151,6 +151,9 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             query: req_str(args, "query")?,
             limit: args["limit"].as_u64().map(|n| n as usize).unwrap_or(20),
         },
+        "lip_annotation_workspace_list" => ClientMessage::AnnotationWorkspaceList {
+            key_prefix: args["key_prefix"].as_str().unwrap_or("").to_owned(),
+        },
         "lip_stale_files" => {
             let files_val = args.get("files")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument `files`"))?;
@@ -499,6 +502,24 @@ fn tools_manifest() -> Value {
                     "limit": { "type": "integer", "default": 20 }
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "lip_annotation_workspace_list",
+            "description": "Search annotations across ALL symbols by key prefix. \
+                            Use to find all lip:fragile symbols, all agent:note entries, \
+                            or every annotation with a given prefix workspace-wide. \
+                            Pass an empty string to list every annotation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key_prefix": {
+                        "type": "string",
+                        "description": "Key prefix to filter by, e.g. 'lip:fragile', 'agent:', 'team:'. \
+                                        Empty string returns all annotations."
+                    }
+                },
+                "required": []
             }
         },
         {

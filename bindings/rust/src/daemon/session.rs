@@ -371,6 +371,13 @@ impl Session {
                 let stale_uris = db.stale_files(&files);
                 ServerMessage::StaleFilesResult { stale_uris }
             }
+
+            // ── Workspace annotation search ───────────────────────────────
+            ClientMessage::AnnotationWorkspaceList { key_prefix } => {
+                let db = self.db.lock().await;
+                let entries = db.annotations_by_key_prefix(&key_prefix);
+                ServerMessage::AnnotationEntries { entries }
+            }
         }
     }
 }
@@ -504,6 +511,11 @@ fn process_query_sync(
         ClientMessage::QueryStaleFiles { files } => {
             let stale_uris = db.stale_files(&files);
             ok(ServerMessage::StaleFilesResult { stale_uris })
+        }
+
+        ClientMessage::AnnotationWorkspaceList { key_prefix } => {
+            let entries = db.annotations_by_key_prefix(&key_prefix);
+            ok(ServerMessage::AnnotationEntries { entries })
         }
     }
 }

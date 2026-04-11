@@ -207,6 +207,9 @@ pub enum ClientMessage {
         key:        String,
     },
     AnnotationList { symbol_uri: String },
+    /// Return all non-expired annotations whose key starts with `key_prefix`,
+    /// across every tracked symbol. Pass `""` to list everything.
+    AnnotationWorkspaceList { key_prefix: String },
     /// Execute multiple queries in a single Unix socket round-trip.
     ///
     /// The daemon processes each sub-query under a single db lock acquisition and

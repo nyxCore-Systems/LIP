@@ -68,6 +68,10 @@ impl LipDaemon {
         {
             let mut db = self.db.lock().await;
             journal::replay(&entries, &mut db);
+            // Purge expired annotations before compacting so the rewritten
+            // journal never contains entries that are already past their TTL.
+            let purged = db.purge_expired_annotations();
+            if purged > 0 { info!("purged {purged} expired annotation(s) on startup"); }
             if entries.len() >= COMPACT_THR {
                 match journal::compact(&journal_path, &db) {
                     Ok(n) => info!(

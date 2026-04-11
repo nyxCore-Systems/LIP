@@ -122,6 +122,7 @@ lip mcp --socket /tmp/lip.sock
 lip slice --cargo                                        # index ./Cargo.toml deps
 lip slice --npm                                          # index ./package.json deps
 lip slice --pub                                          # index ./pubspec.yaml deps
+lip slice --pip                                          # index pip-installed packages
 lip slice --cargo --push --registry https://registry.lip.dev
 
 # Fetch / publish slices directly
@@ -144,7 +145,9 @@ lip push  slice.json    --registry https://registry.lip.dev
 | `lip_dead_symbols` | Symbols defined but never referenced |
 | `lip_annotation_get` | Read a persistent symbol annotation |
 | `lip_annotation_set` | Write a persistent symbol annotation |
+| `lip_annotation_workspace_list` | All annotations matching a key prefix, workspace-wide |
 | `lip_similar_symbols` | Trigram fuzzy-search across all symbol names and docs |
+| `lip_stale_files` | Merkle sync probe — which files need re-indexing |
 | `lip_batch_query` | Multiple queries in one round-trip |
 
 **Recommended agent workflow before modifying code:**

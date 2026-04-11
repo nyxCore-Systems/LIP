@@ -746,6 +746,19 @@ impl LipDatabase {
         removed
     }
 
+    /// All non-expired annotations whose key starts with `prefix`, across every
+    /// symbol URI. Pass `""` to return all annotations workspace-wide.
+    ///
+    /// Useful for finding all `lip:fragile` symbols, all `agent:note` entries, etc.
+    pub fn annotations_by_key_prefix(&self, prefix: &str) -> Vec<OwnedAnnotationEntry> {
+        self.annotations
+            .values()
+            .flat_map(|m| m.values())
+            .filter(|e| !is_expired(e) && e.key.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
     /// All annotations across every symbol URI — used by journal compaction.
     pub fn all_annotations(&self) -> Vec<OwnedAnnotationEntry> {
         self.annotations

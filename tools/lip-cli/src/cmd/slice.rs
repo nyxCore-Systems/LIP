@@ -382,7 +382,13 @@ fn index_directory(dir: &Path, pkg_name: &str, version: &str, manager: &str) -> 
         };
 
         let doc = indexer.index_file(&uri, &source, lang);
-        symbols.extend(doc.symbols);
+        // Upgrade to Tier 3 confidence (score 100): these symbols are from a
+        // published, immutable package version — equivalent to a compiler-verified
+        // snapshot. Spec §3.3: Tier 3 = federated registry slice.
+        symbols.extend(doc.symbols.into_iter().map(|mut s| {
+            s.confidence_score = 100;
+            s
+        }));
     }
 
     symbols

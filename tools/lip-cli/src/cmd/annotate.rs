@@ -38,6 +38,17 @@ pub enum AnnotateKind {
     List {
         symbol_uri: String,
     },
+    /// Search annotations workspace-wide by key prefix.
+    /// Pass an empty prefix to list all annotations across all symbols.
+    ///
+    /// Examples:
+    ///   lip annotate search lip:fragile
+    ///   lip annotate search agent:
+    ///   lip annotate search ""
+    Search {
+        /// Key prefix to filter by (e.g. "lip:", "agent:", "team:owner").
+        key_prefix: String,
+    },
 }
 
 pub async fn run(args: AnnotateArgs) -> anyhow::Result<()> {
@@ -54,6 +65,9 @@ pub async fn run(args: AnnotateArgs) -> anyhow::Result<()> {
         }
         AnnotateKind::List { symbol_uri } => {
             ClientMessage::AnnotationList { symbol_uri }
+        }
+        AnnotateKind::Search { key_prefix } => {
+            ClientMessage::AnnotationWorkspaceList { key_prefix }
         }
     };
 
