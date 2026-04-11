@@ -178,6 +178,30 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             })?;
             ClientMessage::LoadSlice { slice }
         }
+        "lip_embedding_batch" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::EmbeddingBatch {
+                uris,
+                model: args["model"].as_str().map(str::to_owned),
+            }
+        }
+        "lip_index_status" => ClientMessage::QueryIndexStatus,
+        "lip_file_status" => ClientMessage::QueryFileStatus {
+            uri: req_str(args, "uri")?,
+        },
+        "lip_nearest" => ClientMessage::QueryNearest {
+            uri: req_str(args, "uri")?,
+            top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+        },
+        "lip_nearest_by_text" => ClientMessage::QueryNearestByText {
+            text: req_str(args, "text")?,
+            top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+            model: args["model"].as_str().map(str::to_owned),
+        },
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -362,6 +386,53 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             new_confidence,
         } => {
             format!("upgraded {uri}: confidence {old_confidence} → {new_confidence}")
+        }
+        ServerMessage::EmbeddingBatchResult {
+            vectors,
+            model,
+            dims,
+        } => {
+            let computed = vectors.iter().filter(|v| v.is_some()).count();
+            format!(
+                "embedded {computed}/{total} files  model={model}  dims={dims}",
+                total = vectors.len()
+            )
+        }
+        ServerMessage::IndexStatusResult {
+            indexed_files,
+            pending_embedding_files,
+            last_updated_ms,
+            embedding_model,
+        } => {
+            let last = last_updated_ms
+                .map(|ms| format!("  last_updated={ms}ms"))
+                .unwrap_or_default();
+            let model = embedding_model
+                .as_deref()
+                .map(|m| format!("  embedding_model={m}"))
+                .unwrap_or_else(|| "  embedding_model=(not configured)".into());
+            format!("indexed={indexed_files}  pending_embeddings={pending_embedding_files}{last}{model}")
+        }
+        ServerMessage::FileStatusResult {
+            uri,
+            indexed,
+            has_embedding,
+            age_seconds,
+        } => {
+            let age = age_seconds
+                .map(|s| format!("  age={s}s"))
+                .unwrap_or_default();
+            format!("{uri}  indexed={indexed}  has_embedding={has_embedding}{age}")
+        }
+        ServerMessage::NearestResult { results } => {
+            if results.is_empty() {
+                return "No nearest neighbours found.".into();
+            }
+            results
+                .iter()
+                .map(|r| format!("score={:.4}  {}", r.score, r.uri))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -615,6 +686,79 @@ fn tools_manifest() -> Value {
                     }
                 },
                 "required": ["slice"]
+            }
+        },
+        {
+            "name": "lip_embedding_batch",
+            "description": "Compute and cache embedding vectors for a list of file URIs. \
+                            Uses the endpoint configured via LIP_EMBEDDING_URL (OpenAI-compatible). \
+                            Already-cached embeddings are returned without a network call. \
+                            Call this before lip_nearest to ensure vectors are populated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File URIs to embed (file:///…)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Override the embedding model for this request"
+                    }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_index_status",
+            "description": "Report overall daemon health: number of indexed files, \
+                            pending embedding count, timestamp of last update, and configured model. \
+                            Use as a quick ckb-doctor check.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "lip_file_status",
+            "description": "Report the indexing status of a single file: \
+                            whether it is indexed, whether it has an embedding, and its age.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri": { "type": "string", "description": "File URI (file:///…)" }
+                },
+                "required": ["uri"]
+            }
+        },
+        {
+            "name": "lip_nearest",
+            "description": "Find the top-K files most semantically similar to a given file, \
+                            using pre-computed embedding vectors (cosine similarity). \
+                            The file must have an embedding — call lip_embedding_batch first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri":    { "type": "string",  "description": "Query file URI" },
+                    "top_k":  { "type": "integer", "default": 10 }
+                },
+                "required": ["uri"]
+            }
+        },
+        {
+            "name": "lip_nearest_by_text",
+            "description": "Find the top-K files most semantically similar to a free-text query. \
+                            The daemon embeds the text on the fly and runs cosine search. \
+                            Useful for 'find files related to authentication' style queries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text":   { "type": "string",  "description": "Natural language query" },
+                    "top_k":  { "type": "integer", "default": 10 },
+                    "model":  { "type": "string",  "description": "Override embedding model" }
+                },
+                "required": ["text"]
             }
         },
         {

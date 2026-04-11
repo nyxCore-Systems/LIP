@@ -157,6 +157,11 @@ pub struct LipDatabase {
     /// Enables precise re-verification when a symbol is renamed or deleted — only files
     /// whose `file_consumed_names` set contains the changed name need re-checking.
     file_consumed_names: HashMap<String, HashSet<String>>,
+    /// Cached embedding vectors: file_uri → dense float vector.
+    /// Set by the daemon after an `EmbeddingBatch` call; never derived from source.
+    file_embeddings: HashMap<String, Vec<f32>>,
+    /// Unix timestamps (ms) recording when each URI was last upserted.
+    file_indexed_at: HashMap<String, i64>,
 }
 
 impl LipDatabase {
@@ -178,6 +183,8 @@ impl LipDatabase {
             mounted_symbols: HashMap::new(),
             mounted_packages: HashMap::new(),
             file_consumed_names: HashMap::new(),
+            file_embeddings: HashMap::new(),
+            file_indexed_at: HashMap::new(),
         }
     }
 
@@ -289,6 +296,15 @@ impl LipDatabase {
             }
             self.file_consumed_names.insert(uri.clone(), consumed);
         }
+
+        // Record the timestamp of this upsert; invalidate stale embedding.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.file_indexed_at.insert(uri.clone(), now_ms);
+        // A new source version invalidates the old embedding.
+        self.file_embeddings.remove(&uri);
     }
 
     pub fn remove_file(&mut self, uri: &str) {
@@ -316,6 +332,8 @@ impl LipDatabase {
         self.def_index.retain(|_, (furi, _)| furi.as_str() != uri);
         self.remove_file_call_edges(uri);
         self.file_consumed_names.remove(uri);
+        self.file_embeddings.remove(uri);
+        self.file_indexed_at.remove(uri);
     }
 
     fn remove_file_call_edges(&mut self, uri: &str) {
@@ -347,6 +365,11 @@ impl LipDatabase {
 
     pub fn file_count(&self) -> usize {
         self.file_inputs.len()
+    }
+
+    /// Returns the source text stored for `uri`, or `None` if not indexed.
+    pub fn file_source_text(&self, uri: &str) -> Option<String> {
+        self.file_inputs.get(uri).map(|f| f.text.clone())
     }
 
     pub fn set_workspace_root(&mut self, root: PathBuf) {
@@ -810,6 +833,96 @@ impl LipDatabase {
             .filter(|(_, consumed)| consumed.iter().any(|n| name_set.contains(n.as_str())))
             .map(|(f, _)| f.clone())
             .collect()
+    }
+
+    // ── Embedding / observability ─────────────────────────────────────────
+
+    /// Store a pre-computed embedding vector for a file.
+    pub fn set_file_embedding(&mut self, uri: &str, vector: Vec<f32>) {
+        self.file_embeddings.insert(uri.to_owned(), vector);
+    }
+
+    /// Retrieve the stored embedding vector for a file, if any.
+    pub fn get_file_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
+        self.file_embeddings.get(uri)
+    }
+
+    /// Number of files that have been indexed but whose embedding is not yet stored.
+    pub fn pending_embedding_count(&self) -> usize {
+        self.file_inputs
+            .keys()
+            .filter(|uri| !self.file_embeddings.contains_key(*uri))
+            .count()
+    }
+
+    /// Unix timestamp (ms) of the most recent `upsert_file` call, or `None` if empty.
+    pub fn last_updated_ms(&self) -> Option<i64> {
+        self.file_indexed_at.values().copied().max()
+    }
+
+    /// Find the `top_k` files whose embedding is most similar (cosine) to `query_vec`.
+    ///
+    /// Files without an embedding are skipped. The query vector is assumed to be
+    /// non-zero; if it is all-zeros the result is undefined.
+    pub fn nearest_by_vector(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_uri: Option<&str>,
+    ) -> Vec<crate::query_graph::types::NearestItem> {
+        let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if q_norm == 0.0 || top_k == 0 {
+            return vec![];
+        }
+        let mut scored: Vec<(String, f32)> = self
+            .file_embeddings
+            .iter()
+            .filter(|(uri, _)| exclude_uri.map(|e| e != uri.as_str()).unwrap_or(true))
+            .filter_map(|(uri, vec)| {
+                if vec.len() != query_vec.len() {
+                    return None;
+                }
+                let dot: f32 = query_vec.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
+                let v_norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if v_norm == 0.0 {
+                    return None;
+                }
+                Some((uri.clone(), dot / (q_norm * v_norm)))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(top_k)
+            .map(|(uri, score)| crate::query_graph::types::NearestItem { uri, score })
+            .collect()
+    }
+
+    /// Overall index health snapshot.
+    ///
+    /// Returns `(indexed_files, pending_embedding_files, last_updated_ms)`.
+    pub fn index_status(&self) -> (usize, usize, Option<i64>) {
+        (
+            self.file_inputs.len(),
+            self.pending_embedding_count(),
+            self.last_updated_ms(),
+        )
+    }
+
+    /// Per-file status snapshot.
+    ///
+    /// Returns `(indexed, has_embedding, age_seconds)`.
+    pub fn file_status(&self, uri: &str) -> (bool, bool, Option<u64>) {
+        let indexed = self.file_inputs.contains_key(uri);
+        let has_embedding = self.file_embeddings.contains_key(uri);
+        let age_seconds = self.file_indexed_at.get(uri).and_then(|&ts_ms| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            u64::try_from(now_ms.saturating_sub(ts_ms) / 1000).ok()
+        });
+        (indexed, has_embedding, age_seconds)
     }
 
     /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files and mounted slices.

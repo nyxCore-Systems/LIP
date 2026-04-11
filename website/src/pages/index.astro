@@ -148,7 +148,7 @@ import Layout from '../layouts/Layout.astro';
             <div class="hz-row hz-affected hz-d2">
               <div class="hz-dot-col">
                 <span class="hz-dot dot-affected"></span>
-                <span class="hz-line-v hz-line-last"></span>
+                <span class="hz-line-v"></span>
               </div>
               <div class="hz-info">
                 <span class="hz-file">router.rs</span>
@@ -156,10 +156,36 @@ import Layout from '../layouts/Layout.astro';
               </div>
               <span class="hz-badge badge-ok">re-verified</span>
             </div>
+            <div class="hz-row hz-affected hz-d3">
+              <div class="hz-dot-col">
+                <span class="hz-dot dot-affected"></span>
+                <span class="hz-line-v hz-line-last"></span>
+              </div>
+              <div class="hz-info">
+                <span class="hz-file">api_gateway.rs</span>
+                <span class="hz-sym">#ApiGateway</span>
+              </div>
+              <span class="hz-badge badge-ok">re-verified</span>
+            </div>
             <div class="hz-safe">
-              <span class="hz-safe-count">496,997</span>
+              <span class="hz-safe-count">496,996</span>
               <span class="hz-safe-text">files untouched</span>
               <span class="hz-safe-formula">O(Δ + depth)</span>
+            </div>
+
+            <!-- confidence upgrade row -->
+            <div class="hz-upgrade">
+              <div class="hz-upgrade-row">
+                <span class="hz-upg-label">Tier 1 → Tier 2 upgrade</span>
+                <span class="hz-upg-files">4 files</span>
+              </div>
+              <div class="hz-upg-bar-wrap">
+                <div class="hz-upg-bar"></div>
+              </div>
+              <div class="hz-upgrade-row">
+                <span class="hz-upg-detail">rust-analyzer · background</span>
+                <span class="hz-upg-score">score 52 → 90</span>
+              </div>
             </div>
           </div>
 
@@ -220,15 +246,17 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── THE MISSING LAYER ───────── -->
   <section class="layer-section" id="protocol">
     <div class="container">
-      <div class="section-label">The Protocol</div>
-      <h2 class="section-title">
-        LSP talks to your editor.<br />SCIP audits your CI.<br />
-        <span class="gradient-text">LIP keeps the graph alive.</span>
-      </h2>
-      <p class="section-sub">
-        Three protocols for three jobs. LIP fills the gap between
-        per-session editor state and stale CI snapshots.
-      </p>
+      <div class="section-head">
+        <div class="section-label">The Protocol</div>
+        <h2 class="section-title">
+          LSP talks to your editor.<br />SCIP audits your CI.<br />
+          <span class="gradient-text">LIP keeps the graph alive.</span>
+        </h2>
+        <p class="section-sub">
+          Three protocols for three jobs. LIP fills the gap between
+          per-session editor state and stale CI snapshots.
+        </p>
+      </div>
 
       <div class="layer-cards reveal">
         <div class="layer-card">
@@ -289,41 +317,46 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── HOW IT WORKS ───────── -->
   <section class="how-section" id="how-it-works">
     <div class="container">
-      <div class="section-label">Blast-Radius Indexing</div>
-      <h2 class="section-title">O(Δ + depth), not O(N)</h2>
-      <p class="section-sub">
-        When a file is saved, LIP checks if the exported API surface changed.
-        If not — true for the vast majority of edits — zero downstream
-        recomputation happens.
-      </p>
-
-      <div class="blast-compare reveal">
-        <div class="blast-card blast-before">
-          <div class="blast-label">Full re-index (SCIP)</div>
-          <div class="blast-time">~ 60 min</div>
-          <div class="blast-sub">500,000 files re-indexed</div>
-          <div class="blast-bar-wrap">
-            <div class="blast-bar blast-bar-full"></div>
-          </div>
-          <div class="blast-desc">
-            One change. Every file re-parsed, type-checked,
-            cross-referenced. Even if your edit touches two lines.
-          </div>
+      <div class="blast-layout">
+        <div>
+          <div class="section-label">Blast-Radius Indexing</div>
+          <h2 class="section-title">O(Δ + depth),<br/>not O(N)</h2>
+          <p class="section-sub">
+            When a file is saved, LIP checks if the exported API surface changed.
+            If not — true for the vast majority of edits — zero downstream
+            recomputation happens. If yes, only files that actually import
+            the changed symbols are re-verified.
+          </p>
+          <p class="section-sub" style="margin-top:16px;">
+            A single-file edit in a 500k-file repo costs 200–800 ms with LIP.
+            The same change triggers a full O(N) re-index in SCIP: ~60 minutes.
+          </p>
         </div>
-
-        <div class="blast-vs">vs</div>
-
-        <div class="blast-card blast-after">
-          <div class="blast-label">LIP blast radius</div>
-          <div class="blast-time blast-time-good">200 – 800 ms</div>
-          <div class="blast-sub">~10–200 files re-verified</div>
-          <div class="blast-bar-wrap">
-            <div class="blast-bar blast-bar-small"></div>
+        <div class="blast-cards-col reveal">
+          <div class="blast-card blast-before">
+            <div class="blast-label">Full re-index (SCIP)</div>
+            <div class="blast-time">~ 60 min</div>
+            <div class="blast-sub">500,000 files re-indexed</div>
+            <div class="blast-bar-wrap">
+              <div class="blast-bar blast-bar-full"></div>
+            </div>
+            <div class="blast-desc">
+              One change. Every file re-parsed, type-checked,
+              cross-referenced. Even if your edit touches two lines.
+            </div>
           </div>
-          <div class="blast-desc">
-            API surface unchanged → zero downstream work.
-            Changed? Only files that actually import the
-            modified symbols are re-verified.
+          <div class="blast-card blast-after">
+            <div class="blast-label">LIP blast radius</div>
+            <div class="blast-time blast-time-good">200 – 800 ms</div>
+            <div class="blast-sub">~10–200 files re-verified</div>
+            <div class="blast-bar-wrap">
+              <div class="blast-bar blast-bar-small"></div>
+            </div>
+            <div class="blast-desc">
+              API surface unchanged → zero downstream work.
+              Changed? Only files that actually import the
+              modified symbols are re-verified.
+            </div>
           </div>
         </div>
       </div>
@@ -333,12 +366,14 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── THREE TIERS ───────── -->
   <section class="tiers-section">
     <div class="container">
-      <div class="section-label">Progressive Confidence</div>
-      <h2 class="section-title">Never blocks. Always upgrades.</h2>
-      <p class="section-sub">
-        Tree-sitter gives you answers instantly. The compiler upgrades
-        them to precise results in the background. The IDE never waits.
-      </p>
+      <div class="section-head">
+        <div class="section-label">Progressive Confidence</div>
+        <h2 class="section-title">Never blocks. Always upgrades.</h2>
+        <p class="section-sub">
+          Tree-sitter gives you answers instantly. The compiler upgrades
+          them to precise results in the background. The IDE never waits.
+        </p>
+      </div>
 
       <div class="tiers-grid reveal">
         <div class="tier-card">
@@ -395,12 +430,14 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── FEATURES ───────── -->
   <section class="features-section" id="features">
     <div class="container">
-      <div class="section-label">Capabilities</div>
-      <h2 class="section-title">Built for the AI era</h2>
-      <p class="section-sub">
-        Every query AI agents need — blast radius, references, annotations,
-        batch ops — first-class in the protocol, not bolted on.
-      </p>
+      <div class="section-head">
+        <div class="section-label">Capabilities</div>
+        <h2 class="section-title">Built for the AI era</h2>
+        <p class="section-sub">
+          Every query AI agents need — blast radius, references, annotations,
+          batch ops — first-class in the protocol, not bolted on.
+        </p>
+      </div>
 
       <div class="features-grid">
         <div class="feat-card reveal">
@@ -503,13 +540,15 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── PERFORMANCE ───────── -->
   <section class="perf-section">
     <div class="container">
-      <div class="section-label">Performance</div>
-      <h2 class="section-title">Numbers that matter</h2>
-      <p class="section-sub">
-        Measured on the Rust reference implementation, optimised build, Apple Silicon.
-      </p>
+      <div class="perf-layout">
+        <div class="perf-left">
+          <div class="section-label">Performance</div>
+          <h2 class="section-title">Numbers that matter</h2>
+          <p class="section-sub">
+            Measured on the Rust reference implementation,<br/>optimised build, Apple Silicon.
+          </p>
 
-      <div class="perf-grid reveal">
+          <div class="perf-grid reveal">
         <div class="perf-stat">
           <div class="perf-val">49<span class="perf-unit">×</span></div>
           <div class="perf-label">Under budget</div>
@@ -530,9 +569,10 @@ import Layout from '../layouts/Layout.astro';
           <div class="perf-label">Round-trip</div>
           <div class="perf-detail">64 B payload<br/>Unix socket</div>
         </div>
-      </div>
+          </div><!-- /perf-grid -->
+        </div><!-- /perf-left -->
 
-      <div class="perf-table-wrap reveal">
+        <div class="perf-table-wrap reveal">
         <table class="perf-table">
           <thead>
             <tr>
@@ -579,15 +619,23 @@ import Layout from '../layouts/Layout.astro';
             </tr>
           </tbody>
         </table>
-      </div>
+        </div><!-- /perf-table-wrap -->
+      </div><!-- /perf-layout -->
     </div>
   </section>
 
   <!-- ───────── LANGUAGES ───────── -->
   <section class="lang-section">
     <div class="container">
-      <div class="section-label">Languages</div>
-      <h2 class="section-title">Four languages, two tiers</h2>
+      <div class="section-head">
+        <div class="section-label">Languages</div>
+        <h2 class="section-title">Four languages, two tiers</h2>
+        <p class="section-sub">
+          Tier 1 tree-sitter fires immediately on file open, under 1 ms per file.
+          Tier 2 language servers upgrade confidence to compiler-level in the background.
+          Graceful degradation if a server is absent.
+        </p>
+      </div>
 
       <div class="lang-grid reveal">
         <div class="lang-card">
@@ -637,16 +685,18 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── MCP AGENT WORKFLOW ───────── -->
   <section class="agent-section">
     <div class="container">
-      <div class="section-label">AI-Native</div>
-      <h2 class="section-title">
-        Made for agents that<br />
-        <span class="gradient-text">think before they write.</span>
-      </h2>
-      <p class="section-sub">
-        The MCP server exposes every LIP query to Claude Code, Cursor,
-        and CKB. Agents claim symbols, leave persistent notes, and coordinate
-        safely across sessions.
-      </p>
+      <div class="section-head">
+        <div class="section-label">AI-Native</div>
+        <h2 class="section-title">
+          Made for agents that<br />
+          <span class="gradient-text">think before they write.</span>
+        </h2>
+        <p class="section-sub">
+          The MCP server exposes every LIP query to Claude Code, Cursor,
+          and CKB. Agents claim symbols, leave persistent notes, and coordinate
+          safely across sessions.
+        </p>
+      </div>
 
       <div class="agent-flow reveal">
         <div class="flow-step">
@@ -691,8 +741,10 @@ import Layout from '../layouts/Layout.astro';
   <!-- ───────── GET STARTED ───────── -->
   <section class="start-section" id="start">
     <div class="container">
-      <div class="section-label">Get Started</div>
-      <h2 class="section-title">Up in under a minute</h2>
+      <div class="section-head">
+        <div class="section-label">Get Started</div>
+        <h2 class="section-title">Up in under a minute</h2>
+      </div>
 
       <div class="start-grid">
         <div class="start-steps reveal">
@@ -999,7 +1051,8 @@ import Layout from '../layouts/Layout.astro';
     position: relative;
     z-index: 2;
     display: grid;
-    grid-template-columns: 1fr 1.45fr;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
     gap: 20px;
     margin-top: 48px;
     animation: fade-up 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;
@@ -1132,6 +1185,8 @@ import Layout from '../layouts/Layout.astro';
     border: 1px solid rgba(139, 92, 246, 0.2);
     border-radius: var(--radius);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 0 0 1px rgba(0,0,0,0.3), 0 8px 32px rgba(0,0,0,0.3);
   }
 
@@ -1187,6 +1242,7 @@ import Layout from '../layouts/Layout.astro';
 
   .hz-graph {
     padding: 16px 18px 14px;
+    flex: 1;
   }
 
   .hz-row {
@@ -1198,6 +1254,7 @@ import Layout from '../layouts/Layout.astro';
   .hz-row.hz-changed { animation-delay: 0.1s; }
   .hz-row.hz-d1      { animation-delay: 0.35s; }
   .hz-row.hz-d2      { animation-delay: 0.6s; }
+  .hz-row.hz-d3      { animation-delay: 0.8s; }
 
   @keyframes node-appear {
     from { opacity: 0; transform: translateX(-10px); }
@@ -1321,6 +1378,45 @@ import Layout from '../layouts/Layout.astro';
     border-radius: 4px;
   }
 
+  .hz-upgrade {
+    margin: 12px 0 0;
+    padding: 10px 12px;
+    background: rgba(139,92,246,0.05);
+    border: 1px solid rgba(139,92,246,0.12);
+    border-radius: var(--radius-sm);
+    animation: node-appear 0.5s cubic-bezier(0.16,1,0.3,1) 1.1s both;
+  }
+  .hz-upgrade-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .hz-upgrade-row:last-child { margin-bottom: 0; }
+  .hz-upg-label { font-size: 0.7rem; color: var(--muted); }
+  .hz-upg-files { font-family: var(--mono); font-size: 0.68rem; color: var(--accent); }
+  .hz-upg-bar-wrap {
+    height: 3px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 2px;
+    margin-bottom: 6px;
+    overflow: hidden;
+  }
+  .hz-upg-bar {
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    border-radius: 2px;
+    animation: bar-fill 1s ease 1.3s both;
+    transform-origin: left;
+  }
+  @keyframes bar-fill {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+  }
+  .hz-upg-detail { font-size: 0.68rem; color: var(--muted-2); font-family: var(--mono); }
+  .hz-upg-score  { font-family: var(--mono); font-size: 0.68rem; color: var(--accent-2); }
+
   /* hz-card tier footer */
   .hz-footer {
     display: flex;
@@ -1403,6 +1499,8 @@ import Layout from '../layouts/Layout.astro';
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.06);
     font-family: var(--mono);
     font-size: 0.82rem;
+    display: flex;
+    flex-direction: column;
   }
   .terminal-bar {
     display: flex;
@@ -1428,6 +1526,7 @@ import Layout from '../layouts/Layout.astro';
   .terminal-body {
     padding: 20px 24px 24px;
     line-height: 1.8;
+    flex: 1;
   }
   .tline { display: flex; flex-wrap: wrap; }
   .tgap  { margin-top: 12px; }
@@ -1717,7 +1816,7 @@ import Layout from '../layouts/Layout.astro';
   }
   .features-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 20px;
     margin-top: 56px;
   }
@@ -1767,10 +1866,9 @@ import Layout from '../layouts/Layout.astro';
   }
   .perf-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 20px;
-    margin-top: 56px;
-    margin-bottom: 40px;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-top: 28px;
   }
   .perf-stat {
     background: var(--bg-card);
@@ -1808,6 +1906,7 @@ import Layout from '../layouts/Layout.astro';
     overflow-x: auto;
     border-radius: var(--radius);
     border: 1px solid var(--border-muted);
+    align-self: start;
   }
   .perf-table {
     width: 100%;
@@ -1853,7 +1952,7 @@ import Layout from '../layouts/Layout.astro';
   }
   .lang-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 20px;
     margin-top: 48px;
   }
@@ -2140,15 +2239,17 @@ import Layout from '../layouts/Layout.astro';
     .layer-cards {
       grid-template-columns: 1fr;
     }
-    .blast-compare {
+    .blast-layout {
       grid-template-columns: 1fr;
     }
-    .blast-vs { text-align: center; }
+    .perf-layout {
+      grid-template-columns: 1fr;
+    }
     .tiers-grid {
       grid-template-columns: 1fr;
     }
     .features-grid {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
     }
     .perf-grid {
       grid-template-columns: 1fr 1fr;
@@ -2172,8 +2273,8 @@ import Layout from '../layouts/Layout.astro';
   }
   @media (max-width: 600px) {
     .features-grid { grid-template-columns: 1fr; }
-    .perf-grid     { grid-template-columns: 1fr 1fr; }
-    .lang-grid     { grid-template-columns: 1fr 1fr; }
+    .perf-grid     { grid-template-columns: 1fr; }
+    .lang-grid     { grid-template-columns: 1fr; }
     .nav-links a:not(.nav-gh) { display: none; }
   }
 </style>

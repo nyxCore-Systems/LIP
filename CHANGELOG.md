@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.3.0] — 2026-04-11
+
+### Added
+
+- **ABI surface fingerprinting** (`is_exported` field on `OwnedSymbolInfo`) — formal exported-symbol tracking per language. Rust: `pub` keyword; TypeScript: `export` statement; Python/Dart: non-underscore name convention. `file_api_surface()` now filters by `is_exported` instead of heuristics.
+- **Function-level blast radius** — `blast_radius_for` now emits one `ImpactItem` per distinct caller symbol, not one per file. Enables per-function impact analysis when multiple callers in the same file depend on the changed symbol. `direct_items` and `transitive_items` are deduplicated by `(file_uri, symbol_uri)`.
+- **Kotlin-IC name consumption index** — `LipDatabase` tracks which external display-names each file references (`file_consumed_names: HashMap<String, HashSet<String>>`). New query: `files_consuming_names(&[name])` returns files that must be re-verified when a symbol is renamed or deleted. Matches Kotlin's incremental compilation invalidation model.
+- **SCIP CI batch layer** — `lip import --from-scip` extended with `--push-to-daemon <socket>` and `--confidence <1–100>`. Streams each SCIP document as a `ClientMessage::Delta` directly to a running daemon, enabling nightly CI to push compiler-accurate symbols into the live graph without a restart.
+- **Semantic embedding support** — new subsystem for dense vector search:
+  - `ClientMessage::EmbeddingBatch { uris, model }` — batch file embeddings via any OpenAI-compatible HTTP endpoint. Already-cached vectors are returned without a network call; new source upserts invalidate stale embeddings. Configure with `LIP_EMBEDDING_URL` and `LIP_EMBEDDING_MODEL`.
+  - `ClientMessage::QueryNearest { uri, top_k }` — find the `top_k` most similar files to `uri` by cosine similarity of stored embedding vectors.
+  - `ClientMessage::QueryNearestByText { text, top_k, model }` — embed `text` on the fly and run cosine search. Useful for "find files related to authentication" queries.
+  - `ServerMessage::EmbeddingBatchResult`, `NearestResult`, `NearestItem` — corresponding response types.
+  - New `daemon::embedding::EmbeddingClient` module — thin async HTTP wrapper with `from_env()` and `embed_texts()`.
+- **Index and file observability** — daemon health endpoints for `ckb doctor` integration:
+  - `ClientMessage::QueryIndexStatus` → `ServerMessage::IndexStatusResult` — indexed file count, pending embedding count, last upsert timestamp (ms), configured embedding model.
+  - `ClientMessage::QueryFileStatus { uri }` → `ServerMessage::FileStatusResult` — per-file indexed/has_embedding/age_seconds.
+- **5 new MCP tools**: `lip_embedding_batch`, `lip_index_status`, `lip_file_status`, `lip_nearest`, `lip_nearest_by_text`.
+
+### Changed
+
+- **`file_api_surface()` filter** — replaced `_`-prefix heuristic + `SymbolKind` check with `s.is_exported` field (set by extractors at parse time and by Tier 2 backends via signature prefix).
+- **`blast_radius_for` Phase 3/4** — `sym_impacts: HashMap<String, (String, u32)>` replaced with `sym_items: Vec<(String, String, u32)>` (one entry per caller symbol). `direct_dependents` / `transitive_dependents` still count unique files for backwards compatibility.
+- **`LipDatabase::upsert_file`** — additionally records `file_indexed_at` timestamp and invalidates stale `file_embeddings` on source change.
+- **`LipDatabase::remove_file`** — clears `file_consumed_names`, `file_embeddings`, `file_indexed_at` for the removed URI.
+
+---
+
 ## [1.2.0] — 2026-04-11
 
 ### Added

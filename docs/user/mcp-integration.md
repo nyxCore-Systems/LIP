@@ -17,8 +17,16 @@
 | `lip_dead_symbols` | Symbols defined but never referenced |
 | `lip_annotation_get` | Read a persistent symbol annotation |
 | `lip_annotation_set` | Write a persistent symbol annotation |
+| `lip_annotation_workspace_list` | All annotations matching a key prefix, workspace-wide |
 | `lip_similar_symbols` | Trigram fuzzy-search across all symbol names and docs |
+| `lip_stale_files` | Merkle sync probe — which files need re-indexing |
+| `lip_load_slice` | Mount a pre-built dependency slice into the daemon graph |
 | `lip_batch_query` | Execute multiple queries in one round-trip |
+| `lip_embedding_batch` | Compute and cache file embeddings via HTTP endpoint |
+| `lip_nearest` | Top-K files most similar to a given file (cosine similarity) |
+| `lip_nearest_by_text` | Top-K files most similar to a free-text query |
+| `lip_index_status` | Daemon health: indexed count, embedding coverage, last update |
+| `lip_file_status` | Per-file indexing status and embedding age |
 
 All tools are backed by the live LIP daemon — results are always current, never a stale snapshot.
 
@@ -292,3 +300,130 @@ If you use CKB, LIP tools map directly to CKB's existing capabilities:
 | `prepareChange` | `lip_blast_radius` + `lip_annotation_get` | LIP adds annotation check |
 
 With LIP as CKB's backend, `analyzeImpact` and `prepareChange` are always current — no more `ckb index` needed.
+
+---
+
+## Semantic search tools (v1.3)
+
+These tools require the daemon to be configured with an OpenAI-compatible embedding endpoint:
+
+```bash
+export LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings   # Ollama, OpenAI, etc.
+export LIP_EMBEDDING_MODEL=nomic-embed-text                      # optional
+```
+
+### lip_embedding_batch
+
+Compute and cache dense embedding vectors for a list of file URIs. Already-cached embeddings are returned without a network call. A new source upsert invalidates the cached vector automatically.
+
+**Input:**
+```json
+{
+  "uris": [
+    "file:///src/auth.rs",
+    "file:///src/payments.rs",
+    "file:///src/session.rs"
+  ]
+}
+```
+
+**Output:**
+```
+embedded 3/3 files  model=nomic-embed-text  dims=768
+```
+
+Call this before `lip_nearest` to ensure vectors are populated. Typical workflow: embed all files after startup, then search.
+
+---
+
+### lip_nearest
+
+Find the `top_k` files most semantically similar to a given file, using pre-computed embedding vectors and cosine similarity. The query file must already have an embedding.
+
+**Input:**
+```json
+{ "uri": "file:///src/auth.rs", "top_k": 5 }
+```
+
+**Output:**
+```
+score=0.9412  file:///src/session.rs
+score=0.8871  file:///src/middleware/auth_guard.rs
+score=0.8204  file:///src/handlers/login.rs
+score=0.7931  file:///src/tokens.rs
+score=0.7456  file:///src/crypto.rs
+```
+
+---
+
+### lip_nearest_by_text
+
+Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly and runs cosine search against all stored vectors.
+
+**Input:**
+```json
+{ "text": "authentication token validation and session management", "top_k": 5 }
+```
+
+**Output:** same format as `lip_nearest`.
+
+Useful for "find me everything related to X" queries without knowing the exact file or symbol name.
+
+---
+
+## Observability tools (v1.3)
+
+### lip_index_status
+
+Report overall daemon health. Useful as a `ckb doctor` check or CI pre-flight.
+
+**Input:** `{}` (no arguments)
+
+**Output:**
+```
+indexed=142  pending_embeddings=38  last_updated=1744400123000ms  embedding_model=nomic-embed-text
+```
+
+- `pending_embeddings` — files in the index whose embedding has not yet been computed.
+- `last_updated` — Unix timestamp (ms) of the most recent file upsert.
+
+---
+
+### lip_file_status
+
+Report the indexing status of a single file.
+
+**Input:**
+```json
+{ "uri": "file:///src/auth.rs" }
+```
+
+**Output:**
+```
+file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
+```
+
+- `age` — seconds since the file was last indexed. Useful for detecting stale cache entries.
+
+---
+
+## Agent workflow: semantic code exploration
+
+```
+# 1. Bootstrap embeddings for the whole workspace (once per session)
+lip_embedding_batch(uris=[all_file_uris])
+
+# 2. Find files related to a concept
+lip_nearest_by_text("payment processing and fraud detection", top_k=10)
+
+# 3. For each relevant file: check blast radius and ownership
+lip_batch_query([
+  blast_radius(file_uri),
+  annotation_get(file_uri, "team:owner"),
+  annotation_get(file_uri, "lip:fragile")
+])
+
+# 4. Health check before committing results to a report
+lip_index_status()          # confirm coverage
+lip_file_status(target_uri) # confirm specific file is indexed and fresh
+```

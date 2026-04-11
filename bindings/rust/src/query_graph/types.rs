@@ -63,6 +63,15 @@ impl ImpactItem {
     }
 }
 
+/// A single nearest-neighbor hit returned by `ServerMessage::NearestResult`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NearestItem {
+    /// File URI of the nearest neighbour.
+    pub uri: String,
+    /// Cosine similarity in [0.0, 1.0] — higher is more similar.
+    pub score: f32,
+}
+
 /// A single fuzzy-search hit returned by `ClientMessage::SimilarSymbols`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimilarSymbol {
@@ -185,6 +194,43 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    /// Response to [`ClientMessage::EmbeddingBatch`].
+    ///
+    /// `vectors[i]` is `None` when the file at `uris[i]` was not found in the daemon's
+    /// index. Dimensions are uniform for all `Some` entries.
+    EmbeddingBatchResult {
+        /// One embedding vector per requested URI (None = not indexed).
+        vectors: Vec<Option<Vec<f32>>>,
+        /// The model that produced the vectors.
+        model: String,
+        /// Vector dimensionality (0 when all entries are None).
+        dims: usize,
+    },
+    /// Response to [`ClientMessage::QueryIndexStatus`].
+    IndexStatusResult {
+        /// Number of files currently in the daemon's index.
+        indexed_files: usize,
+        /// Files that have been updated but whose embedding has not yet been computed.
+        pending_embedding_files: usize,
+        /// Unix timestamp (ms) of the most recent file upsert. `None` when empty.
+        last_updated_ms: Option<i64>,
+        /// The embedding model name, if configured.
+        embedding_model: Option<String>,
+    },
+    /// Response to [`ClientMessage::QueryFileStatus`].
+    FileStatusResult {
+        uri: String,
+        /// Whether the file is currently in the daemon's symbol index.
+        indexed: bool,
+        /// Whether an embedding vector has been computed for this file.
+        has_embedding: bool,
+        /// Seconds since the file was last indexed. `None` if never indexed.
+        age_seconds: Option<u64>,
+    },
+    /// Response to [`ClientMessage::QueryNearest`] and [`ClientMessage::QueryNearestByText`].
+    NearestResult {
+        results: Vec<NearestItem>,
+    },
 }
 
 /// Wire envelope for client → daemon messages.
@@ -278,6 +324,39 @@ pub enum ClientMessage {
     LoadSlice {
         slice: crate::schema::OwnedDependencySlice,
     },
+    /// Compute (or retrieve cached) embedding vectors for a batch of file URIs.
+    ///
+    /// The daemon uses the HTTP embedding endpoint configured via `LIP_EMBEDDING_URL`.
+    /// Already-cached embeddings are returned without a network call.
+    /// Returns `EmbeddingBatchResult`.
+    EmbeddingBatch {
+        uris: Vec<String>,
+        /// Override the model for this request. `None` uses the daemon's default.
+        model: Option<String>,
+    },
+    /// Request overall daemon index health and embedding coverage.
+    /// Returns `IndexStatusResult`.
+    QueryIndexStatus,
+    /// Request the indexing status of a single file.
+    /// Returns `FileStatusResult`.
+    QueryFileStatus {
+        uri: String,
+    },
+    /// Find the `top_k` files whose stored embedding is most similar to the file at `uri`.
+    /// The file must have an embedding (call `EmbeddingBatch` first if needed).
+    /// Returns `NearestResult`.
+    QueryNearest {
+        uri: String,
+        top_k: usize,
+    },
+    /// Find the `top_k` files whose stored embedding is most similar to the given text.
+    /// The daemon embeds `text` on the fly and runs cosine search.
+    /// Returns `NearestResult`.
+    QueryNearestByText {
+        text: String,
+        top_k: usize,
+        model: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -287,7 +366,9 @@ impl ClientMessage {
     pub fn is_batchable(&self) -> bool {
         !matches!(
             self,
-            ClientMessage::Batch { .. } | ClientMessage::LoadSlice { .. }
+            ClientMessage::Batch { .. }
+                | ClientMessage::LoadSlice { .. }
+                | ClientMessage::EmbeddingBatch { .. }
         )
     }
 }

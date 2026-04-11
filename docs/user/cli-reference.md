@@ -22,6 +22,19 @@ lip daemon [OPTIONS]
 
 The daemon replays its journal on startup — the graph is warm immediately without re-indexing.
 
+**Embedding environment variables** (optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIP_EMBEDDING_URL` | — | OpenAI-compatible embeddings endpoint. Set to enable semantic search. |
+| `LIP_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
+
+```bash
+LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings \
+LIP_EMBEDDING_MODEL=nomic-embed-text \
+lip daemon --socket /tmp/lip.sock
+```
+
 ---
 
 ## lip index
@@ -162,6 +175,89 @@ echo '[["file:///src/main.rs","abc123..."]]' | lip query stale-files
 lip query stale-files ./hashes.json
 ```
 
+### lip query embedding-batch
+
+Compute and cache dense embedding vectors for one or more file URIs. Requires `LIP_EMBEDDING_URL` to be set to an OpenAI-compatible endpoint.
+
+```bash
+lip query embedding-batch <uri> [<uri>...] [--model <model>]
+```
+
+```bash
+# Embed two files with the configured default model
+lip query embedding-batch file:///src/auth.rs file:///src/session.rs
+
+# Override the model for this request
+lip query embedding-batch file:///src/auth.rs --model text-embedding-3-large
+```
+
+Already-cached embeddings are returned without a network call. A new file upsert invalidates the cached vector.
+
+### lip query nearest
+
+Find the `top_k` files most semantically similar to a given file, ranked by cosine similarity. The file must have a cached embedding (run `embedding-batch` first).
+
+```bash
+lip query nearest <uri> [--top-k <n>]
+```
+
+```bash
+lip query nearest file:///src/auth.rs
+lip query nearest file:///src/auth.rs --top-k 10
+```
+
+Output:
+```
+score=0.9412  file:///src/session.rs
+score=0.8871  file:///src/middleware/auth_guard.rs
+...
+```
+
+### lip query nearest-by-text
+
+Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly and runs cosine search.
+
+```bash
+lip query nearest-by-text <text> [--top-k <n>] [--model <model>]
+```
+
+```bash
+lip query nearest-by-text "authentication token validation"
+lip query nearest-by-text "payment processing fraud detection" --top-k 10
+```
+
+### lip query index-status
+
+Report overall daemon health: indexed file count, pending embedding count, last upsert timestamp, and configured embedding model. Designed for `ckb doctor` and CI health checks.
+
+```bash
+lip query index-status
+```
+
+Output:
+```
+indexed=142  pending_embeddings=38  last_updated=1744400123000ms  embedding_model=nomic-embed-text
+```
+
+### lip query file-status
+
+Report the indexing status of a single file.
+
+```bash
+lip query file-status <uri>
+```
+
+```bash
+lip query file-status file:///src/auth.rs
+```
+
+Output:
+```
+file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
+```
+
+- `age` — seconds since the file was last indexed.
+
 ### lip query batch
 
 Execute multiple queries in a single round-trip. Reads a JSON array of query objects from a file or stdin.
@@ -221,7 +317,7 @@ Reads JSON-RPC 2.0 from stdin, writes to stdout (stdio transport). Add to your M
 }
 ```
 
-Exposed tools: `lip_blast_radius`, `lip_workspace_symbols`, `lip_references`, `lip_definition`, `lip_hover`, `lip_document_symbols`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`, `lip_annotation_workspace_list`, `lip_similar_symbols`, `lip_stale_files`, `lip_load_slice`, `lip_batch_query`.
+Exposed tools: `lip_blast_radius`, `lip_workspace_symbols`, `lip_references`, `lip_definition`, `lip_hover`, `lip_document_symbols`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`, `lip_annotation_workspace_list`, `lip_similar_symbols`, `lip_stale_files`, `lip_load_slice`, `lip_batch_query`, `lip_embedding_batch`, `lip_nearest`, `lip_nearest_by_text`, `lip_index_status`, `lip_file_status`.
 
 See [mcp-integration.md](mcp-integration.md).
 

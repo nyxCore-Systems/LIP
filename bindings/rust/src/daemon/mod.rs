@@ -32,6 +32,7 @@
 //! In v0.1 it is unused; the daemon will switch to it once the FlatBuffers
 //! schema is stabilised.
 
+pub mod embedding;
 pub mod journal;
 pub mod manifest;
 pub mod mmap;

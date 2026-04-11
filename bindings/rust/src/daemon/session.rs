@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::query_graph::{BatchQueryResult, ClientMessage, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
+use super::embedding::EmbeddingClient;
 use super::journal::{Journal, JournalEntry};
 use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
@@ -26,6 +27,8 @@ pub struct Session {
     /// Broadcast sender for push notifications (e.g. `SymbolUpgraded`).
     /// Kept so we can subscribe receivers for newly forked sessions.
     pub notify_tx: Option<broadcast::Sender<ServerMessage>>,
+    /// HTTP embedding client. `None` when `LIP_EMBEDDING_URL` is not configured.
+    pub embedding_client: Arc<Option<EmbeddingClient>>,
 }
 
 impl Session {
@@ -35,6 +38,7 @@ impl Session {
         journal: Option<Arc<StdMutex<Journal>>>,
         watcher: Option<FileWatcherHandle>,
         notify_tx: Option<broadcast::Sender<ServerMessage>>,
+        embedding_client: Arc<Option<EmbeddingClient>>,
     ) -> Self {
         Self {
             db,
@@ -42,6 +46,7 @@ impl Session {
             journal,
             watcher,
             notify_tx,
+            embedding_client,
         }
     }
 
@@ -427,6 +432,158 @@ impl Session {
                     error: None,
                 }
             }
+
+            // ── Embeddings ────────────────────────────────────────────────
+            ClientMessage::EmbeddingBatch { uris, model } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                // Separate URIs that already have a cached embedding from those
+                // that need a network call.
+                let (cached_hits, texts_needed): (Vec<_>, Vec<_>) = {
+                    let db = self.db.lock().await;
+                    uris.iter()
+                        .map(|uri| {
+                            if let Some(v) = db.get_file_embedding(uri) {
+                                (Some(v.clone()), None)
+                            } else {
+                                let text = db.file_source_text(uri).unwrap_or_default();
+                                (None, Some((uri.clone(), text)))
+                            }
+                        })
+                        .unzip()
+                };
+
+                // Embed only the cache-miss texts.
+                let miss_texts: Vec<String> = texts_needed
+                    .iter()
+                    .filter_map(|opt| opt.as_ref().map(|(_, t)| t.clone()))
+                    .collect();
+                let miss_uris: Vec<String> = texts_needed
+                    .iter()
+                    .filter_map(|opt| opt.as_ref().map(|(u, _)| u.clone()))
+                    .collect();
+
+                let (new_vecs, used_model) = if miss_texts.is_empty() {
+                    (vec![], client.default_model().to_owned())
+                } else {
+                    match client.embed_texts(&miss_texts, model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ServerMessage::Error {
+                                message: format!("embedding failed: {e}"),
+                            }
+                        }
+                    }
+                };
+
+                // Store new vectors in db and assemble the response.
+                {
+                    let mut db = self.db.lock().await;
+                    for (uri, vec) in miss_uris.iter().zip(new_vecs.iter()) {
+                        db.set_file_embedding(uri, vec.clone());
+                    }
+                }
+
+                let mut miss_iter = new_vecs.into_iter();
+                let dims = {
+                    let db = self.db.lock().await;
+                    db.get_file_embedding(miss_uris.first().unwrap_or(&String::new()))
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                };
+                let vectors: Vec<Option<Vec<f32>>> = cached_hits
+                    .into_iter()
+                    .zip(texts_needed.into_iter())
+                    .map(|(cached, needed)| {
+                        if let Some(v) = cached {
+                            Some(v)
+                        } else if needed.is_some() {
+                            miss_iter.next()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let dims = dims.max(
+                    vectors
+                        .iter()
+                        .filter_map(|v| v.as_ref())
+                        .map(|v| v.len())
+                        .next()
+                        .unwrap_or(0),
+                );
+
+                ServerMessage::EmbeddingBatchResult {
+                    vectors,
+                    model: used_model,
+                    dims,
+                }
+            }
+
+            // ── Index / file status ───────────────────────────────────────
+            ClientMessage::QueryIndexStatus => {
+                let db = self.db.lock().await;
+                let (indexed_files, pending, last_ms) = db.index_status();
+                let embedding_model = self
+                    .embedding_client
+                    .as_ref()
+                    .as_ref()
+                    .map(|c| c.default_model().to_owned());
+                ServerMessage::IndexStatusResult {
+                    indexed_files,
+                    pending_embedding_files: pending,
+                    last_updated_ms: last_ms,
+                    embedding_model,
+                }
+            }
+
+            ClientMessage::QueryFileStatus { uri } => {
+                let db = self.db.lock().await;
+                let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                ServerMessage::FileStatusResult {
+                    uri,
+                    indexed,
+                    has_embedding,
+                    age_seconds,
+                }
+            }
+
+            // ── Nearest neighbour ─────────────────────────────────────────
+            ClientMessage::QueryNearest { uri, top_k } => {
+                let db = self.db.lock().await;
+                let Some(query_vec) = db.get_file_embedding(&uri).cloned() else {
+                    return ServerMessage::Error {
+                        message: format!("no embedding for {uri} — call EmbeddingBatch first"),
+                    };
+                };
+                let results = db.nearest_by_vector(&query_vec, top_k, Some(uri.as_str()));
+                ServerMessage::NearestResult { results }
+            }
+
+            ClientMessage::QueryNearestByText { text, top_k, model } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let texts = vec![text];
+                let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return ServerMessage::Error {
+                            message: format!("embedding failed: {e}"),
+                        }
+                    }
+                };
+                let query_vec = vecs.pop().unwrap_or_default();
+                let db = self.db.lock().await;
+                let results = db.nearest_by_vector(&query_vec, top_k, None);
+                ServerMessage::NearestResult { results }
+            }
         }
     }
 }
@@ -579,6 +736,40 @@ fn process_query_sync(
 
         // LoadSlice requires mutable db access and is not permitted in a read-only batch.
         ClientMessage::LoadSlice { .. } => err("LoadSlice is not permitted inside a BatchQuery"),
+
+        // EmbeddingBatch needs async HTTP — not supported in sync batch context.
+        ClientMessage::EmbeddingBatch { .. } => {
+            err("EmbeddingBatch is not permitted inside a BatchQuery")
+        }
+
+        // Status queries are read-only and safe inside a batch.
+        ClientMessage::QueryIndexStatus => {
+            let (indexed_files, pending, last_ms) = db.index_status();
+            ok(ServerMessage::IndexStatusResult {
+                indexed_files,
+                pending_embedding_files: pending,
+                last_updated_ms: last_ms,
+                embedding_model: None, // no client reference available in sync context
+            })
+        }
+
+        ClientMessage::QueryFileStatus { uri } => {
+            let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+            ok(ServerMessage::FileStatusResult {
+                uri,
+                indexed,
+                has_embedding,
+                age_seconds,
+            })
+        }
+
+        // Nearest queries need an embedding vector or an async HTTP call.
+        ClientMessage::QueryNearest { .. } => {
+            err("QueryNearest is not permitted inside a BatchQuery")
+        }
+        ClientMessage::QueryNearestByText { .. } => {
+            err("QueryNearestByText is not permitted inside a BatchQuery")
+        }
     }
 }
 

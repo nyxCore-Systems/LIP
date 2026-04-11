@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::query_graph::{LipDatabase, ServerMessage};
 
+use super::embedding::EmbeddingClient;
 use super::journal::{self, Journal, COMPACT_THRESHOLD as COMPACT_THR};
 use super::session::Session;
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
@@ -25,6 +26,8 @@ pub struct LipDaemon {
     watch_files: bool,
     /// Broadcast sender for push notifications to all active sessions.
     notify_tx: broadcast::Sender<ServerMessage>,
+    /// Shared embedding client. `None` when `LIP_EMBEDDING_URL` is not set.
+    embedding_client: Arc<Option<EmbeddingClient>>,
 }
 
 impl LipDaemon {
@@ -38,6 +41,7 @@ impl LipDaemon {
             tier2_rx: Some(tier2_rx),
             watch_files: true,
             notify_tx,
+            embedding_client: Arc::new(EmbeddingClient::from_env()),
         }
     }
 
@@ -136,6 +140,7 @@ impl LipDaemon {
                 Some(Arc::clone(&shared_journal)),
                 watcher_handle.clone(),
                 Some(self.notify_tx.clone()),
+                Arc::clone(&self.embedding_client),
             ));
             tokio::spawn(async move {
                 if let Err(e) = session.run(stream).await {
