@@ -129,12 +129,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}-registry
+          make_latest: false
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}
           generate_release_notes: true
+          make_latest: true
 
   # ── Publish to crates.io ────────────────────────────────────────────────────
   publish:
