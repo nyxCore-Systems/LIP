@@ -207,7 +207,11 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSy
     };
 
     let kind = scip_kind_to_lip(sym.kind);
-    let doc = sym.documentation.join("\n\n");
+
+    // SCIP indexers (scip-rust, scip-typescript, scip-java, …) place the
+    // rendered type signature as documentation[0] and prose doc comments as
+    // subsequent entries. Extract the signature and doc separately.
+    let (signature, documentation) = scip_extract_sig_and_doc(&sym.documentation);
 
     // SCIP private symbols begin with "local "; everything else is exported.
     let is_exported = !sym.symbol.starts_with("local ");
@@ -215,8 +219,8 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSy
         uri: scip_symbol_to_lip_uri(&sym.symbol),
         display_name: display,
         kind,
-        documentation: if doc.is_empty() { None } else { Some(doc) },
-        signature: None,
+        documentation,
+        signature,
         confidence_score: confidence,
         relationships: vec![],
         runtime_p99_ms: None,
@@ -225,6 +229,53 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSy
         blast_radius: 0,
         is_exported,
     }
+}
+
+/// Split SCIP documentation entries into a `(signature, doc_comment)` pair.
+///
+/// SCIP indexers place the rendered type signature as the first entry of the
+/// `documentation` array (e.g. `"pub fn foo(x: i32) -> Bar"`), followed by
+/// prose doc comments. When there are two or more entries, the first is always
+/// the signature. When there is exactly one entry, a lightweight heuristic
+/// checks whether it looks like a declaration or a prose comment.
+fn scip_extract_sig_and_doc(docs: &[String]) -> (Option<String>, Option<String>) {
+    match docs {
+        [] => (None, None),
+        [only] => {
+            if looks_like_signature(only) {
+                (Some(only.clone()), None)
+            } else {
+                (None, Some(only.clone()))
+            }
+        }
+        [sig, rest @ ..] => {
+            let doc = rest.join("\n\n");
+            (
+                Some(sig.clone()),
+                if doc.is_empty() { None } else { Some(doc) },
+            )
+        }
+    }
+}
+
+/// Returns `true` when a single-entry SCIP documentation string is likely a
+/// type signature rather than a prose doc comment.
+///
+/// Heuristic: the string starts with a language declaration keyword. This
+/// covers every language supported by major SCIP indexers. Prose comments
+/// never start with these keywords.
+fn looks_like_signature(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    // Common declaration-keyword prefixes across Rust, TypeScript, Python,
+    // Java, Go, Dart, and Kotlin.
+    const SIG_PREFIXES: &[&str] = &[
+        "pub ", "fn ", "async fn ", "pub fn ", "pub async fn ",
+        "def ", "class ", "interface ", "type ", "export ",
+        "func ", "abstract ", "struct ", "enum ", "const ", "var ",
+        "let ", "static ", "final ", "override ", "object ",
+        "impl ", "trait ", "module ", "namespace ",
+    ];
+    SIG_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn convert_occurrence(occ: &scip::Occurrence) -> Option<OwnedOccurrence> {
@@ -415,5 +466,52 @@ mod tests {
     #[test]
     fn scip_symbol_empty_returns_unknown() {
         assert_eq!(scip_symbol_to_lip_uri(""), "lip://local/unknown#unknown");
+    }
+
+    // ── SCIP signature extraction ─────────────────────────────────────────────
+
+    #[test]
+    fn scip_signature_extracted_from_multi_doc() {
+        // When SCIP provides 2+ documentation entries, doc[0] is the signature.
+        let (sig, doc) = scip_extract_sig_and_doc(&[
+            "pub fn verify_token(token: &str) -> Result<Claims>".to_owned(),
+            "Verify a JWT token and return its decoded claims.".to_owned(),
+            "Returns `Err` if the token is expired or has an invalid signature.".to_owned(),
+        ]);
+        assert_eq!(
+            sig.as_deref(),
+            Some("pub fn verify_token(token: &str) -> Result<Claims>"),
+            "doc[0] should become the signature"
+        );
+        assert!(
+            doc.as_deref()
+                .unwrap_or("")
+                .contains("Verify a JWT token"),
+            "remaining entries should become the documentation"
+        );
+    }
+
+    #[test]
+    fn scip_single_doc_keyword_heuristic() {
+        // A single entry starting with a declaration keyword → signature.
+        let (sig, doc) = scip_extract_sig_and_doc(&["pub fn foo(x: i32) -> Bar".to_owned()]);
+        assert_eq!(sig.as_deref(), Some("pub fn foo(x: i32) -> Bar"));
+        assert!(doc.is_none(), "no doc comment expected");
+
+        // A single prose entry → documentation, not signature.
+        let (sig2, doc2) =
+            scip_extract_sig_and_doc(&["A useful helper function.".to_owned()]);
+        assert!(sig2.is_none(), "prose should not become a signature");
+        assert_eq!(doc2.as_deref(), Some("A useful helper function."));
+
+        // TypeScript export keyword is recognised.
+        let (sig3, _) =
+            scip_extract_sig_and_doc(&["export function greet(name: string): void".to_owned()]);
+        assert!(sig3.is_some(), "export keyword should be recognised as signature");
+
+        // Empty slice → both None.
+        let (sig4, doc4) = scip_extract_sig_and_doc(&[]);
+        assert!(sig4.is_none());
+        assert!(doc4.is_none());
     }
 }

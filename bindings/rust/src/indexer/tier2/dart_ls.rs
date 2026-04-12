@@ -10,7 +10,8 @@
 //! 3. Calls `textDocument/documentSymbol` to obtain the symbol list.
 //! 4. Calls `textDocument/hover` at each symbol's definition site to extract
 //!    the type signature from the hover markdown.
-//! 5. Returns a [`VerificationResult`] with confidence scores upgraded to 70.
+//! 5. Calls `textDocument/typeDefinition` to record cross-file type relationships.
+//! 6. Returns a [`VerificationResult`] with confidence scores upgraded to 90.
 //!
 //! If `dart` is not in PATH the backend fails to spawn and is permanently
 //! disabled for the session — Tier 1 results remain fully functional.
@@ -24,10 +25,10 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
-use crate::schema::{OwnedSymbolInfo, SymbolKind};
+use crate::schema::{OwnedRelationship, OwnedSymbolInfo, SymbolKind};
 
 use super::lsp_client::LspClient;
-use super::rust_analyzer::VerificationResult;
+use super::rust_analyzer::{file_uri_to_lip_uri, VerificationResult};
 
 // ─── Backend ──────────────────────────────────────────────────────────────────
 
@@ -197,6 +198,43 @@ impl DartBackend {
         Ok(extract_dart_signature(md))
     }
 
+    /// Resolve the canonical definition URI of a symbol's *type* (cross-file).
+    async fn type_definition_uri(
+        &mut self,
+        uri: &str,
+        line: u32,
+        col: u32,
+    ) -> anyhow::Result<Option<String>> {
+        let result = self
+            .client
+            .request(
+                "textDocument/typeDefinition",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position":     { "line": line, "character": col }
+                }),
+            )
+            .await?;
+
+        let loc = if result.is_array() {
+            result.get(0).cloned()
+        } else if result.is_object() {
+            Some(result.clone())
+        } else {
+            None
+        };
+
+        Ok(loc
+            .and_then(|l| {
+                l.pointer("/uri")
+                    .or_else(|| l.pointer("/targetUri"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .filter(|def_uri| def_uri != uri)
+            .map(|def_uri| file_uri_to_lip_uri(&def_uri)))
+    }
+
     // ── Public: full verification ─────────────────────────────────────────────
 
     /// Run Tier 2 verification on a single Dart file.
@@ -211,6 +249,8 @@ impl DartBackend {
         let raw = self.document_symbols(uri).await?;
         debug!("tier2(dart): {} raw symbols for {uri}", raw.len());
 
+        let path = uri.strip_prefix("file://").unwrap_or(uri);
+
         let mut symbols = Vec::with_capacity(raw.len());
         for sym in &raw {
             let sig = self
@@ -219,7 +259,19 @@ impl DartBackend {
                 .ok()
                 .flatten();
 
-            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            let type_rel = self
+                .type_definition_uri(uri, sym.line, sym.col)
+                .await
+                .ok()
+                .flatten()
+                .map(|tdef_uri| OwnedRelationship {
+                    target_uri: tdef_uri,
+                    is_type_definition: true,
+                    is_reference: false,
+                    is_implementation: false,
+                    is_override: false,
+                });
+
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
             // Dart convention: names starting with _ are library-private.
@@ -230,8 +282,8 @@ impl DartBackend {
                 kind: lsp_kind_to_lip(sym.kind),
                 documentation: None,
                 signature: sig,
-                confidence_score: 70,
-                relationships: vec![],
+                confidence_score: 90,
+                relationships: type_rel.into_iter().collect(),
                 runtime_p99_ms: None,
                 call_rate_per_s: None,
                 taint_labels: vec![],

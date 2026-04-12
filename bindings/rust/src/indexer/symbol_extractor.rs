@@ -397,39 +397,67 @@ impl<'a> SymbolExtractor<'a> {
     // ─── Dart ────────────────────────────────────────────────────────────────
 
     fn dart_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
-        let (kind, name_field) = match node.kind() {
-            "function_declaration" => (SymbolKind::Function, "name"),
-            "method_declaration" => (SymbolKind::Method, "name"),
-            "class_declaration" => (SymbolKind::Class, "name"),
-            "constructor_declaration" => (SymbolKind::Constructor, "name"),
-            "getter_signature" => (SymbolKind::Method, "name"),
-            "setter_signature" => (SymbolKind::Method, "name"),
-            "mixin_declaration" => (SymbolKind::Class, "name"),
-            "extension_declaration" => (SymbolKind::Namespace, "name"),
-            _ => {
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        self.dart_symbols(child, out);
-                    }
-                }
-                return;
-            }
+        // tree-sitter-dart v0.0.4 grammar notes:
+        //   - Top-level functions use `lambda_expression` (not `function_declaration`).
+        //     The name lives in a `function_signature` child (field "parameters") under
+        //     the field "name" of that signature node.
+        //   - Classes use `class_definition` (not `class_declaration`), field "name" works.
+        //   - `mixin_declaration` exists but its identifier child has no named field.
+        let push = |name: &str, kind: SymbolKind, out: &mut Vec<OwnedSymbolInfo>| {
+            if name.is_empty() { return; }
+            out.push(OwnedSymbolInfo {
+                uri: self.lip_uri(name),
+                display_name: name.to_owned(),
+                kind,
+                confidence_score: 30,
+                is_exported: !name.starts_with('_'),
+                ..OwnedSymbolInfo::new("", "")
+            });
         };
 
-        if let Some(name_node) = node.child_by_field_name(name_field) {
-            let name = self.node_text(&name_node);
-            if !name.is_empty() {
-                // Dart library-private convention: names starting with _ are private.
-                let is_exported = !name.starts_with('_');
-                out.push(OwnedSymbolInfo {
-                    uri: self.lip_uri(name),
-                    display_name: name.to_owned(),
-                    kind,
-                    confidence_score: 30,
-                    is_exported,
-                    ..OwnedSymbolInfo::new("", "")
-                });
+        match node.kind() {
+            "lambda_expression" => {
+                // lambda_expression → function_signature (field "parameters") → identifier (field "name")
+                if let Some(name) = node
+                    .child_by_field_name("parameters")
+                    .filter(|c| c.kind() == "function_signature")
+                    .and_then(|sig| sig.child_by_field_name("name"))
+                    .map(|n| self.node_text(&n).to_owned())
+                {
+                    push(&name, SymbolKind::Function, out);
+                }
             }
+            "class_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    push(self.node_text(&name_node), SymbolKind::Class, out);
+                }
+            }
+            "mixin_declaration" => {
+                // Identifier has no named field; take the first identifier named child.
+                let name = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i))
+                    .find(|c| c.kind() == "identifier")
+                    .map(|c| self.node_text(&c).to_owned())
+                    .unwrap_or_default();
+                push(&name, SymbolKind::Class, out);
+            }
+            "method_declaration" | "constructor_declaration"
+            | "getter_signature" | "setter_signature" => {
+                let kind = if node.kind() == "constructor_declaration" {
+                    SymbolKind::Constructor
+                } else {
+                    SymbolKind::Method
+                };
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    push(self.node_text(&name_node), kind, out);
+                }
+            }
+            "extension_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    push(self.node_text(&name_node), SymbolKind::Namespace, out);
+                }
+            }
+            _ => {}
         }
 
         for i in 0..node.child_count() {
@@ -444,23 +472,32 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&node);
             if !name.is_empty() {
                 let role = node.parent().map_or(Role::Reference, |parent| {
-                    let is_decl = matches!(
+                    // Nodes where field "name" points to the declaration identifier.
+                    let is_named_decl = matches!(
                         parent.kind(),
-                        "function_declaration"
+                        "function_signature"   // identifier "name" inside lambda_expression
                             | "method_declaration"
-                            | "class_declaration"
+                            | "class_definition"
                             | "constructor_declaration"
                             | "getter_signature"
                             | "setter_signature"
-                            | "mixin_declaration"
                             | "extension_declaration"
                             | "variable_declarator"
-                    );
-                    let is_name = parent
+                    ) && parent
                         .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_decl && is_name {
+
+                    // mixin_declaration: identifier has no named field; treat the first
+                    // identifier named child as the definition.
+                    let is_mixin_name = parent.kind() == "mixin_declaration"
+                        && (0..parent.named_child_count())
+                            .filter_map(|i| parent.named_child(i))
+                            .find(|c| c.kind() == "identifier")
+                            .map(|c| c.id() == node.id())
+                            .unwrap_or(false);
+
+                    if is_named_decl || is_mixin_name {
                         Role::Definition
                     } else {
                         Role::Reference
@@ -484,7 +521,12 @@ impl<'a> SymbolExtractor<'a> {
 
     fn dart_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
         let new_caller: Option<String> = match node.kind() {
-            "function_declaration" | "method_declaration" | "constructor_declaration" => node
+            "lambda_expression" => node
+                .child_by_field_name("parameters")
+                .filter(|c| c.kind() == "function_signature")
+                .and_then(|sig| sig.child_by_field_name("name"))
+                .map(|n| self.node_text(&n).to_owned()),
+            "method_declaration" | "constructor_declaration" => node
                 .child_by_field_name("name")
                 .map(|n| self.node_text(&n).to_owned()),
             _ => None,

@@ -3,3 +3,5 @@ dist/
 .astro/
 .env
 .env.local
+.vercel
+.env*.local

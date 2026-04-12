@@ -401,12 +401,21 @@ impl LipDatabase {
             .into_iter()
             .map(|mut sym| {
                 if let Some(up) = upgrades.iter().find(|u| u.uri == sym.uri) {
-                    sym.confidence_score = up.confidence_score;
-                    if up.signature.is_some() {
-                        sym.signature = up.signature.clone();
-                    }
-                    if up.documentation.is_some() {
-                        sym.documentation = up.documentation.clone();
+                    // Only apply if the incoming upgrade is at least as confident as
+                    // the current value. This prevents a racing Tier 2 job from
+                    // silently downgrading a symbol that was already upgraded by a
+                    // SCIP push at a higher confidence score.
+                    if up.confidence_score >= sym.confidence_score {
+                        sym.confidence_score = up.confidence_score;
+                        if up.signature.is_some() {
+                            sym.signature = up.signature.clone();
+                        }
+                        if up.documentation.is_some() {
+                            sym.documentation = up.documentation.clone();
+                        }
+                        if !up.relationships.is_empty() {
+                            sym.relationships = up.relationships.clone();
+                        }
                     }
                 }
                 sym
@@ -1638,7 +1647,7 @@ mod tests {
             .iter()
             .map(|s| {
                 let mut up = s.clone();
-                up.confidence_score = 70;
+                up.confidence_score = 90;
                 up.signature = Some("fn upgradable()".to_owned());
                 up
             })
@@ -1648,12 +1657,61 @@ mod tests {
 
         let syms_after = db.file_symbols(&uri);
         assert!(
-            syms_after.iter().all(|s| s.confidence_score == 70),
-            "symbols should be upgraded to confidence 70"
+            syms_after.iter().all(|s| s.confidence_score == 90),
+            "symbols should be upgraded to confidence 90"
         );
         assert!(
             syms_after.iter().any(|s| s.signature.is_some()),
             "upgraded symbols should carry signatures"
+        );
+    }
+
+    #[test]
+    fn upgrade_file_symbols_respects_confidence_floor() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://s/p@1/floor.rs".to_owned();
+        db.upsert_file(
+            uri.clone(),
+            "pub fn floored() {}".to_owned(),
+            "rust".to_owned(),
+        );
+
+        // Manually upgrade to 90 first (simulating a SCIP push).
+        let syms = db.file_symbols(&uri);
+        let scip_upgrades: Vec<_> = syms
+            .iter()
+            .map(|s| {
+                let mut up = s.clone();
+                up.confidence_score = 90;
+                up.signature = Some("pub fn floored()".to_owned());
+                up
+            })
+            .collect();
+        db.upgrade_file_symbols(&uri, &scip_upgrades);
+
+        // Now simulate a racing Tier 2 job at lower confidence (70).
+        let syms2 = db.file_symbols(&uri);
+        let tier2_upgrades: Vec<_> = syms2
+            .iter()
+            .map(|s| {
+                let mut up = s.clone();
+                up.confidence_score = 70;
+                up.signature = Some("fn floored() — stale".to_owned());
+                up
+            })
+            .collect();
+        db.upgrade_file_symbols(&uri, &tier2_upgrades);
+
+        let final_syms = db.file_symbols(&uri);
+        assert!(
+            final_syms.iter().all(|s| s.confidence_score == 90),
+            "confidence floor must block downgrade from 90 to 70"
+        );
+        assert!(
+            final_syms
+                .iter()
+                .all(|s| s.signature.as_deref() != Some("fn floored() — stale")),
+            "stale signature from lower-confidence upgrade must not overwrite"
         );
     }
 

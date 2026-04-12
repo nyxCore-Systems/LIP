@@ -57,7 +57,7 @@ SCIP (Source Code Index Protocol, developed by Sourcegraph) is a protobuf-based 
 - **No annotations**: SCIP has no way to attach persistent notes or labels to symbols that survive across index runs.
 
 **LIP + SCIP together:**  
-`lip import --from-scip index.scip` ingests a SCIP artifact and upgrades all its symbols to Tier 2 confidence (score 90). From that point LIP maintains freshness incrementally — SCIP never needs to run again unless you want a new full-precision baseline or CPG data-flow analysis.
+`lip import --from-scip index.scip` ingests a SCIP artifact and upgrades all its symbols to confidence 90, including type signatures extracted from SCIP's documentation (SCIP indexers place the rendered signature as `documentation[0]`). From that point LIP maintains freshness incrementally — SCIP never needs to run again unless you want a new full-precision baseline or CPG data-flow analysis.
 
 ---
 
@@ -78,17 +78,20 @@ LIP (Linked Incremental Protocol) is a persistent daemon that keeps a live query
 
 | Capability | LIP Tier 1 | LIP Tier 2 | SCIP |
 |---|---|---|---|
-| Type precision | Syntactic only | Compiler-level (Rust) | Compiler-level (all languages) |
+| Type precision | Syntactic only | Compiler-level (all 4 languages) | Compiler-level (all languages) |
+| Type signatures on symbols | No | Yes — hover + SCIP import | Yes |
+| Cross-file type definition links | No | Yes — all 4 languages | Yes |
 | Overload resolution | No | Rust only | Yes |
 | Generics / trait bounds | No | Rust only | Yes |
 | Data-flow / taint | No | No | Yes (full CPG) |
 | Tier 2 language coverage | Rust, TypeScript, Python, Dart | Rust, TypeScript, Python, Dart | 15+ languages |
-| Cross-file reference precision | Name-based heuristic | Resolved (Rust) | Exact, all languages |
-| Confidence score | 30–50 | 51–90 | ~100 |
+| Local variable type inference | No | Rust (inlay hints) | **No** — SCIP does not index locals |
+| Cross-file reference precision | Name-based heuristic | Resolved (all 4 languages) | Exact, all languages |
+| Confidence score | 30–50 | 90 | ~100 |
 
 **The gap in plain terms:** LIP Tier 1 uses tree-sitter — a syntax parser. It knows that `fn verifyToken` exists and that some code nearby calls something named `verifyToken`, but it cannot prove they're the same symbol across files without the name index. SCIP runs the compiler, which resolves that unambiguously.
 
-LIP Tier 2 closes this gap for Rust (`rust-analyzer`), TypeScript (`typescript-language-server`), Python (`pyright-langserver` / `pylsp`), and Dart (`dart language-server`). All four backends are lazy-initialized on first use and degrade gracefully if the binary is not in PATH.
+LIP Tier 2 closes this gap for Rust (`rust-analyzer`), TypeScript (`typescript-language-server`), Python (`pyright-langserver` / `pylsp`), and Dart (`dart language-server`). All four backends are lazy-initialized on first use and degrade gracefully if the binary is not in PATH. As of v1.4, Tier 2 also records cross-file type definition relationships (`textDocument/typeDefinition`) for all four languages, and rust-analyzer captures local variable types via inlay hints — coverage that SCIP does not provide.
 
 ---
 
@@ -143,9 +146,16 @@ Each tool does what it's best at. Nothing is replaced.
 
 ## Remaining gap versus SCIP
 
-The remaining gaps are:
+The remaining gaps after v1.4:
 
-- **Data-flow / taint analysis** — requires full CPG; not in scope for LIP's architecture
-- **Cross-compilation-unit reference precision at Tier 1** — Tier 1 uses name-based heuristics for cross-file calls; Tier 2 resolves these precisely
+- **Data-flow / taint analysis** — requires full CPG; not in scope for LIP's current architecture. SCIP remains the right tool for taint tracking and security audit workflows.
+- **Generics / trait bounds / overload resolution for TypeScript, Python, Dart** — rust-analyzer exposes this via Tier 2 for Rust. The other three languages rely on hover text parsing; deep generic instantiation is not yet extracted as structured relationships.
+- **Language coverage** — Tier 2 covers 4 languages; SCIP indexers exist for 15+. Go, Java, Kotlin, and C# are on the v2.0 roadmap.
 
-For compliance snapshots, data-flow analysis, or audit workflows, SCIP remains the right tool. LIP and SCIP compose: feed SCIP artifacts into LIP with `lip import --from-scip` to get a precise baseline, then let LIP maintain freshness incrementally.
+Where LIP now **exceeds** SCIP:
+
+- **Local variable type inference (Rust)** — rust-analyzer inlay hints give LIP inferred types for local bindings inside function bodies. SCIP indexers do not index locals.
+- **Freshness** — LIP updates in &lt;1 ms per save; SCIP is a snapshot that ages between CI runs.
+- **Symbol annotations** — persistent key/value labels that survive file changes and daemon restarts; SCIP has no equivalent.
+
+For compliance snapshots, data-flow analysis, or audit workflows, SCIP remains the right tool. Feed SCIP artifacts into LIP with `lip import --from-scip` to get a full-precision baseline (including type signatures extracted from SCIP's documentation), then let LIP maintain freshness incrementally.

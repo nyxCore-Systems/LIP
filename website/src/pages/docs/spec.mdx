@@ -1087,12 +1087,20 @@ lip-protocol/
 - [x] Push notifications (`SymbolUpgraded`) — broadcast when Tier 2 upgrades a symbol
 - [x] Persisted query graph (survives daemon restarts via WAL journal)
 
+### v1.4 — Shipped ✓
+
+- [x] **Tier 2 confidence fix** — all 4 Tier 2 backends now emit `confidence_score = 90` (was 70). Aligns with spec §3.3 and resolves the v1.2 roadmap item.
+- [x] **Confidence floor in `upgrade_file_symbols`** — upgrades now only apply when `incoming.confidence >= existing.confidence`, preventing a racing Tier 2 job from downgrading a SCIP-pushed symbol.
+- [x] **SCIP signature extraction** — `lip import --from-scip` splits `documentation[0]` (the rendered type signature placed by SCIP indexers) into `OwnedSymbolInfo.signature` rather than discarding it. Imported symbols now carry their type signatures.
+- [x] **`textDocument/typeDefinition` in all 4 Tier 2 backends** — each symbol now carries an `OwnedRelationship { is_type_definition: true }` pointing to the cross-file definition of its type. Enables "which symbols have type `Foo`?" queries on the blast-radius graph.
+- [x] **`textDocument/inlayHints` in rust-analyzer** — local variable bindings (inside function bodies) are now captured as additional `Variable` symbols with their compiler-inferred types. SCIP does not index locals; this is additive coverage unique to LIP.
+
 ### v1.2 — In progress
 
 - [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
 - [ ] Shared-memory mmap path for zero-copy symbol reads (spec §7.1)
 - [ ] Merkle sync protocol — incremental repo-state reconciliation on daemon connect
-- [ ] `lip import --from-scip` upgrades to Tier 3 (score 100); Tier 2 upgrades to score 90 (currently uses 70)
+- [x] Tier 2 upgrades to score 90 (was 70) — shipped in v1.4
 - [ ] `lip slice --pip` — Python dependency slices
 
 ### v1.3 — Intelligence extensions

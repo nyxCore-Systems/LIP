@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.0] — 2026-04-12
+
+### Added
+
+- **`textDocument/typeDefinition` in all 4 Tier 2 backends** — rust-analyzer, typescript-language-server, pyright-langserver/pylsp, and dart language-server now call `typeDefinition` for each symbol after the hover pass. When the response points to a different file, an `OwnedRelationship { is_type_definition: true, target_uri }` is attached to the symbol. This gives LIP a cross-file type dependency graph — the blast-radius engine can now identify all symbols whose type is `Foo` when `Foo`'s definition changes.
+- **`textDocument/inlayHints` in rust-analyzer backend** — after `documentSymbol`, the rust-analyzer backend fetches all Type-kind inlay hints for the file. Each inferred local variable binding that isn't already exposed by `documentSymbol` becomes a new `Variable` symbol with `signature: "name: InferredType"`. These are indexed at `lip://local/<path>#<name>@<line>:<col>` URIs. SCIP indexers do not capture local variable types; this is additive coverage.
+- **SCIP signature extraction** — `lip import --from-scip` now extracts type signatures from SCIP documentation. SCIP indexers (scip-rust, scip-typescript, scip-java, …) place the rendered signature as `documentation[0]`. The importer now splits this correctly: `doc[0]` → `OwnedSymbolInfo.signature`, remaining entries → `OwnedSymbolInfo.documentation`. A keyword heuristic handles single-entry arrays. Imported symbols now have their type signatures populated rather than `None`.
+
+### Changed
+
+- **Tier 2 confidence score: 70 → 90** across all 4 backends (rust-analyzer, typescript-language-server, pyright-langserver/pylsp, dart language-server). Aligns with spec §3.3 ("score 51–90") and the roadmap v1.2 target. SCIP imports already used 90; Tier 2 was incorrectly lower.
+- **`LipDatabase::upgrade_file_symbols` confidence floor** — upgrades now apply only when `incoming.confidence_score >= existing.confidence_score`. A racing Tier 2 job can no longer silently downgrade a symbol that was previously pushed at a higher confidence (e.g. a SCIP import with `--confidence 95`). The floor also propagates `relationships` from incoming upgrades.
+- **`pub(super) file_uri_to_lip_uri`** extracted as a shared helper in `rust_analyzer.rs`, re-exported by the other three Tier 2 backends.
+
+---
+
 ## [1.3.0] — 2026-04-11
 
 ### Added
