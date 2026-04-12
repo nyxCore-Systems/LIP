@@ -1,0 +1,460 @@
+---
+interface Props {
+  frontmatter?: {
+    title?: string;
+    description?: string;
+  };
+  title?: string;
+  description?: string;
+}
+
+const props = Astro.props;
+const title = props.frontmatter?.title ?? props.title ?? 'LIP Docs';
+const description =
+  props.frontmatter?.description ??
+  props.description ??
+  'LIP — Linked Incremental Protocol documentation';
+
+const pathname = Astro.url.pathname.replace(/\/$/, '') || '/';
+
+const nav = [
+  {
+    label: 'Guides',
+    items: [
+      { href: '/docs/getting-started', label: 'Getting Started' },
+      { href: '/docs/embeddings',      label: 'Embeddings & Semantic Search' },
+      { href: '/docs/advanced',        label: 'Advanced Workflows' },
+      { href: '/docs/troubleshooting', label: 'Troubleshooting' },
+    ],
+  },
+  {
+    label: 'Reference',
+    items: [
+      { href: '/docs/cli-reference',  label: 'CLI Reference' },
+      { href: '/docs/daemon',         label: 'The Daemon' },
+      { href: '/docs/mcp',            label: 'MCP Integration' },
+      { href: '/docs/registry',       label: 'Registry & Slices' },
+      { href: '/docs/comparisons',    label: 'LSP, SCIP & LIP' },
+    ],
+  },
+  {
+    label: 'Concepts',
+    items: [
+      { href: '/docs/glossary', label: 'Glossary' },
+      { href: '/docs/spec',     label: 'Protocol Specification' },
+    ],
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title} — LIP Docs</title>
+    <meta name="description" content={description} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a href="/" class="logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+          </svg>
+          <span>LIP</span>
+        </a>
+        <nav class="topbar-nav">
+          <a href="/">Home</a>
+          <a href="/docs/getting-started" class="active">Docs</a>
+          <a href="https://crates.io/crates/lip-cli" target="_blank" rel="noopener">Crates.io</a>
+          <a href="https://github.com/nyxCore-Systems/LIP" target="_blank" rel="noopener">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="layout">
+
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <a href="/docs" class="docs-home">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+          Docs
+        </a>
+
+        {nav.map(section => (
+          <div class="nav-section">
+            <div class="nav-section-label">{section.label}</div>
+            {section.items.map(item => (
+              <a
+                href={item.href}
+                class:list={['nav-item', { active: pathname === item.href || pathname.startsWith(item.href + '/') }]}
+              >
+                {item.label}
+              </a>
+            ))}
+          </div>
+        ))}
+
+        <div class="sidebar-footer">
+          <a href="https://github.com/nyxCore-Systems/LIP/issues" target="_blank" rel="noopener">
+            Report an issue
+          </a>
+          <a href="https://github.com/nyxCore-Systems/LIP/blob/main/website/src/pages{pathname}.mdx" target="_blank" rel="noopener">
+            Edit this page
+          </a>
+        </div>
+      </aside>
+
+      <!-- Main content -->
+      <main class="content">
+        <article class="prose">
+          <slot />
+        </article>
+      </main>
+
+    </div>
+  </body>
+</html>
+
+<style is:global>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:           #07070f;
+    --bg-card:      #0c0c1e;
+    --bg-elevated:  #101028;
+    --border:       rgba(139, 92, 246, 0.14);
+    --border-muted: rgba(255, 255, 255, 0.06);
+    --text:         #dde2f0;
+    --text-bright:  #f0f4ff;
+    --muted:        #7b82a0;
+    --muted-2:      #44496a;
+    --accent:       #8b5cf6;
+    --accent-2:     #06b6d4;
+    --green:        #10b981;
+    --amber:        #f59e0b;
+    --font:         'Inter', system-ui, sans-serif;
+    --mono:         'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+    --sidebar-w:    248px;
+    --topbar-h:     52px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  /* ── Top bar ─────────────────────────────────────────── */
+  .topbar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: var(--topbar-h);
+    background: rgba(7, 7, 15, 0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    z-index: 100;
+  }
+  .topbar-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 32px;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text-bright);
+    color: var(--accent);
+  }
+  .logo svg { color: var(--accent); }
+  .topbar-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+  .topbar-nav a {
+    font-size: 13.5px;
+    color: var(--muted);
+    padding: 5px 10px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .topbar-nav a:hover,
+  .topbar-nav a.active {
+    color: var(--text);
+    background: var(--bg-elevated);
+  }
+
+  /* ── Shell layout ─────────────────────────────────────── */
+  .layout {
+    display: flex;
+    min-height: 100vh;
+    padding-top: var(--topbar-h);
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────── */
+  .sidebar {
+    position: fixed;
+    top: var(--topbar-h);
+    left: 0;
+    bottom: 0;
+    width: var(--sidebar-w);
+    overflow-y: auto;
+    padding: 24px 16px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-2) transparent;
+  }
+  .docs-home {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 6px 8px;
+    border-radius: 6px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    transition: color 0.15s;
+  }
+  .docs-home:hover { color: var(--text); }
+  .nav-section { margin-bottom: 20px; }
+  .nav-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-2);
+    padding: 4px 8px;
+    margin-bottom: 2px;
+  }
+  .nav-item {
+    display: block;
+    font-size: 13.5px;
+    color: var(--muted);
+    padding: 5px 8px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+    border-left: 2px solid transparent;
+  }
+  .nav-item:hover {
+    color: var(--text);
+    background: rgba(139, 92, 246, 0.06);
+  }
+  .nav-item.active {
+    color: var(--accent);
+    background: rgba(139, 92, 246, 0.08);
+    border-left-color: var(--accent);
+  }
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-top: 1px solid var(--border-muted);
+  }
+  .sidebar-footer a {
+    font-size: 12px;
+    color: var(--muted-2);
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: color 0.15s;
+  }
+  .sidebar-footer a:hover { color: var(--muted); }
+
+  /* ── Content area ─────────────────────────────────────── */
+  .content {
+    flex: 1;
+    margin-left: var(--sidebar-w);
+    min-width: 0;
+    display: flex;
+    justify-content: center;
+  }
+  .prose {
+    width: 100%;
+    max-width: 760px;
+    padding: 48px 40px 96px;
+  }
+
+  /* ── Prose typography ─────────────────────────────────── */
+  .prose h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    line-height: 1.2;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+  }
+  .prose h2 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: -0.01em;
+  }
+  .prose h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 32px;
+    margin-bottom: 10px;
+  }
+  .prose h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 24px;
+    margin-bottom: 8px;
+  }
+  .prose p {
+    color: var(--text);
+    margin-bottom: 16px;
+    font-size: 0.95rem;
+  }
+  .prose strong { color: var(--text-bright); font-weight: 600; }
+  .prose em { color: var(--muted); }
+
+  .prose a {
+    color: var(--accent-2);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  .prose a:hover { border-bottom-color: var(--accent-2); }
+
+  .prose ul, .prose ol {
+    padding-left: 20px;
+    margin-bottom: 16px;
+  }
+  .prose li {
+    font-size: 0.95rem;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .prose li > p { margin-bottom: 6px; }
+
+  .prose hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 40px 0;
+  }
+
+  /* Code */
+  .prose code {
+    font-family: var(--mono);
+    font-size: 0.82em;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent-2);
+  }
+  .prose pre {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    margin: 20px 0;
+    font-size: 0.83rem;
+    line-height: 1.65;
+  }
+  .prose pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text);
+    font-size: inherit;
+  }
+
+  /* Tables */
+  .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 0.88rem;
+  }
+  .prose th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 12px;
+  }
+  .prose td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border-muted);
+    color: var(--text);
+    vertical-align: top;
+  }
+  .prose tr:last-child td { border-bottom: none; }
+  .prose tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* Blockquotes (used as callouts) */
+  .prose blockquote {
+    border-left: 3px solid var(--accent);
+    background: rgba(139, 92, 246, 0.06);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 20px 0;
+    color: var(--text);
+    font-size: 0.92rem;
+  }
+  .prose blockquote p { margin-bottom: 0; color: inherit; }
+
+  /* Description text under h1 */
+  .prose .lead {
+    font-size: 1.05rem;
+    color: var(--muted);
+    margin-bottom: 32px;
+    line-height: 1.7;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; }
+    .prose { padding: 32px 20px 80px; }
+  }
+</style>

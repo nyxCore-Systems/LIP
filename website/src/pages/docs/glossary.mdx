@@ -1,0 +1,187 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Glossary
+description: Blast radius, confidence tiers, WAL journal, Merkle sync, symbol URI, dependency slice, and more.
+---
+
+# Glossary
+
+---
+
+## Annotation
+
+A persistent key/value pair attached to a symbol URI. Stored in the WAL journal — survives daemon restarts, file edits, and re-indexes. Readable and writable via `lip annotate` or the `lip_annotation_get` / `lip_annotation_set` MCP tools.
+
+Key conventions: `lip:fragile`, `lip:do-not-touch`, `lip:{agent-id}-lock`, `team:owner`, `agent:{id}:note`.
+
+---
+
+## Blast Radius
+
+The set of files and symbols that would need to change if a given symbol's API or behavior changes. LIP computes this by walking the reverse dependency graph (caller → callee edges) up to a configurable depth.
+
+Results are split into:
+- **Direct dependents** — files that directly reference the symbol
+- **Transitive dependents** — files that reference the direct dependents, and so on
+- **Risk level** — `low`, `medium`, `high` based on dependent count and graph depth
+
+---
+
+## Confidence Score
+
+A number from 0–100 indicating how precisely a symbol's definition and references are known.
+
+| Range | Source | Examples |
+|-------|--------|---------|
+| 30–50 | Tier 1 (tree-sitter) | Syntactic symbol extraction |
+| 51–90 | Tier 2 (compiler) | rust-analyzer, tsserver, pyright |
+| 91–100 | Tier 3 (slice) | Pre-built dependency slices |
+
+Scores are used to prioritize results and indicate analysis quality to agents.
+
+---
+
+## Confidence Tier
+
+The level of analysis that produced a symbol:
+
+- **Tier 1** — tree-sitter syntax analysis. Runs in < 1 ms per file. No compiler required. Extracts function/class/interface definitions and name-based cross-file references.
+- **Tier 2** — compiler or language server analysis. Runs in the background on the blast radius of a change. Resolves generics, overloads, and cross-file references precisely.
+- **Tier 3** — pre-built dependency slice. Stamped at confidence 100. Never re-computed.
+
+---
+
+## Content Hash
+
+The SHA-256 hash of a file's source text or a slice's symbol JSON. Used for Merkle sync (detecting changed files) and as the registry key for slices.
+
+---
+
+## CPG (Code Property Graph)
+
+A graph combining the AST, CFG (control flow graph), and PDG (program dependency graph) of a codebase. Used for data-flow and taint analysis. CPGs are produced by SCIP-based tools, not by LIP. LIP Tier 2 exposes caller/callee edges (a subset of CPG data) but does not produce full CPGs.
+
+---
+
+## Dead Symbol
+
+A symbol that is defined but never referenced by any other symbol in the indexed workspace. Found via `lip query dead-symbols` or `lip_dead_symbols`. Common sources: removed features, unreachable code paths, unused exports.
+
+---
+
+## Delta
+
+A `ClientMessage::Delta` sent to the daemon that carries the full source text of a file and its URI. The daemon computes the content hash, re-indexes the file, and updates the blast-radius graph. Fires a `DeltaAck` response with a sequence number.
+
+---
+
+## Dependency Slice
+
+A pre-built, content-addressed JSON blob of all exported symbols for a specific package version. Built with `lip slice`, shared via the registry. Slices are immutable and identified by SHA-256 content hash. Once mounted, the symbols are available in the daemon's graph as Tier 3 (confidence 100) anchors.
+
+---
+
+## Embedding
+
+A dense floating-point vector representing the semantic content of a source file. Computed by an external OpenAI-compatible HTTP endpoint. Stored in the daemon's in-memory graph and used for nearest-neighbour cosine similarity search.
+
+Configure via `LIP_EMBEDDING_URL` and `LIP_EMBEDDING_MODEL`.
+
+---
+
+## File URI
+
+A `file://` URL pointing to an absolute path on disk. Used as the primary identifier for files in LIP. Example: `file:///home/user/project/src/auth.rs`.
+
+---
+
+## Journal
+
+See **WAL Journal**.
+
+---
+
+## LSP Bridge
+
+The `lip lsp` process. A standard Language Server Protocol server that proxies LSP requests (`textDocument/definition`, `textDocument/references`, `workspace/symbol`, etc.) to the LIP daemon. Editors see it as a normal language server; no custom plugin needed.
+
+---
+
+## Manifest
+
+A `ClientMessage::Manifest` sent by clients on connection, containing the workspace root URI and a `dep_tree_hash` (hash of the dependency lockfile). The daemon compares the hash against cached slices and reports missing ones.
+
+---
+
+## MCP Server
+
+The `lip mcp` process. Exposes LIP as a Model Context Protocol server, speaking JSON-RPC 2.0 over stdio. Gives AI agents access to 19 tools covering blast radius, symbol search, references, annotations, semantic search, and observability.
+
+---
+
+## Merkle Sync
+
+A one-round-trip protocol for identifying stale files. The client sends an array of `[file_uri, sha256_hex]` pairs; the daemon returns the URIs that have changed or are unknown. The `QueryStaleFiles` message / `lip query stale-files` command / `lip_stale_files` MCP tool implement this.
+
+Used by the LSP bridge on reconnect and by CI scripts to avoid re-indexing unchanged files.
+
+---
+
+## Occurrence
+
+A single use of a symbol at a specific location (file URI + byte range). Occurrences have a `role`: either `Definition` (where the symbol is declared) or `Reference` (where it is used). The occurrence index is what the blast-radius graph is built from.
+
+---
+
+## Registry
+
+A content-addressed HTTP blob store for dependency slices. The public registry lives at `https://registry.lip.dev`. Private registries can be run with `lip-registry`. Clients fetch slices by SHA-256 hash; the server rejects uploads where the hash doesn't match the content.
+
+---
+
+## SCIP
+
+Source Code Index Protocol (Sourcegraph). A protobuf-based format for a complete, compiler-verified index of a repository. Used for full-precision baselines and data-flow analysis. `lip import --from-scip` imports a SCIP file into LIP as Tier 2 data.
+
+---
+
+## Session
+
+A single connection to the LIP daemon socket. Each connection handles one request/response pair and then closes. Clients that need concurrent queries open multiple connections.
+
+---
+
+## Symbol URI
+
+A stable, human-readable identifier for a symbol within the LIP graph. Format:
+
+```
+lip://<authority>/<path>#<symbol-name>
+```
+
+Examples:
+- `lip://local/src/auth.rs#AuthService.verifyToken` — local file
+- `lip://cargo/tokio@1.35.1/runtime#Runtime` — dependency slice symbol
+- `lip://scip/rust-analyzer/...` — imported from SCIP
+
+The authority encodes the source of the symbol (`local`, `cargo`, `npm`, `pub`, `pip`, `scip`). Paths within slices use the package name and version.
+
+---
+
+## Tier
+
+See **Confidence Tier**.
+
+---
+
+## WAL Journal
+
+Write-Ahead Log journal. A file (default: `~/.local/share/lip/journal.lip`) that the daemon writes all mutations to before applying them in memory. On restart, the daemon replays the journal to restore the full graph state — the graph is immediately warm without re-indexing.
+
+The journal is compacted on startup: only the most recent state per file is retained.
+
+---
+
+## Workspace
+
+The set of source files indexed by the LIP daemon. Files enter the workspace via `lip index` or explicit `Delta` messages. Files not in the workspace are invisible to all queries.

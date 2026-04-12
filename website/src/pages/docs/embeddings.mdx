@@ -1,0 +1,181 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Embeddings & Semantic Search
+description: Set up nearest-neighbour file search via any OpenAI-compatible endpoint — Ollama, OpenAI, or a self-hosted model.
+---
+
+# Embeddings & Semantic Search
+
+LIP v1.3 adds semantic search: compute dense embedding vectors for your source files and find the most semantically similar files to any query — either another file or a free-text description.
+
+---
+
+## How it works
+
+1. The daemon sends file source text to an OpenAI-compatible `/v1/embeddings` HTTP endpoint.
+2. The returned vector is stored alongside the file in the daemon's in-memory graph.
+3. When you run a nearest-neighbour query, the daemon computes cosine similarity against all stored vectors and returns the top-K results.
+4. If a file is upserted (edited), its cached embedding is automatically invalidated.
+
+The daemon never embeds files automatically — you trigger embedding explicitly, either via CLI or MCP tool.
+
+---
+
+## Setup
+
+### 1. Start an embedding endpoint
+
+Any OpenAI-compatible `/v1/embeddings` endpoint works:
+
+**Ollama (local, free):**
+```bash
+ollama pull nomic-embed-text
+ollama serve  # listens on localhost:11434
+```
+
+**OpenAI:**
+Use `https://api.openai.com/v1/embeddings` with an API key.
+
+**LM Studio / vLLM / other:**
+Set the URL to wherever your server listens.
+
+### 2. Configure the daemon
+
+Set environment variables before starting `lip daemon`:
+
+```bash
+export LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings
+export LIP_EMBEDDING_MODEL=nomic-embed-text   # optional, defaults to text-embedding-3-small
+
+lip daemon --socket /tmp/lip.sock
+```
+
+Without `LIP_EMBEDDING_URL`, embedding commands return an error and the rest of LIP works normally.
+
+---
+
+## Embed your files
+
+Compute embeddings for one or more files:
+
+```bash
+lip query embedding-batch file:///src/auth.rs file:///src/session.rs
+```
+
+Embed an entire directory by passing URIs from `lip query symbols`:
+
+```bash
+# Embed all indexed files
+lip query index-status
+# Then embed the ones with pending_embeddings > 0
+```
+
+Already-cached embeddings are returned without a network call. Only new or modified files trigger HTTP requests.
+
+---
+
+## Search
+
+### By file
+
+Find files most semantically similar to a given file:
+
+```bash
+lip query nearest file:///src/auth.rs
+lip query nearest file:///src/auth.rs --top-k 10
+```
+
+Output:
+```
+score=0.9412  file:///src/session.rs
+score=0.8871  file:///src/middleware/auth_guard.rs
+score=0.8204  file:///src/handlers/login.rs
+```
+
+The query file must have an embedding — run `embedding-batch` first.
+
+### By text
+
+Find files most related to a concept or description:
+
+```bash
+lip query nearest-by-text "authentication token validation"
+lip query nearest-by-text "payment processing fraud detection" --top-k 10
+```
+
+The text is embedded on the fly using the configured model (or a per-request override via `--model`).
+
+---
+
+## Check status
+
+How many files are indexed vs embedded:
+
+```bash
+lip query index-status
+# indexed=142  pending_embeddings=38  last_updated=1744400123000ms  embedding_model=nomic-embed-text
+```
+
+Check a specific file:
+
+```bash
+lip query file-status file:///src/auth.rs
+# file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
+```
+
+`age` is seconds since the file was last indexed.
+
+---
+
+## MCP tools
+
+When using LIP through an AI agent, the same capabilities are available as MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `lip_embedding_batch` | Compute and cache embeddings for a list of URIs |
+| `lip_nearest` | Top-K files most similar to a given file |
+| `lip_nearest_by_text` | Top-K files most similar to a free-text query |
+| `lip_index_status` | Daemon health and embedding coverage |
+| `lip_file_status` | Per-file indexing and embedding status |
+
+**Typical agent workflow:**
+
+```
+# 1. Bootstrap embeddings for the whole workspace (once per session)
+lip_embedding_batch(uris=[all_file_uris])
+
+# 2. Check coverage
+lip_index_status()  →  pending_embeddings=0
+
+# 3. Find files related to a concept
+lip_nearest_by_text("payment processing and fraud detection", top_k=10)
+
+# 4. Drill in on a specific file
+lip_nearest(uri="file:///src/payments.rs", top_k=5)
+```
+
+---
+
+## Model recommendations
+
+| Model | Host | Dims | Notes |
+|-------|------|------|-------|
+| `nomic-embed-text` | Ollama | 768 | Best local option; fast, good code coverage |
+| `text-embedding-3-small` | OpenAI | 1536 | Solid all-round; requires API key |
+| `text-embedding-3-large` | OpenAI | 3072 | Highest quality; 5× more expensive than small |
+| `mxbai-embed-large` | Ollama | 1024 | Strong code + natural language retrieval |
+
+You can mix models across requests with `--model` — but vectors from different models are not comparable. Use one model consistently per workspace.
+
+---
+
+## Troubleshooting
+
+**`LIP_EMBEDDING_URL not set`** — embedding commands return this error if the env var is missing. Set it before starting the daemon (or in the daemon's service unit file).
+
+**`connection refused`** — the embedding endpoint is not running. Start Ollama (`ollama serve`) or your other server.
+
+**Low scores / wrong results** — make sure you're using the same model for all embeddings. If you switch models, re-embed all files by restarting the daemon (which clears the in-memory cache).
+
+**`pending_embeddings` never reaches 0** — embeddings are not computed automatically. You must call `embedding-batch` explicitly. Consider calling it in a startup script or CI job.

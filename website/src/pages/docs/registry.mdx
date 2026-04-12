@@ -1,4 +1,10 @@
-# Registry and Dependency Slices
+---
+layout: ../../layouts/DocsLayout.astro
+title: Registry & Slices
+description: Build, share, and consume content-addressed dependency slices. Never re-index the same package twice.
+---
+
+# Registry & Slices
 
 A dependency slice is a pre-built, content-addressed JSON blob containing all exported symbols for a specific package version. Once a slice exists in the registry, no one on the team ever indexes that dependency again.
 
@@ -28,8 +34,6 @@ lip slice --cargo
 
 # Custom manifest path
 lip slice --cargo path/to/workspace/Cargo.toml
-
-# Slices are written to ~/.cache/lip/slices/<hash>.json
 ```
 
 Internally this runs `cargo metadata` to discover the dependency graph, finds each crate's source in `~/.cargo/registry/src/`, and indexes it with the Tier 1 tree-sitter indexer.
@@ -60,6 +64,14 @@ lip slice --pub path/to/pubspec.yaml
 
 Finds packages in `~/.pub-cache/hosted/pub.dev/` and indexes `.dart` files.
 
+### pip (Python)
+
+```bash
+lip slice --pip
+```
+
+Indexes packages installed in the current Python environment.
+
 ### Multiple package managers
 
 ```bash
@@ -76,15 +88,13 @@ lip slice --cargo --npm --pub
 lip slice --cargo --push --registry https://registry.lip.dev
 ```
 
-Anyone who uses the same dependency versions will automatically get your slices on their next `lip fetch`.
+Anyone who uses the same dependency versions will automatically get your slices.
 
 ### Push to a private registry
 
 ```bash
 lip slice --cargo --push --registry https://your-registry.internal
 ```
-
-See [Running a private registry](#running-a-private-registry).
 
 ### Fetch a specific slice
 
@@ -103,7 +113,7 @@ When the daemon starts with a `ManifestRequest` that includes a `dep_tree_hash`,
 ```bash
 # The LSP bridge handles this automatically.
 # Manual equivalent:
-lip fetch <hash> && lip push <hash-file>.json
+lip fetch <hash> --mount
 ```
 
 ---
@@ -170,15 +180,15 @@ A slice is a JSON file with this structure:
   "content_hash": "<sha256 of symbol JSON>",
   "symbols": [
     {
-      "uri":            "lip://cargo/tokio@1.35.1/runtime#Runtime",
-      "display_name":   "Runtime",
-      "kind":           "Class",
+      "uri":              "lip://cargo/tokio@1.35.1/runtime#Runtime",
+      "display_name":     "Runtime",
+      "kind":             "Class",
       "confidence_score": 100,
-      "signature":      "pub struct Runtime",
-      "documentation":  "The Tokio runtime..."
+      "signature":        "pub struct Runtime",
+      "documentation":    "The Tokio runtime..."
     }
   ],
-  "slice_url":  "https://registry.lip.dev/slices/<hash>",
+  "slice_url":   "https://registry.lip.dev/slices/<hash>",
   "built_at_ms": 1712700000000
 }
 ```

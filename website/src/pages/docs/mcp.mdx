@@ -1,10 +1,16 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: MCP Integration
+description: 19 MCP tools for AI agents — full schema reference, annotation patterns, and agent workflows.
+---
+
 # MCP Integration
 
 `lip mcp` exposes the LIP daemon as a Model Context Protocol server. Any MCP-compatible client — Claude Code, CKB, Cursor, or a custom agent — gets live, always-current code intelligence without building its own indexing layer.
 
 ---
 
-## What the MCP server provides
+## Tools
 
 | Tool | Description |
 |------|-------------|
@@ -180,13 +186,13 @@ Persistent annotations on symbols — survive daemon restarts, file changes, and
 |--------|---------|
 | `lip:fragile` | Handle with care — high blast radius or known instability |
 | `lip:do-not-touch` | Frozen — do not modify without explicit approval |
-| `lip:{agent-id}-lock` | Symbol is claimed by a running agent instance (see below) |
+| `lip:{agent-id}-lock` | Symbol is claimed by a running agent instance |
 | `team:owner` | Owning team or person |
 | `agent:note` | AI agent observations (scoped per agent ID) |
 
 #### `lip:agent-lock` — worktree collision prevention
 
-When an agent starts working on a symbol it sets a lock annotation so other instances of the same agent type (e.g. two nyx workers on different worktrees) know to skip it:
+When an agent starts working on a symbol it sets a lock annotation so other instances know to skip it:
 
 ```json
 {
@@ -197,13 +203,7 @@ When an agent starts working on a symbol it sets a lock annotation so other inst
 }
 ```
 
-Before claiming a symbol, check for the lock:
-
-```json
-{ "symbol_uri": "...", "key": "lip:nyx-agent-lock" }
-```
-
-If the value is non-empty, a peer is already working on it — skip and move on.
+Before claiming a symbol, check for the lock. If the value is non-empty, a peer is already working on it — skip and move on.
 
 After finishing, clear the lock by writing an empty value:
 
@@ -211,7 +211,7 @@ After finishing, clear the lock by writing an empty value:
 { "symbol_uri": "...", "key": "lip:nyx-agent-lock", "value": "", "author_id": "agent:nyx" }
 ```
 
-The lock key is agent-type-specific (`lip:nyx-agent-lock`, `lip:claude-agent-lock`, …) so two different agent types can work on the same symbol without blocking each other. To block all agents, set `lip:do-not-touch`.
+The lock key is agent-type-specific (`lip:nyx-agent-lock`, `lip:claude-agent-lock`, …) so two different agent types can work on the same symbol without blocking each other.
 
 ---
 
@@ -231,30 +231,104 @@ Execute multiple queries in a single round-trip. One socket connection instead o
 }
 ```
 
-**Output:** one result block per query, separated by `---`:
-```
-[0]
-Blast radius for `AuthService`:
-direct dependents:     3
-transitive dependents: 12
-...
----
-[1]
-lip://local/src/middleware/auth_guard.rs  line 18
-...
----
-[2]
-(not set)
----
-[3]
-(not set)
-```
-
 `Manifest` and `Delta` are not permitted inside a batch; they return an error for that slot without aborting the rest.
 
 ---
 
-## How agents should use LIP tools
+## Semantic search tools
+
+These tools require `LIP_EMBEDDING_URL` to be set. See [Embeddings & Semantic Search](/docs/embeddings).
+
+### lip_embedding_batch
+
+Compute and cache dense embedding vectors for a list of file URIs. Already-cached embeddings are returned without a network call.
+
+**Input:**
+```json
+{
+  "uris": [
+    "file:///src/auth.rs",
+    "file:///src/payments.rs",
+    "file:///src/session.rs"
+  ]
+}
+```
+
+**Output:**
+```
+embedded 3/3 files  model=nomic-embed-text  dims=768
+```
+
+---
+
+### lip_nearest
+
+Find the `top_k` files most semantically similar to a given file, using pre-computed embedding vectors and cosine similarity.
+
+**Input:**
+```json
+{ "uri": "file:///src/auth.rs", "top_k": 5 }
+```
+
+**Output:**
+```
+score=0.9412  file:///src/session.rs
+score=0.8871  file:///src/middleware/auth_guard.rs
+score=0.8204  file:///src/handlers/login.rs
+score=0.7931  file:///src/tokens.rs
+score=0.7456  file:///src/crypto.rs
+```
+
+---
+
+### lip_nearest_by_text
+
+Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly and runs cosine search against all stored vectors.
+
+**Input:**
+```json
+{ "text": "authentication token validation and session management", "top_k": 5 }
+```
+
+---
+
+## Observability tools
+
+### lip_index_status
+
+Report overall daemon health. Useful as a CI pre-flight check.
+
+**Input:** `{}` (no arguments)
+
+**Output:**
+```
+indexed=142  pending_embeddings=38  last_updated=1744400123000ms  embedding_model=nomic-embed-text
+```
+
+- `pending_embeddings` — files indexed but not yet embedded.
+- `last_updated` — Unix timestamp (ms) of the most recent file upsert.
+
+---
+
+### lip_file_status
+
+Report the indexing status of a single file.
+
+**Input:**
+```json
+{ "uri": "file:///src/auth.rs" }
+```
+
+**Output:**
+```
+file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
+```
+
+`age` is seconds since the file was last indexed.
+
+---
+
+## How agents should use LIP
 
 **Planning a multi-symbol refactor (use batch):**
 ```
@@ -287,127 +361,7 @@ lip_blast_radius on each → confirm truly zero dependents
 
 ---
 
-## The CKB → LIP mapping
-
-If you use CKB, LIP tools map directly to CKB's existing capabilities:
-
-| CKB tool | LIP tool | Notes |
-|----------|----------|-------|
-| `analyzeImpact` | `lip_blast_radius` | LIP is always live; CKB needs SCIP refresh |
-| `searchSymbols` | `lip_workspace_symbols` | LIP uses live Tier 1 index |
-| `findReferences` | `lip_references` | Same semantics |
-| `getCallGraph` | `lip_references` + CPG edges | LIP CPG via Tier 2 |
-| `prepareChange` | `lip_blast_radius` + `lip_annotation_get` | LIP adds annotation check |
-
-With LIP as CKB's backend, `analyzeImpact` and `prepareChange` are always current — no more `ckb index` needed.
-
----
-
-## Semantic search tools (v1.3)
-
-These tools require the daemon to be configured with an OpenAI-compatible embedding endpoint:
-
-```bash
-export LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings   # Ollama, OpenAI, etc.
-export LIP_EMBEDDING_MODEL=nomic-embed-text                      # optional
-```
-
-### lip_embedding_batch
-
-Compute and cache dense embedding vectors for a list of file URIs. Already-cached embeddings are returned without a network call. A new source upsert invalidates the cached vector automatically.
-
-**Input:**
-```json
-{
-  "uris": [
-    "file:///src/auth.rs",
-    "file:///src/payments.rs",
-    "file:///src/session.rs"
-  ]
-}
-```
-
-**Output:**
-```
-embedded 3/3 files  model=nomic-embed-text  dims=768
-```
-
-Call this before `lip_nearest` to ensure vectors are populated. Typical workflow: embed all files after startup, then search.
-
----
-
-### lip_nearest
-
-Find the `top_k` files most semantically similar to a given file, using pre-computed embedding vectors and cosine similarity. The query file must already have an embedding.
-
-**Input:**
-```json
-{ "uri": "file:///src/auth.rs", "top_k": 5 }
-```
-
-**Output:**
-```
-score=0.9412  file:///src/session.rs
-score=0.8871  file:///src/middleware/auth_guard.rs
-score=0.8204  file:///src/handlers/login.rs
-score=0.7931  file:///src/tokens.rs
-score=0.7456  file:///src/crypto.rs
-```
-
----
-
-### lip_nearest_by_text
-
-Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly and runs cosine search against all stored vectors.
-
-**Input:**
-```json
-{ "text": "authentication token validation and session management", "top_k": 5 }
-```
-
-**Output:** same format as `lip_nearest`.
-
-Useful for "find me everything related to X" queries without knowing the exact file or symbol name.
-
----
-
-## Observability tools (v1.3)
-
-### lip_index_status
-
-Report overall daemon health. Useful as a `ckb doctor` check or CI pre-flight.
-
-**Input:** `{}` (no arguments)
-
-**Output:**
-```
-indexed=142  pending_embeddings=38  last_updated=1744400123000ms  embedding_model=nomic-embed-text
-```
-
-- `pending_embeddings` — files in the index whose embedding has not yet been computed.
-- `last_updated` — Unix timestamp (ms) of the most recent file upsert.
-
----
-
-### lip_file_status
-
-Report the indexing status of a single file.
-
-**Input:**
-```json
-{ "uri": "file:///src/auth.rs" }
-```
-
-**Output:**
-```
-file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
-```
-
-- `age` — seconds since the file was last indexed. Useful for detecting stale cache entries.
-
----
-
-## Agent workflow: semantic code exploration
+## Semantic exploration workflow
 
 ```
 # 1. Bootstrap embeddings for the whole workspace (once per session)
@@ -423,7 +377,21 @@ lip_batch_query([
   annotation_get(file_uri, "lip:fragile")
 ])
 
-# 4. Health check before committing results to a report
+# 4. Health check before committing results
 lip_index_status()          # confirm coverage
 lip_file_status(target_uri) # confirm specific file is indexed and fresh
 ```
+
+---
+
+## The CKB → LIP mapping
+
+| CKB tool | LIP tool | Notes |
+|----------|----------|-------|
+| `analyzeImpact` | `lip_blast_radius` | LIP is always live; CKB needs SCIP refresh |
+| `searchSymbols` | `lip_workspace_symbols` | LIP uses live Tier 1 index |
+| `findReferences` | `lip_references` | Same semantics |
+| `getCallGraph` | `lip_references` + CPG edges | LIP CPG via Tier 2 |
+| `prepareChange` | `lip_blast_radius` + `lip_annotation_get` | LIP adds annotation check |
+
+With LIP as CKB's backend, `analyzeImpact` and `prepareChange` are always current — no more `ckb index` needed.

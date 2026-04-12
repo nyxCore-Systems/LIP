@@ -1,0 +1,277 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Advanced Workflows
+description: Team annotation patterns, CI integration, multi-agent coordination, and embedding-powered code exploration.
+---
+
+# Advanced Workflows
+
+---
+
+## Team annotation patterns
+
+Annotations are persistent key/value pairs on symbols, stored in the WAL journal. They survive daemon restarts, file edits, and re-indexes. Use them for knowledge that belongs on a symbol but doesn't fit in code comments.
+
+### Ownership
+
+```bash
+lip annotate set "lip://local/src/payments.rs#processCharge" \
+  "team:owner" "platform-billing" \
+  --author "human:alice"
+```
+
+Query all symbols owned by a team:
+```bash
+lip annotate search "team:owner"
+# Returns all annotations with key "team:owner" and their symbol URIs
+```
+
+### Fragility warnings
+
+Mark symbols that are risky to modify:
+```bash
+lip annotate set "lip://local/src/auth.rs#AuthService.verifyToken" \
+  "lip:fragile" \
+  "Token format changed in v1.2 — downstream services cache decoded tokens. See ADR-004."
+```
+
+Agents check this before touching any symbol:
+```bash
+lip query blast-radius "lip://local/src/auth.rs#AuthService.verifyToken"
+lip annotate get "lip://local/src/auth.rs#AuthService.verifyToken" "lip:fragile"
+```
+
+### Freeze
+
+Prevent agents from modifying a symbol entirely:
+```bash
+lip annotate set "lip://local/src/core/schema.rs#Schema" \
+  "lip:do-not-touch" \
+  "Public API — any change requires RFC. Contact: @core-team"
+```
+
+Agents that respect this convention check for `lip:do-not-touch` before claiming any symbol.
+
+### Agent notes
+
+Agents can leave structured notes that persist across sessions:
+```bash
+lip annotate set "lip://local/src/payments.rs#processCharge" \
+  "agent:claude:note" \
+  "Migrated from Stripe v1 to v2 in commit abc123. Payment method validation moved to PaymentValidator." \
+  --author "agent:claude"
+```
+
+The key pattern `agent:{agent-id}:{key}` scopes notes per-agent. Use `lip annotate search "agent:"` to list all agent annotations.
+
+---
+
+## CI integration
+
+### Pre-flight health check
+
+Add a LIP health check step before running tests that depend on code intelligence:
+
+```yaml
+# GitHub Actions
+- name: LIP health check
+  run: |
+    lip daemon --socket /tmp/lip.sock &
+    sleep 1
+    lip index ./src
+    lip query index-status
+```
+
+### Slice pre-population
+
+Build and push dependency slices in CI so the team always has them:
+
+```yaml
+- name: Build and push LIP slices
+  run: |
+    lip slice --cargo --push --registry $LIP_REGISTRY
+  env:
+    LIP_REGISTRY: https://your-registry.internal
+```
+
+Run this job only when `Cargo.lock` changes:
+```yaml
+on:
+  push:
+    paths:
+      - 'Cargo.lock'
+      - 'package-lock.json'
+```
+
+### SCIP baseline import
+
+Import a nightly SCIP index to give LIP Tier 2 precision across the whole repo:
+
+```yaml
+- name: Import SCIP index
+  run: |
+    # Run SCIP indexer (e.g. rust-analyzer's scip mode)
+    rust-analyzer scip . --output index.scip
+
+    # Start LIP daemon and import
+    lip daemon --socket /tmp/lip.sock &
+    sleep 1
+    lip import --from-scip index.scip
+    lip query index-status
+```
+
+After import, all symbols have Tier 2 confidence (score 90). LIP maintains freshness incrementally from that point.
+
+### Dead code audit
+
+```bash
+lip daemon --socket /tmp/lip.sock &
+lip index ./src
+lip query dead-symbols --limit 100 > dead-symbols.txt
+echo "Dead symbols: $(wc -l < dead-symbols.txt)"
+```
+
+Use this as a PR check to catch accumulating dead code.
+
+---
+
+## Multi-agent coordination
+
+Multiple agents working on the same repository can coordinate through LIP annotations to avoid stepping on each other.
+
+### Claiming work
+
+Before an agent starts on a symbol, it claims it:
+
+```bash
+lip annotate set "lip://local/src/payments.rs#processCharge" \
+  "lip:nyx-agent-lock" \
+  '{"worktree":"/repo-work","pid":4821,"started_at_ms":1744320000000}' \
+  --author "agent:nyx"
+```
+
+### Checking for conflicts
+
+Before claiming, check if anyone else has it:
+
+```bash
+lip annotate get "lip://local/src/payments.rs#processCharge" "lip:nyx-agent-lock"
+# If empty: safe to claim
+# If non-empty: another agent is working on it — skip or wait
+```
+
+Use `lip_batch_query` to check blast radius + lock in one round-trip:
+
+```json
+{
+  "queries": [
+    { "type": "query_blast_radius", "symbol_uri": "lip://local/src/payments.rs#processCharge" },
+    { "type": "annotation_get", "symbol_uri": "lip://local/src/payments.rs#processCharge", "key": "lip:nyx-agent-lock" },
+    { "type": "annotation_get", "symbol_uri": "lip://local/src/payments.rs#processCharge", "key": "lip:do-not-touch" }
+  ]
+}
+```
+
+### Releasing work
+
+After finishing:
+
+```bash
+lip annotate set "lip://local/src/payments.rs#processCharge" \
+  "lip:nyx-agent-lock" "" \
+  --author "agent:nyx"
+```
+
+Setting an empty value clears the lock.
+
+### Lock key conventions
+
+| Key | Agent type |
+|-----|-----------|
+| `lip:nyx-agent-lock` | Nyx workers |
+| `lip:claude-agent-lock` | Claude Code |
+| `lip:do-not-touch` | Universal freeze (all agents respect this) |
+
+Different agent types use different lock keys, so a Nyx worker and a Claude agent can work on the same symbol simultaneously without blocking each other. To block all agents, use `lip:do-not-touch`.
+
+---
+
+## Semantic code exploration
+
+Use embeddings to discover code relationships that aren't obvious from the symbol graph.
+
+### Finding related files
+
+```bash
+# Start the daemon with embedding support
+LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings \
+lip daemon --socket /tmp/lip.sock &
+
+# Index and embed
+lip index ./src
+lip query embedding-batch $(lip query symbols "" --json | jq -r '.[].uri' | grep '^file://')
+
+# Find all files related to authentication
+lip query nearest-by-text "authentication session token validation"
+
+# Find files similar to a specific file
+lip query nearest file:///src/auth.rs --top-k 10
+```
+
+### Grouping files by concept
+
+Run nearest-neighbour on a set of seed files to find clusters:
+
+```bash
+lip query nearest file:///src/payments.rs --top-k 5
+lip query nearest file:///src/auth.rs --top-k 5
+```
+
+Files that appear in both clusters are likely cross-cutting concerns — prime candidates for review before a refactor.
+
+### Pre-change impact assessment
+
+Combine blast radius with semantic search for a complete picture before modifying a symbol:
+
+```bash
+# 1. Find the symbol
+lip query symbols "processCharge"
+
+# 2. Blast radius (dependency graph)
+lip query blast-radius "lip://local/src/payments.rs#processCharge"
+
+# 3. Semantically similar files (may also be affected)
+lip query nearest file:///src/payments.rs --top-k 5
+
+# 4. Check for fragility / ownership annotations
+lip annotate get "lip://local/src/payments.rs#processCharge" "lip:fragile"
+lip annotate get "lip://local/src/payments.rs#processCharge" "team:owner"
+```
+
+---
+
+## Large repository tips
+
+### Index only changed files
+
+In CI, use the Merkle sync probe to identify files that actually changed:
+
+```bash
+# Generate current hashes
+find ./src -name '*.rs' -exec sha256sum {} \; | \
+  awk '{print "[\"file://"$2"\",\""$1"\"]"}' | \
+  jq -s '.' > hashes.json
+
+# Ask LIP which ones changed
+lip query stale-files hashes.json
+```
+
+Re-index only the stale files instead of running `lip index ./src` again.
+
+### Limit batch query size
+
+`lip_batch_query` executes under a single lock. Very large batches (>100 queries) block other concurrent queries. Break them into batches of 10–20 for best throughput.
+
+### Tune socket location
+
+On macOS, `/tmp` is on a RAM-backed filesystem. For high-throughput indexing, make sure the socket is at `/tmp/lip.sock` (not on a slow network mount or external drive).

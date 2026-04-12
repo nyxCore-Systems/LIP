@@ -1,3 +1,9 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Getting Started
+description: Get from zero to a running LIP daemon with editor and AI agent integration in about five minutes.
+---
+
 # Getting Started with LIP
 
 LIP keeps a live, queryable code intelligence graph of your repository. This guide gets you from zero to a running daemon with editor and AI agent integration in about five minutes.
@@ -6,7 +12,7 @@ LIP keeps a live, queryable code intelligence graph of your repository. This gui
 
 ## Prerequisites
 
-- Rust 1.78+ (`rustup update stable`)
+- **Rust 1.78+** — `rustup update stable`
 - No other requirements — no system `protoc`, no running compiler
 
 ---
@@ -14,16 +20,22 @@ LIP keeps a live, queryable code intelligence graph of your repository. This gui
 ## Install
 
 ```bash
-git clone https://github.com/lip-protocol/lip
-cd lip
+cargo install lip-cli
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/nyxCore-Systems/LIP
+cd LIP
 cargo install --path tools/lip-cli
 ```
 
-This puts the `lip` binary in `~/.cargo/bin/`. Verify:
+Verify:
 
 ```bash
 lip --version
-# lip 1.0.0
+# lip 1.3.0
 ```
 
 ---
@@ -36,9 +48,9 @@ The daemon is the heart of LIP. It watches your files, maintains the query graph
 lip daemon --socket /tmp/lip.sock
 ```
 
-Leave this running in a terminal. On first start it indexes your repository with Tier 1 (tree-sitter, < 1 ms/file). From that point it watches each file individually and re-indexes only what changed.
+Leave this running in a terminal. On first start it indexes your repository with Tier 1 (tree-sitter, &lt; 1 ms/file). From that point it watches each file individually and re-indexes only what changed.
 
-You should see something like:
+You'll see:
 
 ```
 INFO  lip_daemon: journal replayed  entries=0
@@ -57,15 +69,9 @@ In a second terminal, send your project to the daemon:
 lip index ./src
 ```
 
-For a JSON event stream (useful for piping):
-
-```bash
-lip index ./src --json | lip push --registry https://registry.lip.dev
-```
-
 ---
 
-## Step 3 — Make your first query
+## Step 3 — Make your first queries
 
 ```bash
 # Search for a symbol by name
@@ -76,6 +82,8 @@ lip query blast-radius "lip://local/src/auth.rs#AuthService.verifyToken"
 
 # Go to definition at line 42, column 10
 lip query definition file:///path/to/src/auth.rs 42 10
+
+# Blast radius returns risk level + direct/transitive dependents
 ```
 
 ---
@@ -85,7 +93,6 @@ lip query definition file:///path/to/src/auth.rs 42 10
 LIP speaks standard LSP. Any editor that supports LSP works without a plugin.
 
 ```bash
-# Terminal 2 — LSP bridge
 lip lsp --socket /tmp/lip.sock
 ```
 
@@ -119,16 +126,19 @@ command = "lip"
 args = ["lsp", "--socket", "/tmp/lip.sock"]
 ```
 
+**JetBrains IDEs** — configure a custom language server pointing to `lip lsp`.
+
 ---
 
 ## Step 5 — Connect an AI agent (MCP)
 
 ```bash
-# Terminal 3 — MCP server
 lip mcp --socket /tmp/lip.sock
 ```
 
-Add to your MCP client config (e.g. Claude Code's `~/.claude/mcp.json`):
+Add to your MCP client config:
+
+**Claude Code** (`~/.claude/mcp.json`):
 
 ```json
 {
@@ -141,42 +151,47 @@ Add to your MCP client config (e.g. Claude Code's `~/.claude/mcp.json`):
 }
 ```
 
-The agent now has access to `lip_blast_radius`, `lip_workspace_symbols`, `lip_definition`, `lip_references`, `lip_hover`, `lip_dead_symbols`, `lip_annotation_get`, and `lip_annotation_set`.
+The agent gets access to `lip_blast_radius`, `lip_workspace_symbols`, `lip_definition`, `lip_references`, `lip_hover`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`, and 11 more tools.
 
-See [mcp-integration.md](mcp-integration.md) for details.
+See [MCP Integration](/docs/mcp) for the full tool reference.
 
 ---
 
-## Step 6 — Pre-build dependency slices (optional but recommended)
+## Step 6 — Pre-build dependency slices (recommended)
 
 The first time you run on a new machine, build slices for your dependencies so they never need to be re-indexed:
 
 ```bash
-# Cargo
-lip slice --cargo
+lip slice --cargo    # Rust deps from Cargo.toml
+lip slice --npm      # Node deps from package.json
+lip slice --pub      # Dart deps from pubspec.yaml
+lip slice --pip      # Python pip-installed packages
 
-# npm
-lip slice --npm
-
-# Dart pub
-lip slice --pub
-
-# Build and push to a shared registry so teammates get it too
+# Build and share with your team
 lip slice --cargo --push --registry https://registry.lip.dev
 ```
 
-See [registry.md](registry.md) for running a private registry.
+See [Registry & Slices](/docs/registry).
 
 ---
 
 ## What's running
 
-After setup you have:
+After setup you have up to three processes:
 
 | Process | Command | Purpose |
 |---------|---------|---------|
 | Daemon | `lip daemon` | Query graph, file watcher, WAL journal |
-| LSP bridge | `lip lsp` | Editor integration via standard LSP |
-| MCP server | `lip mcp` | AI agent integration via MCP |
+| LSP bridge | `lip lsp` | Editor integration (standard LSP) |
+| MCP server | `lip mcp` | AI agent integration (MCP) |
 
-The daemon is the only required process. LSP and MCP bridges connect to it on demand.
+The daemon is the only required process. The LSP bridge and MCP server connect to it on demand and can be started/stopped freely.
+
+---
+
+## Next steps
+
+- [CLI Reference](/docs/cli-reference) — every command and flag
+- [The Daemon](/docs/daemon) — persistence, file watcher, service setup
+- [MCP Integration](/docs/mcp) — AI agent workflows
+- [Embeddings & Semantic Search](/docs/embeddings) — semantic nearest-neighbour search

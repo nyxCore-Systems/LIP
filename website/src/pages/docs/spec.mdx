@@ -1,0 +1,1203 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Protocol Specification
+description: Full LIP design document — wire format, symbol URIs, confidence tiers, security, and architecture.
+---
+
+import Callout from '../../components/Callout.astro'
+import Badge from '../../components/Badge.astro'
+
+# LIP — Linked Incremental Protocol
+
+**Design Document & Specification v0.1** · Draft · Apache 2.0
+
+---
+
+## Abstract
+
+LIP (Linked Incremental Protocol) is a language-agnostic, open-source protocol for
+streaming, incremental code intelligence. It is designed as a spiritual successor to both
+LSP (Language Server Protocol) and SCIP (Symbolic Code Intelligence Protocol), combining
+the best properties of each while eliminating their core weaknesses:
+
+- **LSP** is fast and editor-native, but file-scoped and stateless. It provides no
+  persistent cross-repository index and has known incremental sync drift issues.
+- **SCIP** provides compiler-accurate, repository-wide precision, but requires a full
+  batch re-index that takes 30–90 minutes on large repositories and must be re-run on
+  every CI push.
+
+LIP resolves this by treating a codebase as a **lazy query graph** rather than a snapshot,
+indexing only the **blast radius** of a change, and sharing pre-computed **dependency
+slices** through a federated content-addressable registry.
+
+<Callout type="info">
+LIP is not a replacement for LSP at the editor protocol layer. It provides a
+LIP-to-LSP bridge so existing editors (VS Code, Neovim, JetBrains, Helix) can consume
+LIP intelligence transparently via standard LSP requests.
+</Callout>
+
+---
+
+## Table of Contents
+
+1. [Motivation & Problem Statement](#1-motivation--problem-statement)
+2. [Comparison Matrix](#2-comparison-matrix)
+3. [Core Design Principles](#3-core-design-principles)
+   - 3.1 [Lazy Query Graph (Salsa-inspired)](#31-lazy-query-graph-salsa-inspired)
+   - 3.2 [Blast Radius Indexing](#32-blast-radius-indexing)
+   - 3.3 [Three-Tier Confidence Model](#33-three-tier-confidence-model)
+   - 3.4 [Federated Dependency Slicing](#34-federated-dependency-slicing)
+   - 3.5 [Merkle Sync & State Integrity](#35-merkle-sync--state-integrity)
+4. [Wire Format — FlatBuffers Schema](#4-wire-format--flatbuffers-schema)
+5. [Symbol URI Scheme](#5-symbol-uri-scheme)
+6. [Protocol Lifecycle](#6-protocol-lifecycle)
+7. [Transport & IPC](#7-transport--ipc)
+8. [Intelligence Extensions](#8-intelligence-extensions)
+9. [AI & Agent Integration](#9-ai--agent-integration)
+10. [Compatibility Layer](#10-compatibility-layer)
+11. [Security Considerations](#11-security-considerations)
+12. [Repository Structure](#12-repository-structure)
+13. [Roadmap](#13-roadmap)
+14. [Appendix A — Rationale for FlatBuffers over Protobuf](#appendix-a--rationale-for-flatbuffers-over-protobuf)
+15. [Appendix B — Prior Art & References](#appendix-b--prior-art--references)
+
+---
+
+## 1. Motivation & Problem Statement
+
+### 1.1 The LSP Gap
+
+The Language Server Protocol (v3.17, Microsoft) standardized how editors communicate
+with language-specific analysis servers. It solved the M×N IDE-language matrix by
+introducing a single JSON-RPC protocol. However, LSP was designed for **interactive,
+file-scoped intelligence**:
+
+- Every LSP server maintains in-memory state that is lost on restart.
+- Cross-file and cross-repository queries are either absent or require expensive
+  workspace-wide re-analysis.
+- Incremental text synchronization (`textDocument/didChange`) suffers from per-client
+  drift bugs because each client (nvim-lsp, eglot, helix) implements versioning
+  differently, leading to hard-to-reproduce state mismatches.
+- LSP has no concept of persistent, shareable index artifacts.
+
+For AI coding agents and large-scale code intelligence platforms, these limitations
+require additional layers — code graph indexing, RAG pipelines, custom symbol
+resolvers — none of which are standardized.
+
+### 1.2 The SCIP Bottleneck
+
+SCIP (Symbolic Code Intelligence Protocol, Sourcegraph 2022) solved LSP's persistence
+problem by introducing a Protobuf-based batch index format with human-readable symbol
+URIs. SCIP succeeded where its predecessor LSIF failed: it eliminated opaque global IDs
+that made incremental updates nearly impossible.
+
+However, SCIP still treats the repository as a **monolithic snapshot**:
+
+- Indexing requires running the full language toolchain (compiler, type checker) over
+  the entire repository.
+- A single changed function signature triggers a full re-index.
+- On repositories with >100k files or heavy dependency trees, this takes 30–90 minutes.
+- There is no mechanism to share index fragments between team members or CI runners.
+- External dependency indexing is repeated on every machine.
+
+### 1.3 What LIP Provides
+
+LIP is designed around three axioms:
+
+1. **90% precision in 30 seconds beats 100% precision in 90 minutes.** A progressive
+   confidence model lets the IDE show immediately useful results while background
+   verification completes.
+2. **External dependencies are a solved problem.** If `tokio@1.35` or `react@18.2.0`
+   was already indexed by anyone on the team (or in the global registry), it should
+   never be re-indexed locally.
+3. **Changes should be local.** Modifying a private function body should never trigger
+   re-analysis of unrelated modules.
+
+---
+
+## 2. Comparison Matrix
+
+| Property | LSP 3.17 | SCIP | **LIP v0.1** |
+|---|---|---|---|
+| Wire format | JSON-RPC 2.0 | Protobuf 3 | **FlatBuffers (zero-copy)** |
+| Framing | HTTP Content-Length | n/a (file) | **4-byte length prefix** |
+| Character offsets | UTF-16 code units | UTF-16 code units | **UTF-8 byte offsets** |
+| Scope | Open files only | Full repo snapshot | **Full repo + deps, streaming** |
+| Indexing model | Volatile (in-memory) | Batch artifact (.scip file) | **Persistent lazy query graph** |
+| Change handling | Full re-parse per file | Full re-index O(N) | **Blast radius O(Δ + depth)** |
+| Dependency indexing | ✗ none | ⚠ re-indexes every run | **✓ federated CAS slices** |
+| Incremental sync | ⚠ fire-and-forget, drift bugs | ✗ none | **✓ acknowledged deltas + Merkle** |
+| Confidence levels | ✗ single tier | ✓ single (but slow) | **✓ three tiers, progressive** |
+| AI / agent ready | ⚠ limited | ⚠ read-only batch | **✓ streaming graph queries** |
+| Persistent annotations | ✗ | ✗ | **✓ annotation overlay layer** |
+| Cross-repo | ✗ | ✓ | **✓** |
+| Team cache sharing | ✗ | ✗ | **✓ CAS registry** |
+| Cold start latency | < 1 s | 30–90 min | **< 30 s (shallow) + background** |
+| Runtime telemetry | ✗ | ✗ | **✓ opt-in overlay** |
+| Data / control flow graph | ✗ | ✗ | **✓ CPG edges (Tier 2+)** |
+| Taint tracking | ✗ | ✗ | **✓ CPG DataFlows traversal** |
+
+---
+
+## 3. Core Design Principles
+
+### 3.1 Lazy Query Graph (Salsa-inspired)
+
+LIP's daemon models all derived knowledge as a **directed acyclic query graph**. Every
+piece of intelligence — a symbol's type, a function's callers, a module's exported API
+surface — is a pure function from a set of input facts to an output value.
+
+The graph maintains a **global revision counter**. When a file changes:
+
+1. The counter increments. This is O(1).
+2. The file's content hash is marked dirty. This is O(1).
+
+Actual re-computation happens **lazily**, only when a query is requested. The daemon
+performs two graph traversals:
+
+- **Forward flood**: walk from the requested query down to its inputs. If no inputs
+  have changed, simply increment version numbers. No recomputation.
+- **Backward flood** (only if an input changed): propagate changes upward through the
+  graph. Stop at any node whose output is **unchanged despite a changed input**
+  (early cutoff). This is the key invariant: a stable API surface shields all callers
+  from internal changes.
+
+<Callout type="tip">
+**Core invariant**: Changing a private function body never invalidates the exported API
+surface queries of its module. This means most edits — fixing a bug, rewriting a loop,
+adding a comment — produce zero re-computation in the global graph.
+</Callout>
+
+The query graph is persisted to disk as a content-addressable store, so it survives
+daemon restarts without re-indexing.
+
+### 3.2 Blast Radius Indexing
+
+LIP maintains a **reverse dependency graph**: for every symbol, the set of symbols
+and documents that directly or transitively depend on it.
+
+When a file is saved, LIP:
+
+1. Computes the diff of exported symbols (API surface, not function bodies).
+2. If the API surface is unchanged: no graph invalidation occurs at all.
+3. If the API surface changed: walks the reverse dep graph to find exactly which
+   files import the changed symbols. Only those edges are re-verified.
+
+Complexity: `O(Δ + depth(reverse_deps))` instead of SCIP's `O(N_total)`.
+
+For a typical single-file edit in a 500k-file repo:
+- SCIP: re-index all 500k files (~60 min)
+- LIP: re-verify ~10–200 directly affected files (~200–800 ms)
+
+### 3.3 Three-Tier Confidence Model
+
+LIP symbols carry a `confidence_score` field (uint8, 1–100). This enables the IDE to
+display useful intelligence immediately while background verification runs.
+
+#### Tier 1 — Heuristic <Badge variant="teal">score 1–50</Badge>
+
+| Property | Value |
+|---|---|
+| Engine | Tree-sitter AST parser |
+| Latency | < 10 ms |
+| Scope | Current file + dirty buffers |
+| Accuracy | High for syntax, low for cross-file types |
+
+Available immediately on file open. Covers: go-to-definition within file, local
+symbol search, syntactic hover info. The IDE renders Tier 1 results with a subtle
+dotted underline: "LIP verifying…"
+
+**Measured (Rust reference implementation, Apple Silicon, ~70-line fixtures):**
+
+| Language | `index_file` | Margin vs budget |
+|---|---|---|
+| Rust | 205 µs | 49× under budget |
+| TypeScript | 234 µs | 42× under budget |
+| Python | 279 µs | 35× under budget |
+
+Symbols-only and occurrences-only passes each take ~100 µs independently.
+A 500-line production file extrapolates to ~1.5–2 ms.
+
+#### Tier 2 — Local Verified <Badge variant="purple">score 51–90</Badge>
+
+| Property | Value |
+|---|---|
+| Engine | Incremental compiler / language-specific analyzer |
+| Latency | 200–500 ms after file save |
+| Scope | Full local repository, incremental |
+| Accuracy | Compiler-accurate for local code |
+
+The background daemon runs the language-specific compiler on the blast radius. Tier 1
+results are silently upgraded to Tier 2 — the dotted underline disappears. Deep hover
+info (type signatures, documentation, related symbols) becomes available.
+
+#### Tier 3 — Global Anchor <Badge variant="amber">score 100</Badge>
+
+| Property | Value |
+|---|---|
+| Engine | Federated CAS registry pull |
+| Latency | Instant (downloaded once, cached permanently) |
+| Scope | External dependencies (npm, cargo, pub, pip, go modules) |
+| Accuracy | Compiler-accurate, pre-verified |
+
+External packages are never re-indexed locally. Their symbol graph is downloaded as
+an immutable, hash-verified **Dependency Slice** from the LIP global registry.
+Once cached, Tier 3 anchors never expire unless the package version changes.
+
+### 3.4 Federated Dependency Slicing
+
+The single largest contributor to SCIP's indexing time is external dependencies.
+On a typical TypeScript project, `node_modules` can contain millions of files.
+LIP eliminates this entirely.
+
+**How it works:**
+
+1. On startup, LIP reads `package.json` / `pubspec.yaml` / `Cargo.toml` / `go.mod`.
+2. It hashes the dependency tree (name + version, recursively).
+3. For each dependency hash not present in local cache, it queries the LIP registry.
+4. The registry returns a pre-built `DependencySlice` — a compact FlatBuffers blob
+   containing all exported symbols, their types, documentation, and relationships.
+5. The slice is verified against its content hash and mounted into the local query
+   graph as Tier 3 anchors.
+
+**Slice immutability**: A slice for `react@18.2.0` is content-addressed by its
+package hash. It is identical across all machines and teams. Once the registry has
+it, no one ever indexes that version again.
+
+**Self-hosting**: Teams can run a private LIP registry (e.g. for internal packages or
+air-gapped environments). The daemon accepts a `registry_urls` list in its config.
+
+### 3.5 Merkle Sync & State Integrity
+
+LSP's incremental sync is a known source of bugs — client and server state can
+silently diverge, leading to stale or incorrect intelligence.
+
+LIP treats the entire repository state as a **Merkle tree** (analogous to git's object
+model):
+
+- Every file is a leaf node, identified by `SHA-256(content)`.
+- Every directory is an internal node, identified by `SHA-256(children_hashes)`.
+- The root hash is the complete state fingerprint of the project.
+
+On startup, the IDE plugin sends its root hash to the daemon. The daemon compares
+against its persisted state. Divergence is resolved by binary-searching the Merkle
+tree to find the exact dirty subtree and repairing only that node.
+
+**No more "delete .cache and restart".** The state is always verifiable and
+self-healing.
+
+---
+
+## 4. Wire Format — FlatBuffers Schema
+
+LIP uses **FlatBuffers** as its binary wire format. See
+[Appendix A](#appendix-a--rationale-for-flatbuffers-over-protobuf) for the detailed
+rationale over Protobuf/SCIP's choice.
+
+### 4.1 Root schema (`lip.fbs`)
+
+```flatbuffers
+// lip.fbs — LIP FlatBuffers Schema
+// Version: 0.1.0
+// License: Apache 2.0
+
+namespace lip;
+
+// ─── Envelope ────────────────────────────────────────────────────────────────
+
+/// Top-level streaming envelope.
+/// A LIP stream is a sequence of EventStreams.
+/// Each EventStream carries one or more Deltas.
+table EventStream {
+  deltas:         [Delta];
+  schema_version: uint16 = 1;
+  emitter_id:     string;    // e.g. "lip-daemon/0.1.0"
+  timestamp_ms:   int64;
+}
+
+/// A single atomic change to the intelligence graph.
+table Delta {
+  action:      Action;
+  commit_hash: string;        // content hash of the triggering change
+  document:    Document;
+  symbol:      SymbolInfo;
+  slice:       DependencySlice;
+}
+
+enum Action : byte {
+  Upsert = 0,   // create or update
+  Delete = 1,   // remove from graph
+}
+
+// ─── Document ────────────────────────────────────────────────────────────────
+
+table Document {
+  uri:           string;       // file:///absolute/path
+  content_hash:  string;       // SHA-256 of raw source bytes
+  language:      string;       // "dart", "rust", "typescript", "python" …
+  occurrences:   [Occurrence];
+  symbols:       [SymbolInfo];
+  merkle_path:   string;       // path in repo Merkle tree
+  /// CPG edges originating from this file.
+  /// Populated by Tier 2 verification; absent (null) in Tier 1 documents.
+  edges:         [GraphEdge];
+}
+
+// ─── Occurrence ──────────────────────────────────────────────────────────────
+
+/// A single use of a symbol at a source location.
+/// Replaces SCIP's Occurrence, adding confidence_score.
+table Occurrence {
+  symbol_uri:       string;    // human-readable LIP URI
+  range:            Range;
+  confidence_score: uint8;     // 1–100, see three-tier model
+  role:             Role;
+  override_doc:     string;    // optional per-site doc override
+}
+
+/// All character offsets are **UTF-8 byte offsets** from the start of the line.
+/// This is a deliberate departure from LSP's UTF-16 code unit counting.
+///
+/// Rationale: UTF-16 offsets require O(n) decoding to produce a byte pointer.
+/// UTF-8 byte offsets map directly to a pointer offset into the source buffer,
+/// making range slicing O(1). Every language runtime that LIP targets stores
+/// source files as UTF-8 bytes on disk; UTF-16 is not the natural unit for any
+/// of them.
+table Range {
+  start_line: int32;   // 0-based
+  start_char: int32;   // UTF-8 byte offset from start of line
+  end_line:   int32;   // 0-based (inclusive)
+  end_char:   int32;   // UTF-8 byte offset from start of line (exclusive)
+}
+
+enum Role : byte {
+  Definition      = 0,
+  Reference       = 1,
+  Implementation  = 2,
+  TypeBinding     = 3,
+  ReadAccess      = 4,
+  WriteAccess     = 5,
+}
+
+// ─── Symbol ──────────────────────────────────────────────────────────────────
+
+table SymbolInfo {
+  uri:              string;        // lip://scope/pkg@ver/path#descriptor
+  display_name:     string;
+  kind:             SymbolKind;
+  documentation:    string;        // markdown
+  signature:        string;        // type signature, language-specific
+  confidence_score: uint8;
+  relationships:    [Relationship];
+  // ── AI extension slots (zero-cost when unused) ──────────────────────────
+  runtime_p99_ms:   float32 = -1;  // -1 = not collected
+  call_rate_per_s:  float32 = -1;
+  taint_labels:     [string];      // ["PII", "UNSAFE_IO", "EXTERNAL_INPUT"]
+  blast_radius:     uint32 = 0;    // number of reverse deps
+}
+
+enum SymbolKind : byte {
+  Unknown       = 0,
+  Namespace     = 1,
+  Class         = 2,
+  Interface     = 3,
+  Method        = 4,
+  Field         = 5,
+  Variable      = 6,
+  Function      = 7,
+  TypeParameter = 8,
+  Parameter     = 9,
+  Macro         = 10,
+  Enum          = 11,
+  EnumMember    = 12,
+  Constructor   = 13,
+  TypeAlias     = 14,
+}
+
+table Relationship {
+  target_uri:          string;
+  is_implementation:   bool;
+  is_reference:        bool;
+  is_type_definition:  bool;
+  is_override:         bool;
+}
+
+// ─── Code Property Graph edges ───────────────────────────────────────────────
+
+/// Typed directed edge in the Code Property Graph.
+///
+/// LIP's graph extends beyond call edges to include data-flow and control-flow
+/// edges. This enables inter-procedural taint tracking (§8.2) without a
+/// separate analysis pass — the same graph that powers blast-radius indexing
+/// also powers security analysis.
+///
+/// Edges are optional: a Tier 1 index will contain only `Calls` edges derived
+/// from syntactic call sites. Tier 2 verification adds `DataFlows` and
+/// `ControlFlows` edges derived from the compiler's IR.
+table GraphEdge {
+  from_uri:  string;
+  to_uri:    string;
+  kind:      EdgeKind;
+  /// Source location of the edge origin (e.g. the call site, the assignment).
+  at_range:  Range;
+}
+
+enum EdgeKind : byte {
+  Calls           = 0,   // function/method invocation
+  DataFlows       = 1,   // value flows from `from` to `to` (e.g. assignment, return)
+  ControlFlows    = 2,   // control may pass from `from` to `to` (branch, loop)
+  Instantiates    = 3,   // `from` constructs an instance of `to`
+  Inherits        = 4,   // `from` extends / implements `to`
+  Imports         = 5,   // `from` file imports symbol `to`
+}
+
+// ─── Annotation Overlay ───────────────────────────────────────────────────────
+
+/// A persistent, human- or agent-authored note attached to a symbol URI.
+///
+/// Annotation entries solve the "Year-Zero Problem" for AI agents: every
+/// session starts with no memory of past reasoning. By persisting annotations
+/// on the LIP daemon (and optionally syncing them to the team cache), both
+/// human developers and AI agents can accumulate project knowledge that
+/// survives context resets, editor restarts, and CI runs.
+///
+/// Annotations are stored in a per-daemon content-addressable KV store,
+/// queryable by symbol URI, author, or key prefix.
+table AnnotationEntry {
+  symbol_uri:    string;   // the symbol this note is attached to
+  key:           string;   // namespaced key, e.g. "lip:fragile", "agent:note"
+  value:         string;   // markdown string or JSON blob
+  author_id:     string;   // "human:<email>" | "agent:<model-id>"
+  confidence:    uint8;    // reuses the 1–100 confidence scale
+  timestamp_ms:  int64;
+  /// If set, this annotation expires and is garbage-collected after this time.
+  expires_ms:    int64 = 0;
+}
+
+// ─── Dependency Slice ────────────────────────────────────────────────────────
+
+/// A pre-built, immutable index fragment for an external package.
+/// Content-addressed by package_hash.
+table DependencySlice {
+  manager:       string;      // "npm" | "cargo" | "pub" | "pip" | "go"
+  package_name:  string;
+  version:       string;
+  package_hash:  string;      // SHA-256 of (manager + name + version + resolved_deps)
+  content_hash:  string;      // SHA-256 of the slice blob (integrity check)
+  symbols:       [SymbolInfo];
+  slice_url:     string;      // canonical registry URL this slice was fetched from
+  built_at_ms:   int64;
+}
+
+root_type EventStream;
+```
+
+### 4.2 Schema evolution
+
+LIP follows the same schema evolution rules as FlatBuffers:
+
+- New fields may be appended to any table with a default value.
+- Fields may be deprecated but never removed or reordered.
+- The `schema_version` field in `EventStream` allows clients to reject incompatible
+  versions gracefully.
+- Backward compatibility is guaranteed within a major version (0.x → 0.y is best-effort,
+  1.x → 1.y is guaranteed).
+
+---
+
+## 5. Symbol URI Scheme
+
+LIP uses human-readable symbol URIs throughout (a design choice inherited from SCIP,
+which in turn inherited it from SemanticDB). There are no opaque numeric IDs.
+
+### 5.1 Grammar
+
+```
+lip-uri      ::= "lip://" scope "/" package "@" version "/" path "#" descriptor
+scope        ::= "npm" | "cargo" | "pub" | "pip" | "go" | "local" | "team"
+package      ::= UTF-8, no spaces, URL-encoded if necessary
+version      ::= semver or content hash
+path         ::= relative path within package (forward slashes)
+descriptor   ::= type-descriptor | method-descriptor | field-descriptor
+
+type-descriptor   ::= identifier
+method-descriptor ::= type "." method ["(" params ")"]
+field-descriptor  ::= type "." field
+```
+
+### 5.2 Examples
+
+```
+# External dependencies
+lip://npm/react@18.2.0/index#useState
+lip://npm/react@18.2.0/index#Component.setState
+lip://cargo/tokio@1.35.1/runtime#Runtime
+lip://cargo/tokio@1.35.1/runtime#Runtime.spawn(Future)
+lip://pub/flutter@3.19.0/widgets#StatefulWidget
+lip://pub/flutter@3.19.0/widgets#StatefulWidget.createState()
+lip://pub/http@1.2.0/http#Client.get(Uri)
+lip://pip/numpy@1.26.0/core#ndarray
+lip://go/github.com.gin-gonic.gin@v1.9.0/gin#Engine.GET
+
+# Local repository symbols
+lip://local/myproject/lib/src/auth.dart#AuthService
+lip://local/myproject/lib/src/auth.dart#AuthService.verifyToken(String)
+
+# Team / private registry
+lip://team/internal-api@2.1.0/models#UserRecord
+```
+
+The `pub` scope covers all Dart/Flutter pub.dev packages. A Dart project's full
+`pubspec.yaml` dependency tree is resolved to Tier 3 slices on first run.
+
+### 5.3 Descriptor escaping
+
+Identifiers containing non-alphanumeric characters are backtick-escaped, identical
+to SCIP's escaping rules:
+
+```
+lip://npm/lodash@4.17.21/lodash#`_.chunk`
+```
+
+---
+
+## 6. Protocol Lifecycle
+
+### 6.1 Phase 0 — Daemon startup
+
+The LIP daemon starts as a background process, typically managed by the editor plugin
+or a system service. It loads its persisted query graph from disk (if present).
+
+### 6.2 Phase 1 — Handshake & manifest
+
+```
+Client → Daemon:  ManifestRequest {
+  repo_root:      string,      // absolute path
+  merkle_root:    string,      // current SHA-256 root of tracked files
+  dep_tree_hash:  string,      // hash of resolved dependency manifest
+  lip_version:    string,      // client protocol version
+}
+
+Daemon → Client:  ManifestResponse {
+  cached_merkle_root: string,  // daemon's persisted state
+  missing_slices:     [string], // dep hashes not yet in cache
+  indexing_state:     IndexingState,
+}
+
+enum IndexingState { Cold, WarmPartial, WarmFull }
+```
+
+On a warm start (daemon already has a recent graph), `missing_slices` will typically
+be empty and `indexing_state` is `WarmFull`. Intelligence is available immediately.
+
+On a cold start, the daemon initiates Phase 2.
+
+### 6.3 Phase 2 — Shallow parse (< 30 s on most repos)
+
+The daemon runs Tree-sitter over all tracked files. This produces Tier 1 symbols for
+the entire repository without requiring compilation. Symbol resolution within files is
+available immediately.
+
+Dependency slices for `missing_slices` are fetched from the registry in parallel.
+Once downloaded and verified, they are mounted as Tier 3 anchors.
+
+### 6.4 Phase 3 — Background verification (30 s – 5 min)
+
+The daemon runs the language-specific incremental compiler in an isolated CPU core.
+It processes the blast radius of uncommitted changes first (highest priority), then
+processes remaining files in reverse-dependency order (most-imported modules first).
+
+As each file's symbols are verified, the daemon streams `Delta.Upsert` events to the
+client. The IDE silently upgrades Tier 1 results to Tier 2 — no user action required.
+
+### 6.5 Phase 4 — Steady state
+
+On every file save:
+
+1. Client sends `Delta.Upsert { document: { uri, content_hash, ... } }`.
+2. Daemon sends a `DeltaAck` immediately — before analysis completes.
+3. Daemon diffs the new content hash against the stored hash.
+4. If unchanged: no further messages.
+5. If changed: compute API surface diff.
+   - API surface unchanged: re-verify function bodies only (low priority).
+   - API surface changed: walk reverse dep graph, re-verify affected files.
+6. Stream resulting `Delta.Upsert` events to client.
+
+Typical latency for a single-file save in steady state: **200–800 ms**.
+
+#### Delta acknowledgment
+
+Every `Delta` sent by the client **must** receive a `DeltaAck` response:
+
+```
+Client → Daemon:  Delta { seq: uint64, ... }
+Daemon → Client:  DeltaAck { seq: uint64, accepted: bool, error?: string }
+```
+
+The `seq` field is a monotonically increasing client-side counter. If `accepted`
+is `false`, the client must re-send the delta or re-synchronize via a new
+`ManifestRequest`.
+
+**Rationale**: LSP `textDocument/didChange` notifications are fire-and-forget.
+Client and server state can silently diverge — a well-known source of stale or
+incorrect intelligence that is nearly impossible to reproduce. LIP's explicit
+acknowledgment prevents this: if a `DeltaAck` is not received within a timeout,
+the client knows the delta was dropped and can recover deterministically.
+
+This is inspired by the Dart Analysis Protocol, which also acknowledges every
+notification and thereby eliminates a whole class of drift bugs.
+
+### 6.6 Query API
+
+Beyond the streaming push model, LIP exposes a synchronous query API for ad-hoc
+intelligence requests:
+
+```
+lip.query.definition(uri: string, position: Range) → SymbolInfo
+lip.query.references(symbol_uri: string, limit?: int) → [Occurrence]
+lip.query.hover(uri: string, position: Range) → HoverResult
+lip.query.blast_radius(symbol_uri: string) → BlastRadiusResult
+lip.query.subgraph(symbol_uri: string, depth: int) → SymbolGraph
+lip.query.taint(symbol_uri: string) → [TaintPath]
+lip.query.workspace_symbols(query: string, limit?: int) → [SymbolInfo]
+```
+
+These are served from the local query graph and return in < 5 ms in steady state.
+
+**Measured (Rust reference implementation, Apple Silicon, warm cache):**
+
+| Query | Measured | Margin vs budget |
+|---|---|---|
+| `file_symbols` cache hit | 24 ns | 208× under budget |
+| `file_symbols` cache miss | 26 µs | 192× under budget |
+| `blast_radius` (50-file workspace) | 5.6 µs | 893× under budget |
+| `workspace_symbols` (100 files) | 14.6 µs | 342× under budget |
+
+`upsert_file` (the write path triggered on every file save) runs in 92–104 ns,
+confirming the O(1) design. Wire round-trip for a typical 64-byte response adds
+~6 µs of socket overhead.
+
+---
+
+## 7. Transport & IPC
+
+### 7.1 IDE ↔ Daemon (local)
+
+Communication between the IDE plugin and the local LIP daemon uses a
+**Unix domain socket** (Linux/macOS) or a **named pipe** (Windows).
+
+#### Wire framing
+
+Messages are framed with a **4-byte big-endian length prefix** followed by the
+payload bytes:
+
+```
+┌──────────────────┬────────────────────────────────┐
+│  length : u32 BE │  FlatBuffers or JSON payload   │
+└──────────────────┴────────────────────────────────┘
+```
+
+This is deliberately simpler than LSP's HTTP-inspired `Content-Length: N\r\n\r\n`
+framing. There is no header parsing, no line scanning, no CRLF handling. A reader
+needs exactly two `read()` calls per message.
+
+For high-frequency symbol queries, the payload is a FlatBuffers blob written into a
+**shared memory region** (mmap). The socket carries only the 4-byte length prefix
+plus a 16-byte `MmapHeader` (offset + length). This achieves zero-copy,
+zero-deserialization-overhead reads — the IDE plugin reads symbol data directly
+from the mmap'd buffer.
+
+```
+┌──────────────┐   socket (header only)   ┌─────────────┐
+│  IDE plugin  │ ◄──────────────────────► │ LIP daemon  │
+│  (client)    │   mmap (FlatBuffers)     │  (server)   │
+└──────────────┘ ◄──────────────────────► └─────────────┘
+```
+
+### 7.2 Daemon ↔ Registry (remote)
+
+Communication between the daemon and the LIP dependency slice registry uses
+**gRPC streaming over TLS**. Dependency slices are also valid as plain HTTP/HTTPS
+blobs, allowing them to be served from any CDN or object storage (S3, GCS, etc.).
+
+### 7.3 Daemon ↔ CI (incremental push)
+
+CI runners emit LIP `EventStream` deltas per commit — not full `.scip` files.
+The daemon receives these and applies them incrementally to the shared team cache.
+
+```
+┌──────────────┐   gRPC stream   ┌─────────────────┐   gRPC stream   ┌─────────────┐
+│  CI runner   │ ──────────────► │  Team LIP cache │ ◄────────────── │ Dev daemon  │
+└──────────────┘                 │  (Redis / S3)   │                 └─────────────┘
+                                 └─────────────────┘
+```
+
+---
+
+## 8. Intelligence Extensions
+
+Because LIP maintains a live dependency graph, it supports query types that LSP and
+SCIP cannot provide.
+
+### 8.1 Blast radius analysis
+
+```
+lip.query.blast_radius(symbol_uri) → {
+  direct_dependents:   int,
+  transitive_dependents: int,
+  affected_files:      [string],
+  affected_services:   [string],   // for monorepos with service boundaries
+}
+```
+
+Available as a pre-commit hook: "Changing this interface will affect 47 call sites
+across 12 files and 3 microservices."
+
+### 8.2 Taint tracking
+
+Symbols can be annotated with `taint_labels` (e.g. `["PII", "UNSAFE_IO"]`). LIP
+propagates these labels through the data flow graph. A query returns all paths
+through which a tainted value can reach an unsafe sink.
+
+```
+lip.query.taint("lip://local/myapp/src/user.dart#User.email") → [
+  {
+    source: "User.email",
+    path:   ["UserService.serialize", "LoggingMiddleware.write"],
+    sink:   "Logger.info",
+    risk:   "PII_TO_PLAINTEXT_LOG",
+  }
+]
+```
+
+### 8.3 Runtime telemetry overlay (opt-in)
+
+When an OpenTelemetry or Datadog integration is configured, the daemon can annotate
+symbols with live production data:
+
+```
+lip.query.hover("lip://local/myapp/src/api.dart#PaymentController.charge") → {
+  ...standard hover...,
+  runtime: {
+    calls_per_second: 1243.5,
+    p50_ms:           12.1,
+    p99_ms:           187.4,
+    error_rate_pct:   0.03,
+  }
+}
+```
+
+This data is stored in the `runtime_p99_ms` and `call_rate_per_s` fields of
+`SymbolInfo` and is always optional. It never blocks symbol resolution.
+
+### 8.4 Dead code detection
+
+A symbol is dead if it has:
+- Zero references in the query graph (not exported, not called), AND
+- Zero runtime calls (if telemetry is enabled)
+
+```
+lip.query.dead_symbols(uri?: string) → [SymbolInfo]
+```
+
+### 8.5 Code Property Graph (CPG) queries
+
+LIP's graph is a superset of a Code Property Graph: it unifies the AST (symbol
+definitions), the call graph (§8.1), data-flow edges, and control-flow edges in a
+single queryable structure.
+
+Tier 1 documents carry syntactic call edges. Tier 2 verification adds data-flow
+and control-flow edges derived from the compiler's IR. Both are represented as
+`GraphEdge` entries in the `Document` table (§4.1).
+
+```
+lip.query.cpg(
+  symbol_uri: string,
+  edge_kinds: [EdgeKind],   // Calls | DataFlows | ControlFlows | …
+  depth: int,               // hop limit
+) → {
+  nodes: [SymbolInfo],
+  edges: [GraphEdge],
+}
+```
+
+**Why this matters for security analysis**: Vulnerabilities arise from interactions
+across function, file, and service boundaries — not within a single statement. A
+CPG lets LIP answer "does user-controlled input ever reach this SQL sink?" by
+traversing `DataFlows` edges, without requiring a separate SAST tool or a second
+index pass.
+
+Taint tracking (§8.2) is implemented as a forward reachability query over
+`DataFlows` edges filtered by `taint_labels`. The same query engine drives both
+blast-radius analysis (§8.1) and taint analysis — they differ only in which edge
+kinds are traversed.
+
+---
+
+## 9. AI & Agent Integration
+
+LIP is designed to be a first-class context source for AI coding agents.
+
+### 9.1 Semantic subgraph queries
+
+An agent can request a compact semantic subgraph of any symbol:
+
+```
+lip.query.subgraph(
+  symbol_uri: "lip://local/myapp/src/checkout.dart#CheckoutService",
+  depth: 2,
+  include_types: true,
+  include_callers: true,
+  include_callees: true,
+) → SymbolGraph {
+  nodes: [SymbolInfo],
+  edges: [Edge { from, to, kind }],
+  token_estimate: 1840,    // estimated LLM token count of this graph
+}
+```
+
+The `token_estimate` field allows agents to stay within context windows without
+materializing the full graph.
+
+### 9.2 Streaming context for RAG
+
+LIP exposes a streaming endpoint for RAG pipelines:
+
+```
+lip.stream.context(
+  file_uri: string,
+  cursor_position: Range,
+  max_tokens: int,
+) → stream<SymbolInfo>
+```
+
+Returns the most relevant symbols for the cursor position, ordered by relevance
+(direct definitions first, then callers, then callees, then related types), streaming
+until `max_tokens` is reached.
+
+### 9.3 Change impact preview
+
+Before applying an agentic code change, the agent can ask:
+
+```
+lip.query.impact_preview(proposed_changes: [FileDiff]) → {
+  affected_symbols:    [SymbolInfo],
+  broken_call_sites:   [Occurrence],
+  type_errors_predicted: int,
+  blast_radius:        int,
+}
+```
+
+This allows agents to validate changes without applying them.
+
+### 9.4 Annotation Overlay Layer
+
+AI coding agents restart from zero on every session. Developers accumulate project
+knowledge over years: that a caching layer is fragile, that a function must not be
+modified without coordinating with a specific team, that a particular API is being
+deprecated next quarter. None of this knowledge is currently standardised or
+machine-readable.
+
+LIP provides an **Annotation Overlay Layer** — a persistent, content-addressed
+key-value store that attaches structured notes to symbol URIs. Both human developers
+and AI agents can read and write annotations. They survive context resets, editor
+restarts, and CI runs.
+
+```
+lip.annotation.set(
+  symbol_uri: string,
+  key:        string,          // namespaced: "lip:fragile", "agent:note", "team:owner"
+  value:      string,          // markdown or JSON blob
+  confidence: uint8,           // 1–100
+  expires_ms: int64?,          // optional TTL; 0 = permanent
+) → AnnotationEntry
+
+lip.annotation.get(
+  symbol_uri: string,
+  key?:       string,          // omit to get all keys for this symbol
+) → [AnnotationEntry]
+
+lip.annotation.list(
+  key_prefix: string,          // e.g. "agent:" to find all agent-authored notes
+  limit?:     int,
+) → [AnnotationEntry]
+```
+
+**Canonical key prefixes:**
+
+| Prefix | Meaning |
+|--------|---------|
+| `lip:fragile` | This symbol is known to be fragile; treat changes with extra care |
+| `lip:owner` | Team or person responsible for this symbol |
+| `lip:deprecated` | Deprecated; migration target in `value` |
+| `lip:taint` | Manually asserted taint label (supplements `taint_labels` in schema) |
+| `agent:note` | Agent-authored reasoning note from a prior session |
+| `agent:verified` | Agent has verified this symbol behaves as documented |
+| `team:*` | Team-specific namespace; uninterpreted by the LIP daemon |
+
+**Sync behaviour**: Annotations are stored locally by the daemon and optionally
+pushed to the team LIP cache (§7.3) so they are visible to all developers and CI
+runs. Agent-authored annotations with short TTLs (e.g. 24h) are pruned
+automatically; human-authored annotations are permanent unless explicitly deleted.
+
+**Why not just comments in code?** Code comments are invisible to tools that don't
+parse the specific language, don't survive refactors that move code, and can't carry
+structured confidence scores or author attribution. Annotations are indexed by
+symbol URI, so they survive renames (the URI changes, but the rename event updates
+the annotation key automatically).
+
+---
+
+## 10. Compatibility Layer
+
+### 10.1 LIP-to-LSP bridge
+
+A LIP server can expose a standard LSP interface, allowing editors without native
+LIP support to benefit from LIP intelligence transparently.
+
+The bridge translates:
+
+| LSP Request | LIP Query |
+|---|---|
+| `textDocument/definition` | `lip.query.definition` (Tier 2+) |
+| `textDocument/references` | `lip.query.references` |
+| `textDocument/hover` | `lip.query.hover` |
+| `workspace/symbol` | `lip.query.workspace_symbols` |
+| `textDocument/publishDiagnostics` | streamed from blast radius analysis |
+
+### 10.2 SCIP importer
+
+Teams with existing `.scip` files can bootstrap LIP's cache from them on first run:
+
+```bash
+lip import --from-scip ./index.scip
+```
+
+This converts SCIP's Protobuf representation to LIP's FlatBuffers format,
+reconstructs the query graph structure, and assigns all imported symbols
+`confidence_score: 90` (Tier 2, pending background re-verification).
+
+### 10.3 SCIP exporter
+
+LIP can emit standard `.scip` files for compatibility with tools that consume SCIP:
+
+```bash
+lip export --to-scip ./index.scip
+```
+
+---
+
+## 11. Security Considerations
+
+### 11.1 Dependency slice integrity
+
+Every `DependencySlice` is identified by a `content_hash` (SHA-256 of the blob).
+The daemon verifies this hash before mounting the slice. A corrupted or tampered
+slice will be rejected and re-fetched.
+
+The registry additionally signs slice manifests with an Ed25519 key. Clients verify
+this signature before trusting a slice. Private registries use their own key pair.
+
+### 11.2 Symbol URI validation
+
+Symbol URIs are validated against the grammar in §5.1. URIs with path traversal
+sequences (`..`), null bytes, or non-UTF-8 content are rejected.
+
+### 11.3 Shared memory safety
+
+The mmap region used for IPC is created with `MAP_PRIVATE` on the reader side.
+The daemon never writes into the reader's copy. The region is sized by the daemon
+and its bounds are communicated via the socket header — the client validates that
+the declared offset and length are within the region bounds before reading.
+
+### 11.4 Taint label trust
+
+Taint labels (`taint_labels` on `SymbolInfo`) are advisory. They are propagated by
+the daemon but never enforced. Integration with security tooling (SAST) is out of
+scope for v0.1 but is a planned extension.
+
+---
+
+## 12. Repository Structure
+
+```
+lip-protocol/
+├── LICENSE                        # Apache 2.0
+├── README.md
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+│
+├── spec/
+│   ├── SPEC.md                    # This document
+│   ├── lip.fbs                    # Canonical FlatBuffers schema
+│   ├── symbol-uri.md              # URI scheme reference & grammar
+│   ├── registry-api.md            # Registry HTTP/gRPC API spec
+│   └── compatibility.md           # LSP bridge & SCIP importer spec
+│
+├── schema/
+│   └── lip.fbs                    # Single source of truth for the schema
+│
+├── bindings/
+│   ├── rust/                      # Reference implementation (Rust)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── schema/            # Generated from lip.fbs
+│   │       ├── daemon/            # LIP daemon core
+│   │       ├── query_graph/       # Salsa-based query graph
+│   │       ├── indexer/           # Tree-sitter (Tier 1) + compiler (Tier 2)
+│   │       ├── registry/          # CAS registry client
+│   │       └── bridge/            # LSP bridge
+│   ├── go/
+│   ├── typescript/
+│   └── dart/                      # First-class: used by CKB/Cartographer
+│
+├── registry/
+│   ├── slice-format.md            # DependencySlice binary format
+│   └── server/                    # Reference registry implementation
+│
+└── tools/
+    ├── lip-cli/                   # CLI: import, export, query, inspect
+    └── lip-vscode/                # VS Code extension (LIP-native + LSP bridge)
+```
+
+---
+
+## 13. Roadmap
+
+### v1.1 — Shipped ✓
+
+- [x] FlatBuffers schema (`schema/lip.fbs`) — data model + IPC tables
+- [x] Rust reference implementation (`bindings/rust/`)
+- [x] Daemon: Tree-sitter Tier 1 indexer (Rust, TypeScript, Python, Dart)
+- [x] Daemon: Salsa-inspired query graph (incremental, WAL-persisted)
+- [x] Blast radius engine — CPG call-edge BFS, `ImpactItem` with depth-weighted confidence, `RiskLevel`
+- [x] Delta acknowledgment (`DeltaAck`) — eliminates fire-and-forget drift
+- [x] Daemon: Tier 2 incremental compiler (rust-analyzer, typescript-language-server, pyright/pylsp, dart language-server)
+- [x] LIP-to-LSP bridge (`lip lsp`) — definition, references, hover, workspace symbols
+- [x] MCP server (`lip mcp`) — 11 tools for AI agent integration
+- [x] CLI: `lip index`, `lip query`, `lip import --from-scip`, `lip export --to-scip`
+- [x] CLI: `lip push`, `lip fetch`, `lip slice` (Cargo, npm, pub)
+- [x] Registry server (`lip-registry`) with Docker image
+- [x] Annotation Overlay Layer (`AnnotationEntry`, `lip:*` / `agent:*` / `team:*` key prefixes)
+- [x] `lip:nyx-agent-lock` convention — worktree collision prevention for multi-agent workflows
+- [x] `BatchQuery` + `Batch` — N queries in one round-trip
+- [x] `SimilarSymbols` — trigram fuzzy search across symbol names and docs
+- [x] Dead code detection (`QueryDeadSymbols`)
+- [x] Push notifications (`SymbolUpgraded`) — broadcast when Tier 2 upgrades a symbol
+- [x] Persisted query graph (survives daemon restarts via WAL journal)
+
+### v1.2 — In progress
+
+- [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
+- [ ] Shared-memory mmap path for zero-copy symbol reads (spec §7.1)
+- [ ] Merkle sync protocol — incremental repo-state reconciliation on daemon connect
+- [ ] `lip import --from-scip` upgrades to Tier 3 (score 100); Tier 2 upgrades to score 90 (currently uses 70)
+- [ ] `lip slice --pip` — Python dependency slices
+
+### v1.3 — Intelligence extensions
+
+- [ ] CPG query API (`lip.query.cpg`) — traversal over `GraphEdge` tables
+- [ ] Taint tracking via CPG `DataFlows` traversal (requires Tier 2 data-flow edges)
+- [ ] Runtime telemetry overlay (OpenTelemetry integration)
+- [ ] Annotation sync to team registry cache
+
+### v2.0 — Multi-language ecosystem
+
+- [ ] TypeScript and Go bindings (generated from `lip.fbs`)
+- [ ] Frozen schema (backward compat guaranteed within major version)
+- [ ] VS Code extension (LIP-native, replaces LSP bridge for LIP-aware editors)
+- [ ] Language support: Go, Java, Kotlin, C#
+
+---
+
+## Appendix A — Rationale for FlatBuffers over Protobuf
+
+SCIP uses Protobuf 3. This was a significant improvement over LSIF's JSON. However,
+Protobuf has a fundamental property that limits performance in LIP's use case:
+**it requires full deserialization to access any field**.
+
+When the IDE makes a high-frequency symbol query (e.g., on every cursor move for
+hover info), the Protobuf workflow is:
+
+1. Receive byte buffer from daemon.
+2. Allocate new memory for deserialized message.
+3. Copy all fields from buffer into allocated structs.
+4. Access the desired field.
+5. GC the allocated memory.
+
+FlatBuffers eliminates steps 2–3 and 5. The buffer is read directly via table offsets.
+No allocation, no copy, no GC pressure. Fields not accessed are never read.
+
+For LIP's IPC channel (shared mmap), the daemon writes a FlatBuffers blob into
+the shared region. The IDE plugin reads the specific field it needs by seeking to the
+correct offset. The total per-query overhead is a pointer arithmetic operation and
+a bounds check — measurable in nanoseconds.
+
+**Tradeoff**: FlatBuffers serialization (write path) is slower than Protobuf, and
+the binary format is slightly larger. This is acceptable for LIP because:
+- The write path (daemon building the graph) happens in background.
+- The read path (IDE querying symbols) is the latency-critical hot path.
+- Slice size is bounded; LIP does not emit multi-GB index files.
+
+FlatBuffers also supports `mmap`-based access natively and has good Rust support
+via the `flatbuffers` crate, aligning with LIP's reference implementation language.
+
+---
+
+## Appendix B — Prior Art & References
+
+### Protocols & formats
+
+- **LSP 3.17** — Language Server Protocol Specification.
+  https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/
+- **SCIP** — Symbolic Code Intelligence Protocol.
+  https://github.com/scip-code/scip · https://sourcegraph.com/blog/announcing-scip
+- **LSIF** — Language Server Index Format (predecessor to SCIP).
+  https://microsoft.github.io/language-server-protocol/specifications/lsif/
+- **SemanticDB** — Code intelligence format from the Scala ecosystem, heavily
+  influenced SCIP's human-readable symbol design.
+  https://scalameta.org/docs/semanticdb/specification.html
+
+### Incremental computation
+
+- **Salsa** — Incremental query engine used by rust-analyzer and rustc.
+  https://github.com/salsa-rs/salsa
+- **rust-analyzer architecture** — The best real-world example of Salsa-based
+  incremental code intelligence.
+  https://rust-analyzer.github.io/book/contributing/architecture.html
+- **Durable Incrementality** — rust-analyzer blog post on Salsa's durability system.
+  https://rust-analyzer.github.io/blog/2023/07/24/durable-incrementality.html
+
+### Serialization
+
+- **FlatBuffers** — Zero-copy serialization library by Google.
+  https://flatbuffers.dev
+- **Cap'n Proto vs FlatBuffers vs Protobuf** — Comparison by the Cap'n Proto author.
+  https://capnproto.org/news/2014-06-17-capnproto-flatbuffers-sbe.html
+
+### Related work
+
+- **Glean** (Meta) — Code indexing system for large monorepos.
+  https://glean.software
+- **Kythe** (Google) — Cross-language code indexing schema.
+  https://kythe.io
+- **rust-analyzer** — Production LSP server with Salsa-based incremental analysis.
+  https://rust-analyzer.github.io
+- **Dart Analysis Protocol** — Predecessor to LSP; uses newline-delimited JSON and
+  acknowledges every notification. Technically superior to LSP on both counts.
+  https://htmlpreview.github.io/?https://github.com/dart-lang/sdk/blob/main/pkg/analysis_server/doc/api.html
+- **Joern / Code Property Graph** — Inter-procedural static analysis via unified
+  AST + CFG + DFG. Original CPG paper: Fabian Yamaguchi et al., 2014.
+  https://joern.io · https://github.com/joernio/joern
+- **matklad (Alex Kladov)** — rust-analyzer / IntelliJ author. Canonical writing on
+  incremental compilation, Salsa, and LSP design decisions.
+  https://matklad.github.io
+- **michaelpj (Michael Peyton Jones)** — Haskell Language Server author. Writings on
+  practical Salsa usage and LSP server design.
+  https://www.michaelpj.com
+
+---
+
+*LIP Specification v0.1 · April 2026 · Apache 2.0*
+*Drafted by Lisa Küpper, TasteHub GmbH, Vienna*

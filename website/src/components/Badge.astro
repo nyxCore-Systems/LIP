@@ -1,0 +1,32 @@
+---
+interface Props {
+  variant?: 'purple' | 'teal' | 'amber' | 'green' | 'red';
+}
+const { variant = 'purple' } = Astro.props;
+const colors: Record<string, [string, string]> = {
+  purple: ['#8b5cf6', 'rgba(139,92,246,0.12)'],
+  teal:   ['#06b6d4', 'rgba(6,182,212,0.12)'],
+  amber:  ['#f59e0b', 'rgba(245,158,11,0.12)'],
+  green:  ['#10b981', 'rgba(16,185,129,0.12)'],
+  red:    ['#ef4444', 'rgba(239,68,68,0.12)'],
+};
+const [fg, bg] = colors[variant] ?? colors.purple;
+---
+<span class="badge" style={`color:${fg};background:${bg};border-color:${fg}33`}>
+  <slot />
+</span>
+
+<style>
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid;
+    vertical-align: middle;
+    font-family: var(--mono, monospace);
+    letter-spacing: 0.02em;
+  }
+</style>

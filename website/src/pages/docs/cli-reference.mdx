@@ -1,3 +1,9 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: CLI Reference
+description: Every lip command and flag — daemon, query, index, lsp, mcp, slice, fetch, push, annotate, import, export.
+---
+
 # CLI Reference
 
 All commands accept `--help` for full flag documentation.
@@ -161,7 +167,7 @@ Results are ranked by Jaccard trigram score (score ≥ 0.2 shown).
 
 ### lip query stale-files
 
-Merkle sync probe — given a JSON file or stdin array of `[uri, sha256_hex]` pairs, returns the URIs that the daemon hasn't seen or whose content hash differs. One round-trip on reconnect tells the client exactly which files to re-send.
+Merkle sync probe — given a JSON array of `[uri, sha256_hex]` pairs, returns the URIs that the daemon hasn't seen or whose content hash differs.
 
 ```bash
 lip query stale-files [FILE]
@@ -177,17 +183,14 @@ lip query stale-files ./hashes.json
 
 ### lip query embedding-batch
 
-Compute and cache dense embedding vectors for one or more file URIs. Requires `LIP_EMBEDDING_URL` to be set to an OpenAI-compatible endpoint.
+Compute and cache dense embedding vectors for one or more file URIs. Requires `LIP_EMBEDDING_URL` to be set.
 
 ```bash
 lip query embedding-batch <uri> [<uri>...] [--model <model>]
 ```
 
 ```bash
-# Embed two files with the configured default model
 lip query embedding-batch file:///src/auth.rs file:///src/session.rs
-
-# Override the model for this request
 lip query embedding-batch file:///src/auth.rs --model text-embedding-3-large
 ```
 
@@ -195,7 +198,7 @@ Already-cached embeddings are returned without a network call. A new file upsert
 
 ### lip query nearest
 
-Find the `top_k` files most semantically similar to a given file, ranked by cosine similarity. The file must have a cached embedding (run `embedding-batch` first).
+Find the `top_k` files most semantically similar to a given file, ranked by cosine similarity. The file must have a cached embedding.
 
 ```bash
 lip query nearest <uri> [--top-k <n>]
@@ -215,7 +218,7 @@ score=0.8871  file:///src/middleware/auth_guard.rs
 
 ### lip query nearest-by-text
 
-Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly and runs cosine search.
+Find the `top_k` files most semantically similar to a free-text query. The daemon embeds the text on the fly.
 
 ```bash
 lip query nearest-by-text <text> [--top-k <n>] [--model <model>]
@@ -228,7 +231,7 @@ lip query nearest-by-text "payment processing fraud detection" --top-k 10
 
 ### lip query index-status
 
-Report overall daemon health: indexed file count, pending embedding count, last upsert timestamp, and configured embedding model. Designed for `ckb doctor` and CI health checks.
+Report overall daemon health: indexed file count, pending embedding count, last upsert timestamp, and configured embedding model.
 
 ```bash
 lip query index-status
@@ -249,14 +252,10 @@ lip query file-status <uri>
 
 ```bash
 lip query file-status file:///src/auth.rs
+# file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
 ```
 
-Output:
-```
-file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
-```
-
-- `age` — seconds since the file was last indexed.
+`age` is seconds since the file was last indexed.
 
 ### lip query batch
 
@@ -266,8 +265,6 @@ Execute multiple queries in a single round-trip. Reads a JSON array of query obj
 lip query batch [FILE]
 ```
 
-Each element of the array is a `ClientMessage` object (without `type: Manifest` or `type: Delta`):
-
 ```bash
 lip query batch <<'EOF'
 [
@@ -276,12 +273,9 @@ lip query batch <<'EOF'
   {"type":"annotation_get",    "symbol_uri":"lip://local/src/auth.rs#AuthService","key":"lip:fragile"}
 ]
 EOF
-
-# From file
-lip query batch queries.json
 ```
 
-Output is JSON (`BatchResult`) with one entry per input query.
+Output is a `BatchResult` with one entry per input query.
 
 ---
 
@@ -307,7 +301,7 @@ Start a Model Context Protocol server backed by the LIP daemon.
 lip mcp [--socket <path>]
 ```
 
-Reads JSON-RPC 2.0 from stdin, writes to stdout (stdio transport). Add to your MCP client config:
+Reads JSON-RPC 2.0 from stdin, writes to stdout (stdio transport).
 
 ```json
 {
@@ -317,9 +311,7 @@ Reads JSON-RPC 2.0 from stdin, writes to stdout (stdio transport). Add to your M
 }
 ```
 
-Exposed tools: `lip_blast_radius`, `lip_workspace_symbols`, `lip_references`, `lip_definition`, `lip_hover`, `lip_document_symbols`, `lip_dead_symbols`, `lip_annotation_get`, `lip_annotation_set`, `lip_annotation_workspace_list`, `lip_similar_symbols`, `lip_stale_files`, `lip_load_slice`, `lip_batch_query`, `lip_embedding_batch`, `lip_nearest`, `lip_nearest_by_text`, `lip_index_status`, `lip_file_status`.
-
-See [mcp-integration.md](mcp-integration.md).
+See [MCP Integration](/docs/mcp) for the full tool reference.
 
 ---
 
@@ -370,7 +362,6 @@ lip fetch abc123def456…
 
 # Download and immediately mount into the running daemon
 lip fetch abc123def456… --mount
-lip fetch abc123def456… --mount --socket /tmp/my-daemon.sock
 ```
 
 ---
@@ -386,7 +377,6 @@ lip push [slice.json] [--registry <url>] [--cache-dir <path>]
 Reads from file or stdin. Prints the content hash on success.
 
 ```bash
-# From file
 lip push ./my-package.json --registry https://registry.lip.dev
 
 # From stdin (pipe from index)
@@ -416,20 +406,14 @@ lip slice [OPTIONS]
 All symbols in a slice are stamped at Tier 3 confidence (score=100).
 
 ```bash
-# Build Cargo slices locally
-lip slice --cargo
-
-# Build and immediately share with team
+# Build and share with team
 lip slice --cargo --push --registry https://registry.lip.dev
 
-# Build slices for a monorepo with multiple package managers
+# Monorepo with multiple package managers
 lip slice --cargo --npm --pub
-
-# Build pip slices for the active Python environment
-lip slice --pip
 ```
 
-See [registry.md](registry.md).
+See [Registry & Slices](/docs/registry).
 
 ---
 

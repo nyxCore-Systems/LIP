@@ -1,0 +1,224 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Troubleshooting
+description: Common errors, socket diagnosis, file watcher issues, and how to debug the LIP daemon.
+---
+
+# Troubleshooting
+
+---
+
+## Connection errors
+
+### `connection refused` / `No such file or directory`
+
+The daemon is not running or the socket path doesn't match.
+
+**Check:** Is the daemon process running?
+```bash
+ps aux | grep 'lip daemon'
+```
+
+**Check:** Does the socket file exist at the expected path?
+```bash
+ls -la /tmp/lip.sock
+```
+
+**Fix:** Start the daemon.
+```bash
+lip daemon --socket /tmp/lip.sock
+```
+
+If you use a non-default socket path, pass `--socket` to every command:
+```bash
+lip query --socket /var/run/lip.sock symbols "AuthService"
+```
+
+### `Permission denied` on the socket
+
+The socket is owned by a different user, or the parent directory is not writable.
+
+**Fix:** Use a socket path in a directory you own (`/tmp/` or `~/.local/run/`).
+
+```bash
+mkdir -p ~/.local/run
+lip daemon --socket ~/.local/run/lip.sock
+```
+
+---
+
+## Daemon startup issues
+
+### Daemon starts but immediately exits
+
+Check stderr for the error:
+```bash
+lip daemon --socket /tmp/lip.sock 2>&1 | head -20
+```
+
+Common cause: the journal file is corrupt. Reset it:
+```bash
+rm ~/.local/share/lip/journal.lip
+lip daemon
+```
+
+### `journal replayed entries=0` — graph is empty after restart
+
+This is normal if no files have been indexed yet. Run `lip index ./src` after the daemon starts.
+
+If it's empty after it was previously populated, the journal path may have changed. Check the `--journal` flag or set `LIP_LOG=debug` to see the path being used:
+```bash
+LIP_LOG=debug lip daemon 2>&1 | grep journal
+```
+
+---
+
+## Indexing issues
+
+### Files aren't being indexed
+
+**Check:** Is the path you passed to `lip index` correct?
+```bash
+lip index ./src
+# Should print: indexed N files
+```
+
+**Check:** Does `lip query symbols` return anything after indexing?
+```bash
+lip query symbols "" --limit 5
+```
+
+**Check:** Are the file extensions supported? LIP indexes `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.dart`. Other extensions are silently skipped.
+
+### File changes not picked up automatically
+
+The file watcher registers files as they're indexed. If you indexed a file and then the daemon lost track of it:
+
+**Check:** Is the daemon running with `--no-watch`? That disables the file watcher.
+
+**On macOS:** `/tmp` is a symlink to `/private/tmp`. If your socket uses `/tmp/` but indexed files use absolute paths starting with `/private/tmp/`, the watcher may not match. LIP canonicalizes paths internally, but ensure your file URIs are consistent.
+
+**Fix:** Re-index the affected files.
+```bash
+lip index ./src
+```
+
+---
+
+## Query issues
+
+### `symbol not found` / empty results from `lip query symbols`
+
+The symbol hasn't been indexed yet. Make sure you've run `lip index` and that the daemon received the deltas.
+
+```bash
+lip query index-status
+# Check that indexed count is > 0
+```
+
+### `blast-radius` returns 0 dependents for a clearly-used symbol
+
+Blast radius uses the reverse dependency graph, which is built from occurrence data. If a file that calls the symbol hasn't been indexed, or if the symbol name is ambiguous, the result may be 0.
+
+**Check:** Has every file in the workspace been indexed?
+```bash
+lip index ./src
+```
+
+**Check:** Are there multiple symbols with the same display name? Use the full symbol URI:
+```bash
+lip query symbols "verifyToken"
+# Copy the full lip://... URI, then:
+lip query blast-radius "lip://local/src/auth.rs#AuthService.verifyToken"
+```
+
+---
+
+## Embedding issues
+
+### `LIP_EMBEDDING_URL not set`
+
+Embedding commands require the daemon to be configured with an embedding endpoint.
+
+```bash
+export LIP_EMBEDDING_URL=http://localhost:11434/v1/embeddings
+lip daemon --socket /tmp/lip.sock
+```
+
+The env var must be set **before the daemon starts** — it's read at startup, not per-request.
+
+### `connection refused` on embedding calls
+
+Your embedding server is not running. If you're using Ollama:
+```bash
+ollama serve
+```
+
+If you're using OpenAI, the URL should be `https://api.openai.com/v1` and you need a valid API key in the standard `OPENAI_API_KEY` env var (if your HTTP client sends it as a Bearer token).
+
+### `pending_embeddings` is stuck
+
+Embeddings are not computed automatically — you must call `embedding-batch` explicitly. There is no background embedding sweep.
+
+```bash
+# Check how many files need embeddings
+lip query index-status
+
+# Embed them all by passing each indexed file URI
+lip query embedding-batch file:///src/auth.rs file:///src/session.rs ...
+```
+
+---
+
+## LSP issues
+
+### Editor can't connect to `lip lsp`
+
+`lip lsp` reads from stdin and writes to stdout. It does not listen on a TCP port. Configure your editor to launch it as a subprocess, not connect to a socket.
+
+**VS Code** — `serverCommand` should be `"lip"` with args `["lsp", "--socket", "/tmp/lip.sock"]`.
+
+**Neovim** — `cmd` should be `{ 'lip', 'lsp', '--socket', '/tmp/lip.sock' }`.
+
+Make sure the daemon is running before the LSP bridge starts.
+
+### LSP responses are slow or stale
+
+The LSP bridge queries the LIP daemon per-request. If the daemon is slow to respond, check:
+- Is the daemon indexing a large file? Set `LIP_LOG=info` to see indexing activity.
+- Is the socket path correct? A wrong socket will cause the LSP bridge to timeout.
+
+---
+
+## Getting verbose output
+
+```bash
+LIP_LOG=debug lip daemon --socket /tmp/lip.sock 2>&1 | tee /tmp/lip-debug.log
+```
+
+Useful log fields:
+- `lip_daemon: journal replayed` — startup complete, graph restored
+- `lip_daemon: listening socket=...` — daemon is ready
+- `lip_daemon: upsert uri=...` — file indexed
+- `lip_daemon: embedding_batch uris=...` — embedding request received
+
+---
+
+## Reset everything
+
+If the daemon is in a bad state and you want to start clean:
+
+```bash
+# Kill the daemon
+pkill -f 'lip daemon'
+
+# Remove the journal
+rm ~/.local/share/lip/journal.lip
+
+# Remove embedding cache (in-memory only — clears on restart)
+# Nothing to delete for embeddings.
+
+# Start fresh
+lip daemon --socket /tmp/lip.sock
+lip index ./src
+```

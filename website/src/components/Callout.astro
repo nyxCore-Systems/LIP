@@ -1,0 +1,27 @@
+---
+interface Props {
+  type?: 'info' | 'tip' | 'warning' | 'danger';
+}
+const { type = 'info' } = Astro.props;
+const colors: Record<string, string> = {
+  info:    '#06b6d4',
+  tip:     '#10b981',
+  warning: '#f59e0b',
+  danger:  '#ef4444',
+};
+const color = colors[type] ?? colors.info;
+---
+<aside class="callout" style={`--callout-color: ${color}`}>
+  <slot />
+</aside>
+
+<style>
+  .callout {
+    border-left: 3px solid var(--callout-color);
+    background: color-mix(in srgb, var(--callout-color) 8%, transparent);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 20px 0;
+    font-size: 0.92rem;
+  }
+</style>
