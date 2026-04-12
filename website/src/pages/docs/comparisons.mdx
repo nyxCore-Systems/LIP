@@ -66,13 +66,13 @@ SCIP (Source Code Index Protocol, developed by Sourcegraph) is a protobuf-based 
 LIP (Linked Incremental Protocol) is a persistent daemon that keeps a live query graph of the entire repository and updates it incrementally as files change.
 
 **Strengths:**
-- **Always current**: every file save updates the affected symbols in <1 ms
+- **Always current**: every file save updates the affected symbols in &lt;1 ms
 - **Blast radius**: first-class concept — tracks a reverse dependency graph per symbol, computes direct and transitive dependents, assigns a risk level
 - **Persistent annotations**: symbols can carry key/value annotations (`lip:fragile`, `team:owner`, `agent:note`, `lip:nyx-agent-lock`) that survive file changes and daemon restarts
 - **Federated dependency slices**: external packages are content-addressed blobs indexed once by anyone on the team
 - **Batch API**: `BatchQuery` runs N queries under a single db lock — one round-trip instead of N
 - **AI-native**: MCP server, agent-lock annotations, `SimilarSymbols` fuzzy search, semantic embeddings
-- **Progressive results**: Tier 1 (tree-sitter, <1 ms) available immediately; Tier 2 (compiler) upgrades in the background
+- **Progressive results**: Tier 1 (tree-sitter, &lt;1 ms) available immediately; Tier 2 (compiler) upgrades in the background
 
 **Limitations — where LIP is weaker than SCIP:**
 
@@ -115,7 +115,7 @@ The layers compose without conflict:
 ```
 Source files
     │
-    ├── tree-sitter (Tier 1, <1 ms/file)
+    ├── tree-sitter (Tier 1, &lt;1 ms/file)
     │        │
     │        ▼
     │   LIP Daemon  ─── live graph, blast radius, annotations

@@ -45,7 +45,7 @@ Scores are used to prioritize results and indicate analysis quality to agents.
 
 The level of analysis that produced a symbol:
 
-- **Tier 1** — tree-sitter syntax analysis. Runs in < 1 ms per file. No compiler required. Extracts function/class/interface definitions and name-based cross-file references.
+- **Tier 1** — tree-sitter syntax analysis. Runs in &lt;1 ms per file. No compiler required. Extracts function/class/interface definitions and name-based cross-file references.
 - **Tier 2** — compiler or language server analysis. Runs in the background on the blast radius of a change. Resolves generics, overloads, and cross-file references precisely.
 - **Tier 3** — pre-built dependency slice. Stamped at confidence 100. Never re-computed.
 

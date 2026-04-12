@@ -132,7 +132,7 @@ LIP is designed around three axioms:
 | Persistent annotations | ✗ | ✗ | **✓ annotation overlay layer** |
 | Cross-repo | ✗ | ✓ | **✓** |
 | Team cache sharing | ✗ | ✗ | **✓ CAS registry** |
-| Cold start latency | < 1 s | 30–90 min | **< 30 s (shallow) + background** |
+| Cold start latency | &lt;1 s | 30–90 min | **< 30 s (shallow) + background** |
 | Runtime telemetry | ✗ | ✗ | **✓ opt-in overlay** |
 | Data / control flow graph | ✗ | ✗ | **✓ CPG edges (Tier 2+)** |
 | Taint tracking | ✗ | ✗ | **✓ CPG DataFlows traversal** |
@@ -199,7 +199,7 @@ display useful intelligence immediately while background verification runs.
 | Property | Value |
 |---|---|
 | Engine | Tree-sitter AST parser |
-| Latency | < 10 ms |
+| Latency | &lt;10 ms |
 | Scope | Current file + dirty buffers |
 | Accuracy | High for syntax, low for cross-file types |
 
