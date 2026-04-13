@@ -505,6 +505,27 @@ fn extract_code_block(md: &str) -> Option<String> {
     }
 }
 
+/// Map LSP `SymbolKind` integer values to LIP `SymbolKind`.
+fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
+    match kind {
+        3 => SymbolKind::Namespace,
+        4 => SymbolKind::Namespace, // Package
+        5 => SymbolKind::Class,
+        6 => SymbolKind::Method,
+        7 => SymbolKind::Field,
+        8 => SymbolKind::Constructor,
+        9 => SymbolKind::Enum,
+        10 => SymbolKind::Interface,
+        11 => SymbolKind::Function,
+        12 => SymbolKind::Variable, // Constant
+        13 => SymbolKind::Variable,
+        14 => SymbolKind::Variable, // String
+        22 => SymbolKind::EnumMember,
+        25 => SymbolKind::TypeAlias,
+        _ => SymbolKind::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,26 +594,5 @@ mod tests {
         assert_eq!(lsp_kind_to_lip(10), SymbolKind::Interface);
         assert_eq!(lsp_kind_to_lip(25), SymbolKind::TypeAlias);
         assert_eq!(lsp_kind_to_lip(99), SymbolKind::Unknown);
-    }
-}
-
-/// Map LSP `SymbolKind` integer values to LIP `SymbolKind`.
-fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
-    match kind {
-        3 => SymbolKind::Namespace,
-        4 => SymbolKind::Namespace, // Package
-        5 => SymbolKind::Class,
-        6 => SymbolKind::Method,
-        7 => SymbolKind::Field,
-        8 => SymbolKind::Constructor,
-        9 => SymbolKind::Enum,
-        10 => SymbolKind::Interface,
-        11 => SymbolKind::Function,
-        12 => SymbolKind::Variable, // Constant
-        13 => SymbolKind::Variable,
-        14 => SymbolKind::Variable, // String
-        22 => SymbolKind::EnumMember,
-        25 => SymbolKind::TypeAlias,
-        _ => SymbolKind::Unknown,
     }
 }
