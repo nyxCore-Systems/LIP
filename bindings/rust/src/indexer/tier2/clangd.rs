@@ -80,12 +80,7 @@ impl ClangdBackend {
     async fn initialize(&mut self, workspace_root: Option<PathBuf>) -> anyhow::Result<()> {
         let root_uri = workspace_root
             .as_ref()
-            .map(|p| {
-                format!(
-                    "file://{}",
-                    p.to_str().unwrap_or("")
-                )
-            })
+            .map(|p| format!("file://{}", p.to_str().unwrap_or("")))
             .map(Value::String)
             .unwrap_or(Value::Null);
 
@@ -127,7 +122,13 @@ impl ClangdBackend {
 
     // ── Private: per-file operations ──────────────────────────────────────────
 
-    async fn sync_file(&mut self, uri: &str, source: &str, version: i32, language_id: &str) -> anyhow::Result<()> {
+    async fn sync_file(
+        &mut self,
+        uri: &str,
+        source: &str,
+        version: i32,
+        language_id: &str,
+    ) -> anyhow::Result<()> {
         if self.opened.contains(uri) {
             self.client
                 .notify(
@@ -303,7 +304,12 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        out.push(RawSymbol { name, kind, line, col });
+        out.push(RawSymbol {
+            name,
+            kind,
+            line,
+            col,
+        });
 
         if let Some(Value::Array(children)) = item.get("children") {
             collect_symbols(children, out);
@@ -366,4 +372,3 @@ fn infer_language_id(uri: &str) -> &'static str {
         _ => "cpp",
     }
 }
-

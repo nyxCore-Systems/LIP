@@ -819,7 +819,10 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn c_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
-        if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+        if matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) {
             let name = self.node_text(&node);
             if !name.is_empty() {
                 let role = node.parent().map_or(Role::Reference, |parent| {
@@ -1006,7 +1009,10 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn cpp_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
-        if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+        if matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) {
             let name = self.node_text(&node);
             if !name.is_empty() {
                 let role = node.parent().map_or(Role::Reference, |parent| {
