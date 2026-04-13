@@ -74,11 +74,17 @@ Symbols carry key/value annotations (`lip:fragile`, `team:owner`, `agent:note`, 
 **Batch API.**  
 `BatchQuery` runs N queries under a single db lock acquisition — one Unix socket round-trip instead of N. Planning a 10-symbol refactor (blast radius + references + annotation checks per symbol) costs one connection instead of 30.
 
-**Semantic nearest-neighbour search (v1.3).**  
-When `LIP_EMBEDDING_URL` points to any OpenAI-compatible embeddings endpoint (Ollama, OpenAI, Together AI, …), LIP stores a dense vector per file. `QueryNearest` returns the most semantically similar files to a given file; `QueryNearestByText` embeds a free-text query on the fly. Embeddings are invalidated automatically on source change. This feature is opt-in — all other LIP capabilities work without it.
+**Semantic nearest-neighbour search (v1.3+).**  
+When `LIP_EMBEDDING_URL` points to any OpenAI-compatible embeddings endpoint (Ollama, OpenAI, Together AI, …), LIP stores dense vectors for files and symbols. `QueryNearest` returns the most semantically similar files to a given file; `QueryNearestByText` embeds a free-text query on the fly; `QueryNearestBySymbol` finds symbols semantically similar to a given `lip://` URI. `BatchQueryNearestByText` embeds N queries in a single HTTP round-trip. Embeddings are invalidated automatically on source change and are opt-in — all other LIP capabilities work without them.
 
 **Daemon observability (v1.3).**  
 `QueryIndexStatus` and `QueryFileStatus` expose indexed file count, pending embedding coverage, last-update timestamp, and per-file age — enabling `ckb doctor` and CI health checks to query the daemon's real-time state.
+
+**Push notifications (v1.5).**  
+`IndexChanged` events are broadcast to all active sessions immediately after every successful delta upsert, carrying the new `indexed_files` count and the list of `affected_uris`. Clients can invalidate their caches precisely without polling `QueryIndexStatus`.
+
+**Protocol lifecycle (v1.5).**  
+`Handshake` / `HandshakeResult` lets clients detect daemon/client version drift at connect time — the daemon responds with its semver and a monotonic `protocol_version` integer. `--managed` mode spawns a parent-process watchdog so IDE integrations that launch the daemon as a subprocess get automatic cleanup when the editor exits.
 
 ---
 
@@ -99,6 +105,9 @@ Tier 2 is implemented for **Rust**, **TypeScript**, **Python**, and **Dart**. If
 ```bash
 # Start the daemon (watches files, updates blast radius on save)
 lip daemon --socket /tmp/lip.sock
+
+# IDE-managed mode: daemon exits automatically when the parent process exits
+lip daemon --socket /tmp/lip.sock --managed
 
 # Index a directory (Tier 1, tree-sitter)
 lip index ./src
@@ -127,10 +136,22 @@ export LIP_EMBEDDING_MODEL=nomic-embed-text
 lip query embedding-batch file:///src/auth.rs file:///src/payments.rs
 lip query nearest          file:///src/auth.rs --top-k 5
 lip query nearest-by-text  "authentication token validation" --top-k 10
+lip query nearest-symbol   lip://local/src/auth.rs#AuthService.verifyToken --top-k 5
+
+# Batch nearest-by-text (N queries, one HTTP round-trip)
+lip query batch-nearest-by-text "token validation" "oauth flow" --top-k 5
+
+# Batch annotation read (N URIs, one lock acquisition)
+lip query batch-annotation-get --key team:owner \
+  lip://local/src/auth.rs#AuthService \
+  lip://local/src/payments.rs#PaymentProcessor
 
 # Daemon health / ckb doctor integration
 lip query index-status
 lip query file-status file:///src/main.rs
+
+# Protocol version negotiation
+lip query handshake
 
 # Import a SCIP index (upgrades all symbols to Tier 2 / score 90)
 lip import --from-scip index.scip
@@ -319,7 +340,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.2 — Slice mounting (`lip fetch --mount`, `lip_load_slice`), LSP bridge fixes, MIT license, crates.io publish pipeline. Wire format is JSON; FlatBuffers IPC is planned for v1.3.
+v1.5 — Batch APIs (`BatchQueryNearestByText`, `BatchAnnotationGet`), symbol-level semantic search (`QueryNearestBySymbol`), `IndexChanged` push notifications, `Handshake` protocol version negotiation, `--managed` subprocess lifecycle. Wire format is JSON; FlatBuffers IPC is planned for v1.2 (see roadmap).
 
 ---
 

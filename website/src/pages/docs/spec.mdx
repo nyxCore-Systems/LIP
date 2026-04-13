@@ -1087,6 +1087,16 @@ lip-protocol/
 - [x] Push notifications (`SymbolUpgraded`) — broadcast when Tier 2 upgrades a symbol
 - [x] Persisted query graph (survives daemon restarts via WAL journal)
 
+### v1.5 — Shipped ✓
+
+- [x] **`BatchQueryNearestByText`** — embed N query strings in one HTTP round-trip and return one nearest-neighbour list per query. Replaces N sequential `QueryNearestByText` calls.
+- [x] **`QueryNearestBySymbol`** — find symbols semantically similar to a given `lip://` URI. The daemon embeds the symbol's display name, signature, and docs on demand and searches the per-symbol embedding store.
+- [x] **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Replaces N sequential `AnnotationGet` calls.
+- [x] **`IndexChanged` push notification** — emitted to all active sessions after every successful `Delta::Upsert`. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- [x] **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between independently updated daemon and clients is detectable at connect time.
+- [x] **`--managed` flag** (`lip daemon start --managed`) — spawns a parent-process watchdog that calls `std::process::exit(0)` when the parent process exits. Designed for IDE integrations (CKB, VS Code extension) that manage the daemon as a subprocess.
+- [x] **`EmbeddingBatch` URI routing** — `lip://` URIs now route to `symbol_embeddings` (new field); `file://` URIs continue to use `file_embeddings`. Enables per-symbol dense vector search via `QueryNearestBySymbol`.
+
 ### v1.4 — Shipped ✓
 
 - [x] **Tier 2 confidence fix** — all 4 Tier 2 backends now emit `confidence_score = 90` (was 70). Aligns with spec §3.3 and resolves the v1.2 roadmap item.
