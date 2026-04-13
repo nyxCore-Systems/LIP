@@ -10,6 +10,10 @@ pub enum Language {
     C,
     Cpp,
     Go,
+    JavaScript,
+    JavaScriptReact,
+    Kotlin,
+    Swift,
     Unknown,
 }
 
@@ -25,6 +29,10 @@ impl Language {
             "c" => return Language::C,
             "cpp" | "c++" | "cxx" => return Language::Cpp,
             "go" => return Language::Go,
+            "javascript" | "js" => return Language::JavaScript,
+            "javascriptreact" | "jsx" => return Language::JavaScriptReact,
+            "kotlin" | "kt" => return Language::Kotlin,
+            "swift" => return Language::Swift,
             _ => {}
         }
 
@@ -43,6 +51,10 @@ impl Language {
             "c" | "h" => Language::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Language::Cpp,
             "go" => Language::Go,
+            "js" | "mjs" | "cjs" => Language::JavaScript,
+            "jsx" => Language::JavaScriptReact,
+            "kt" | "kts" => Language::Kotlin,
+            "swift" => Language::Swift,
             _ => Language::Unknown,
         }
     }
@@ -57,6 +69,11 @@ impl Language {
             Language::C => Some(tree_sitter_c::language()),
             Language::Cpp => Some(tree_sitter_cpp::language()),
             Language::Go => Some(tree_sitter_go::language()),
+            Language::JavaScript | Language::JavaScriptReact => {
+                Some(tree_sitter_javascript::language())
+            }
+            Language::Kotlin => Some(tree_sitter_kotlin::language()),
+            Language::Swift => Some(tree_sitter_swift::language()),
             Language::Unknown => None,
         }
     }
@@ -70,6 +87,10 @@ impl Language {
             Language::C => "c",
             Language::Cpp => "cpp",
             Language::Go => "go",
+            Language::JavaScript => "javascript",
+            Language::JavaScriptReact => "javascriptreact",
+            Language::Kotlin => "kotlin",
+            Language::Swift => "swift",
             Language::Unknown => "unknown",
         }
     }

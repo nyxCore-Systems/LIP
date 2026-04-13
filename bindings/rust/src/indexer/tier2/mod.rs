@@ -1,12 +1,14 @@
 //! Tier 2 compiler-backed indexer (spec §3.3, confidence 51–90).
 //!
-//! Ships six LSP backends:
+//! Ships eight LSP backends:
 //! - [`rust_analyzer`]: `rust-analyzer` for Rust files
-//! - [`ts_server`]: `typescript-language-server` for TypeScript/TSX files
+//! - [`ts_server`]: `typescript-language-server` for TypeScript/TSX/JS/JSX files
 //! - [`py_ls`]: `pyright-langserver` (or `pylsp` fallback) for Python files
 //! - [`dart_ls`]: `dart language-server` for Dart files
 //! - [`clangd`]: `clangd` for C and C++ files
 //! - [`gopls`]: `gopls` for Go files
+//! - [`kotlin`]: `kotlin-language-server` for Kotlin files
+//! - [`swift_ls`]: `sourcekit-lsp` for Swift files
 //!
 //! # Integration
 //!
@@ -26,14 +28,18 @@
 pub mod clangd;
 pub mod dart_ls;
 pub mod gopls;
+pub mod kotlin;
 pub mod lsp_client;
 pub mod py_ls;
 pub mod rust_analyzer;
+pub mod swift_ls;
 pub mod ts_server;
 
 pub use clangd::ClangdBackend;
 pub use dart_ls::DartBackend;
 pub use gopls::GoplsBackend;
+pub use kotlin::KotlinBackend;
 pub use py_ls::PythonBackend;
 pub use rust_analyzer::VerificationResult;
+pub use swift_ls::SwiftBackend;
 pub use ts_server::TypeScriptBackend;

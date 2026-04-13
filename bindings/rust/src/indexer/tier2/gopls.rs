@@ -287,7 +287,12 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        out.push(RawSymbol { name, kind, line, col });
+        out.push(RawSymbol {
+            name,
+            kind,
+            line,
+            col,
+        });
 
         if let Some(Value::Array(children)) = item.get("children") {
             collect_symbols(children, out);
@@ -320,8 +325,8 @@ fn extract_go_signature(md: &str) -> Option<String> {
 /// Map LSP `SymbolKind` integer values to LIP `SymbolKind`.
 fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
     match kind {
-        2 => SymbolKind::Namespace,  // Module
-        3 => SymbolKind::Namespace,  // Namespace / Package
+        2 => SymbolKind::Namespace, // Module
+        3 => SymbolKind::Namespace, // Namespace / Package
         5 => SymbolKind::Class,
         6 => SymbolKind::Method,
         7 => SymbolKind::Field,
@@ -329,7 +334,7 @@ fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
         9 => SymbolKind::Enum,
         10 => SymbolKind::Interface,
         11 => SymbolKind::Function,
-        12 => SymbolKind::Variable,  // Constant
+        12 => SymbolKind::Variable, // Constant
         13 => SymbolKind::Variable,
         22 => SymbolKind::EnumMember,
         25 => SymbolKind::TypeParameter,

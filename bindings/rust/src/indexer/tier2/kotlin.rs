@@ -1,18 +1,23 @@
-//! TypeScript language server Tier 2 backend.
+//! Kotlin language server Tier 2 backend.
 //!
-//! Spawns `typescript-language-server --stdio` as a child process and
-//! communicates with it over the Language Server Protocol. For each TypeScript
-//! file, it:
+//! Spawns `kotlin-language-server` as a child process (requires the binary in
+//! PATH — install via `brew install kotlin-language-server` or download from
+//! https://github.com/fwcd/kotlin-language-server/releases) and communicates
+//! over the Language Server Protocol.
+//!
+//! For each Kotlin file, it:
 //!
 //! 1. Sends `textDocument/didOpen` with the full source.
-//! 2. Waits briefly for the server to process the change.
-//! 3. Calls `textDocument/documentSymbol` to obtain the typed symbol list.
-//! 4. Calls `textDocument/hover` at each symbol's definition site to extract
+//! 2. Calls `textDocument/documentSymbol` to obtain the symbol list.
+//! 3. Calls `textDocument/hover` at each symbol's definition site to extract
 //!    the type signature from the hover markdown.
-//! 5. Calls `textDocument/typeDefinition` to record cross-file type relationships.
-//! 6. Returns a [`VerificationResult`] with confidence scores upgraded to 90.
+//! 4. Returns a [`VerificationResult`] with confidence scores upgraded to 90.
+//!
+//! If `kotlin-language-server` is not in PATH the backend fails to spawn and
+//! is permanently disabled — Tier 1 results remain fully functional.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -21,35 +26,38 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
-use crate::schema::{OwnedRelationship, OwnedSymbolInfo, SymbolKind};
+use crate::schema::{OwnedSymbolInfo, SymbolKind};
 
 use super::lsp_client::LspClient;
-use super::rust_analyzer::{file_uri_to_lip_uri, VerificationResult};
+use super::rust_analyzer::VerificationResult;
 
 // ─── Backend ──────────────────────────────────────────────────────────────────
 
-pub struct TypeScriptBackend {
+pub struct KotlinBackend {
     _child: Child,
     client: LspClient,
     opened: HashSet<String>,
 }
 
-impl TypeScriptBackend {
-    /// Spawn `typescript-language-server`, initialize the LSP session, and
-    /// return a ready backend.
+impl KotlinBackend {
+    /// Spawn `kotlin-language-server`, initialize the LSP session, and return
+    /// a ready backend.
     ///
-    /// Returns `Err` if the binary is not found in PATH (graceful degradation).
-    pub async fn new() -> anyhow::Result<Self> {
-        let mut child = Command::new("typescript-language-server")
-            .arg("--stdio")
+    /// `workspace_root` is passed as `rootUri` so the server can find
+    /// `build.gradle` / `settings.gradle` files.
+    ///
+    /// Returns `Err` if the binary is not found in PATH.
+    pub async fn new(workspace_root: Option<PathBuf>) -> anyhow::Result<Self> {
+        let mut child = Command::new("kotlin-language-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .context(
-                "typescript-language-server not found — install it with \
-                 `npm install -g typescript-language-server typescript`",
+                "kotlin-language-server not found — install it with \
+                 `brew install kotlin-language-server` or download from \
+                 https://github.com/fwcd/kotlin-language-server/releases",
             )?;
 
         let stdin = child.stdin.take().context("no stdin")?;
@@ -61,61 +69,57 @@ impl TypeScriptBackend {
             client,
             opened: HashSet::new(),
         };
-
-        backend.initialize().await?;
+        backend.initialize(workspace_root).await?;
         Ok(backend)
     }
 
     // ── Private: LSP lifecycle ────────────────────────────────────────────────
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self, workspace_root: Option<PathBuf>) -> anyhow::Result<()> {
+        let root_uri = workspace_root
+            .as_ref()
+            .map(|p| format!("file://{}", p.to_str().unwrap_or("")))
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+
         let result = self
             .client
             .request(
                 "initialize",
                 json!({
-                    "rootUri":  null,
-                    "rootPath": null,
+                    "rootUri": root_uri,
                     "capabilities": {
                         "textDocument": {
                             "hover": {
                                 "contentFormat": ["markdown", "plaintext"]
                             },
                             "documentSymbol": {
-                                // Accept both nested DocumentSymbol[] and flat SymbolInformation[].
                                 "hierarchicalDocumentSymbolSupport": true
                             }
                         },
                         "window": {
                             "workDoneProgress": false
                         }
-                    },
-                    "initializationOptions": {}
+                    }
                 }),
             )
             .await?;
 
         info!(
-            "typescript-language-server initialized (server: {:?})",
+            "kotlin-language-server initialized (server: {:?})",
             result.get("serverInfo").and_then(|v| v.get("name"))
         );
 
         self.client.notify("initialized", json!({})).await?;
 
-        // Give the server a moment to finish startup.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // kotlin-language-server needs time to index the project.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         Ok(())
     }
 
     // ── Private: per-file operations ──────────────────────────────────────────
 
-    async fn sync_file(
-        &mut self,
-        uri: &str,
-        source: &str,
-        version: i32,
-        lang: &str,
-    ) -> anyhow::Result<()> {
+    async fn sync_file(&mut self, uri: &str, source: &str, version: i32) -> anyhow::Result<()> {
         if self.opened.contains(uri) {
             self.client
                 .notify(
@@ -133,7 +137,7 @@ impl TypeScriptBackend {
                     json!({
                         "textDocument": {
                             "uri":        uri,
-                            "languageId": lang,
+                            "languageId": "kotlin",
                             "version":    version,
                             "text":       source
                         }
@@ -142,8 +146,6 @@ impl TypeScriptBackend {
                 .await?;
             self.opened.insert(uri.to_owned());
         }
-        // Allow the server to process the change before querying.
-        tokio::time::sleep(Duration::from_millis(200)).await;
         Ok(())
     }
 
@@ -186,76 +188,28 @@ impl TypeScriptBackend {
             return Ok(None);
         }
 
-        // typescript-language-server returns markdown; try to extract a code block,
-        // otherwise fall back to the first non-empty line.
         let md = result
             .pointer("/contents/value")
             .or_else(|| result.pointer("/contents"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        Ok(extract_ts_signature(md))
-    }
-
-    /// Resolve the canonical definition URI of a symbol's *type* (cross-file).
-    async fn type_definition_uri(
-        &mut self,
-        uri: &str,
-        line: u32,
-        col: u32,
-    ) -> anyhow::Result<Option<String>> {
-        let result = self
-            .client
-            .request(
-                "textDocument/typeDefinition",
-                json!({
-                    "textDocument": { "uri": uri },
-                    "position":     { "line": line, "character": col }
-                }),
-            )
-            .await?;
-
-        let loc = if result.is_array() {
-            result.get(0).cloned()
-        } else if result.is_object() {
-            Some(result.clone())
-        } else {
-            None
-        };
-
-        Ok(loc
-            .and_then(|l| {
-                l.pointer("/uri")
-                    .or_else(|| l.pointer("/targetUri"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            })
-            .filter(|def_uri| def_uri != uri)
-            .map(|def_uri| file_uri_to_lip_uri(&def_uri)))
+        Ok(extract_kotlin_signature(md))
     }
 
     // ── Public: full verification ─────────────────────────────────────────────
 
-    /// Run Tier 2 verification on a single TypeScript/TSX file.
+    /// Run Tier 2 verification on a single Kotlin file.
     pub async fn verify_file(
         &mut self,
         uri: &str,
         source: &str,
         version: i32,
     ) -> anyhow::Result<VerificationResult> {
-        let lang = if uri.ends_with(".tsx") {
-            "typescriptreact"
-        } else if uri.ends_with(".jsx") {
-            "javascriptreact"
-        } else if uri.ends_with(".js") || uri.ends_with(".mjs") || uri.ends_with(".cjs") {
-            "javascript"
-        } else {
-            "typescript"
-        };
-        self.sync_file(uri, source, version, lang).await?;
+        self.sync_file(uri, source, version).await?;
 
         let raw = self.document_symbols(uri).await?;
-        debug!("tier2(ts): {} raw symbols for {uri}", raw.len());
+        debug!("tier2(kotlin): {} raw symbols for {uri}", raw.len());
 
         let path = uri.strip_prefix("file://").unwrap_or(uri);
 
@@ -267,26 +221,18 @@ impl TypeScriptBackend {
                 .ok()
                 .flatten();
 
-            let type_rel = self
-                .type_definition_uri(uri, sym.line, sym.col)
-                .await
-                .ok()
-                .flatten()
-                .map(|tdef_uri| OwnedRelationship {
-                    target_uri: tdef_uri,
-                    is_type_definition: true,
-                    is_reference: false,
-                    is_implementation: false,
-                    is_override: false,
-                });
-
             let sym_uri = format!("lip://local/{path}#{}", sym.name);
 
-            // Infer visibility from hover signature: TS exported items start with "export".
-            let is_exported = sig
-                .as_deref()
-                .map(|s| s.starts_with("export"))
+            // Kotlin: exported if first character is uppercase (public by default).
+            // Private/protected symbols still appear in documentSymbol but we
+            // conservatively mark them as non-exported.
+            let is_exported = sym
+                .name
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
                 .unwrap_or(false);
+
             symbols.push(OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
@@ -294,7 +240,7 @@ impl TypeScriptBackend {
                 documentation: None,
                 signature: sig,
                 confidence_score: 90,
-                relationships: type_rel.into_iter().collect(),
+                relationships: vec![],
                 runtime_p99_ms: None,
                 call_rate_per_s: None,
                 taint_labels: vec![],
@@ -319,8 +265,6 @@ struct RawSymbol {
     col: u32,
 }
 
-/// Recursively collect symbols from either `DocumentSymbol[]` (nested, with
-/// `selectionRange`) or `SymbolInformation[]` (flat, with `location.range`).
 fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
     for item in items {
         let name = item
@@ -334,8 +278,6 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
 
         let kind = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
 
-        // DocumentSymbol uses `selectionRange` for the symbol's name position;
-        // SymbolInformation uses `location.range`.
         let range_ptr = item
             .pointer("/selectionRange")
             .or_else(|| item.pointer("/location/range"))
@@ -356,20 +298,16 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             col,
         });
 
-        // Recurse into nested DocumentSymbol children.
         if let Some(Value::Array(children)) = item.get("children") {
             collect_symbols(children, out);
         }
     }
 }
 
-/// Extract a type signature from TypeScript hover markdown.
+/// Extract a Kotlin type signature from hover markdown.
 ///
-/// `typescript-language-server` typically returns a fenced typescript code
-/// block containing the signature (e.g. `function foo(x: number): string`).
-/// Falls back to the first non-empty line if no fenced block is found.
-fn extract_ts_signature(md: &str) -> Option<String> {
-    // Try fenced code block first (same logic as rust-analyzer helper).
+/// kotlin-language-server wraps signatures in a fenced `kotlin` code block.
+fn extract_kotlin_signature(md: &str) -> Option<String> {
     if let Some(fence_start) = md.find("```") {
         let after_fence = &md[fence_start + 3..];
         let body_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
@@ -382,7 +320,6 @@ fn extract_ts_signature(md: &str) -> Option<String> {
         }
     }
 
-    // Fall back to first non-empty line.
     md.lines()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
@@ -392,8 +329,8 @@ fn extract_ts_signature(md: &str) -> Option<String> {
 /// Map LSP `SymbolKind` integer values to LIP `SymbolKind`.
 fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
     match kind {
-        3 => SymbolKind::Namespace,
-        4 => SymbolKind::Namespace, // Package
+        3 => SymbolKind::Namespace, // Package
+        4 => SymbolKind::Namespace,
         5 => SymbolKind::Class,
         6 => SymbolKind::Method,
         7 => SymbolKind::Field,
@@ -403,9 +340,8 @@ fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
         11 => SymbolKind::Function,
         12 => SymbolKind::Variable, // Constant
         13 => SymbolKind::Variable,
-        14 => SymbolKind::Variable, // String
         22 => SymbolKind::EnumMember,
-        25 => SymbolKind::TypeAlias,
+        25 => SymbolKind::TypeAlias, // TypeParameter
         _ => SymbolKind::Unknown,
     }
 }
