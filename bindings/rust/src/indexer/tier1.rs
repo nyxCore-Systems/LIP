@@ -130,9 +130,9 @@ mod tests {
     }
 
     fn find<'a>(syms: &'a [OwnedSymbolInfo], name: &str) -> &'a OwnedSymbolInfo {
-        syms.iter().find(|s| s.display_name == name).unwrap_or_else(|| {
-            panic!("symbol '{name}' not found in {:?}", names(syms))
-        })
+        syms.iter()
+            .find(|s| s.display_name == name)
+            .unwrap_or_else(|| panic!("symbol '{name}' not found in {:?}", names(syms)))
     }
 
     // ── empty input ───────────────────────────────────────────────────────────
@@ -156,10 +156,16 @@ mod tests {
     fn uri_strips_file_scheme() {
         let syms = sym("pub fn greet() {}", Language::Rust);
         assert_eq!(syms.len(), 1);
-        assert!(!syms[0].uri.contains("file://"),
-            "lip URI must not re-embed the file:// scheme: {}", syms[0].uri);
-        assert!(syms[0].uri.starts_with("lip://local/"),
-            "unexpected URI: {}", syms[0].uri);
+        assert!(
+            !syms[0].uri.contains("file://"),
+            "lip URI must not re-embed the file:// scheme: {}",
+            syms[0].uri
+        );
+        assert!(
+            syms[0].uri.starts_with("lip://local/"),
+            "unexpected URI: {}",
+            syms[0].uri
+        );
     }
 
     // ── Rust ──────────────────────────────────────────────────────────────────
@@ -182,7 +188,10 @@ mod tests {
     #[test]
     fn rust_private_fn_not_exported() {
         let syms = sym("fn hidden() {}", Language::Rust);
-        assert!(!find(&syms, "hidden").is_exported, "private fn should not be exported");
+        assert!(
+            !find(&syms, "hidden").is_exported,
+            "private fn should not be exported"
+        );
     }
 
     #[test]
@@ -266,7 +275,10 @@ mod tests {
     #[test]
     fn rust_occurrence_definition_role() {
         let occs_list = occs("pub fn defined() {}", Language::Rust);
-        let def = occs_list.iter().find(|o| o.symbol_uri.contains("#defined")).unwrap();
+        let def = occs_list
+            .iter()
+            .find(|o| o.symbol_uri.contains("#defined"))
+            .unwrap();
         assert_eq!(def.role, Role::Definition);
     }
 
@@ -275,10 +287,14 @@ mod tests {
         let src = "fn a() { b(); } fn b() {}";
         let occs_list = occs(src, Language::Rust);
         // `b` appears as a reference inside `a()`'s body
-        let refs: Vec<_> = occs_list.iter()
+        let refs: Vec<_> = occs_list
+            .iter()
             .filter(|o| o.symbol_uri.contains("#b") && o.role == Role::Reference)
             .collect();
-        assert!(!refs.is_empty(), "b used in a() should be a Reference occurrence");
+        assert!(
+            !refs.is_empty(),
+            "b used in a() should be a Reference occurrence"
+        );
     }
 
     // ── TypeScript ────────────────────────────────────────────────────────────
@@ -295,7 +311,10 @@ mod tests {
     #[test]
     fn ts_exported_function() {
         let syms = sym("export function send() {}", Language::TypeScript);
-        assert!(find(&syms, "send").is_exported, "export function should be exported");
+        assert!(
+            find(&syms, "send").is_exported,
+            "export function should be exported"
+        );
     }
 
     #[test]
@@ -333,7 +352,10 @@ mod tests {
     #[test]
     fn ts_exported_const() {
         let syms = sym("export const HOST = 'x';", Language::TypeScript);
-        assert!(find(&syms, "HOST").is_exported, "exported const should be exported");
+        assert!(
+            find(&syms, "HOST").is_exported,
+            "exported const should be exported"
+        );
     }
 
     #[test]
@@ -341,7 +363,8 @@ mod tests {
         let src = "function dispatch() { handle(); } function handle() {}";
         let es = edges(src, Language::TypeScript);
         assert!(
-            es.iter().any(|e| e.from_uri.contains("#dispatch") && e.to_uri.contains("#handle")),
+            es.iter()
+                .any(|e| e.from_uri.contains("#dispatch") && e.to_uri.contains("#handle")),
             "expected dispatch→handle edge"
         );
     }
@@ -377,16 +400,20 @@ mod tests {
     #[test]
     fn py_private_underscore_not_exported() {
         let syms = sym("def _internal():\n    pass", Language::Python);
-        assert!(!find(&syms, "_internal").is_exported,
-            "underscore-prefixed name should not be exported");
+        assert!(
+            !find(&syms, "_internal").is_exported,
+            "underscore-prefixed name should not be exported"
+        );
     }
 
     #[test]
     fn py_decorated_function() {
         let src = "@staticmethod\ndef helper():\n    pass";
         let syms = sym(src, Language::Python);
-        assert!(names(&syms).contains(&"helper"),
-            "decorated function should still be extracted");
+        assert!(
+            names(&syms).contains(&"helper"),
+            "decorated function should still be extracted"
+        );
     }
 
     #[test]
@@ -394,7 +421,8 @@ mod tests {
         let src = "def main():\n    setup()\ndef setup():\n    pass";
         let es = edges(src, Language::Python);
         assert!(
-            es.iter().any(|e| e.from_uri.contains("#main") && e.to_uri.contains("#setup")),
+            es.iter()
+                .any(|e| e.from_uri.contains("#main") && e.to_uri.contains("#setup")),
             "expected main→setup call edge"
         );
     }
@@ -428,8 +456,10 @@ mod tests {
     #[test]
     fn dart_private_underscore() {
         let syms = sym("void _helper() {}", Language::Dart);
-        assert!(!find(&syms, "_helper").is_exported,
-            "underscore-prefixed Dart name should not be exported");
+        assert!(
+            !find(&syms, "_helper").is_exported,
+            "underscore-prefixed Dart name should not be exported"
+        );
     }
 
     #[test]
@@ -458,7 +488,10 @@ mod tests {
         let src = "fn stable() {}";
         let a = Tier1Indexer::new().index_file("file:///a.rs", src, Language::Rust);
         let b = Tier1Indexer::new().index_file("file:///a.rs", src, Language::Rust);
-        assert_eq!(a.content_hash, b.content_hash, "same source must produce same hash");
+        assert_eq!(
+            a.content_hash, b.content_hash,
+            "same source must produce same hash"
+        );
     }
 
     #[test]

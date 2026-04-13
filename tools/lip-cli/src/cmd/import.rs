@@ -269,13 +269,35 @@ fn looks_like_signature(s: &str) -> bool {
     // Common declaration-keyword prefixes across Rust, TypeScript, Python,
     // Java, Go, Dart, and Kotlin.
     const SIG_PREFIXES: &[&str] = &[
-        "pub ", "fn ", "async fn ", "pub fn ", "pub async fn ",
-        "def ", "class ", "interface ", "type ", "export ",
-        "func ", "abstract ", "struct ", "enum ", "const ", "var ",
-        "let ", "static ", "final ", "override ", "object ",
-        "impl ", "trait ", "module ", "namespace ",
+        "pub ",
+        "fn ",
+        "async fn ",
+        "pub fn ",
+        "pub async fn ",
+        "def ",
+        "class ",
+        "interface ",
+        "type ",
+        "export ",
+        "func ",
+        "abstract ",
+        "struct ",
+        "enum ",
+        "const ",
+        "var ",
+        "let ",
+        "static ",
+        "final ",
+        "override ",
+        "object ",
+        "impl ",
+        "trait ",
+        "module ",
+        "namespace ",
     ];
-    SIG_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
+    SIG_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn convert_occurrence(occ: &scip::Occurrence) -> Option<OwnedOccurrence> {
@@ -484,9 +506,7 @@ mod tests {
             "doc[0] should become the signature"
         );
         assert!(
-            doc.as_deref()
-                .unwrap_or("")
-                .contains("Verify a JWT token"),
+            doc.as_deref().unwrap_or("").contains("Verify a JWT token"),
             "remaining entries should become the documentation"
         );
     }
@@ -499,15 +519,17 @@ mod tests {
         assert!(doc.is_none(), "no doc comment expected");
 
         // A single prose entry → documentation, not signature.
-        let (sig2, doc2) =
-            scip_extract_sig_and_doc(&["A useful helper function.".to_owned()]);
+        let (sig2, doc2) = scip_extract_sig_and_doc(&["A useful helper function.".to_owned()]);
         assert!(sig2.is_none(), "prose should not become a signature");
         assert_eq!(doc2.as_deref(), Some("A useful helper function."));
 
         // TypeScript export keyword is recognised.
         let (sig3, _) =
             scip_extract_sig_and_doc(&["export function greet(name: string): void".to_owned()]);
-        assert!(sig3.is_some(), "export keyword should be recognised as signature");
+        assert!(
+            sig3.is_some(),
+            "export keyword should be recognised as signature"
+        );
 
         // Empty slice → both None.
         let (sig4, doc4) = scip_extract_sig_and_doc(&[]);

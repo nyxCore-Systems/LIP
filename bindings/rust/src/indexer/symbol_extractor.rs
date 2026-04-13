@@ -404,7 +404,9 @@ impl<'a> SymbolExtractor<'a> {
         //   - Classes use `class_definition` (not `class_declaration`), field "name" works.
         //   - `mixin_declaration` exists but its identifier child has no named field.
         let push = |name: &str, kind: SymbolKind, out: &mut Vec<OwnedSymbolInfo>| {
-            if name.is_empty() { return; }
+            if name.is_empty() {
+                return;
+            }
             out.push(OwnedSymbolInfo {
                 uri: self.lip_uri(name),
                 display_name: name.to_owned(),
@@ -441,8 +443,10 @@ impl<'a> SymbolExtractor<'a> {
                     .unwrap_or_default();
                 push(&name, SymbolKind::Class, out);
             }
-            "method_declaration" | "constructor_declaration"
-            | "getter_signature" | "setter_signature" => {
+            "method_declaration"
+            | "constructor_declaration"
+            | "getter_signature"
+            | "setter_signature" => {
                 let kind = if node.kind() == "constructor_declaration" {
                     SymbolKind::Constructor
                 } else {

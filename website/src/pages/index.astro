@@ -208,34 +208,38 @@ import Layout from '../layouts/Layout.astro';
           </div>
         </div>
 
-        <!-- terminal -->
-        <div class="terminal">
-          <div class="terminal-bar">
-            <span class="tdot tdot-red"></span>
-            <span class="tdot tdot-yellow"></span>
-            <span class="tdot tdot-green"></span>
-            <span class="terminal-title">lip — bash</span>
-          </div>
-          <div class="terminal-body">
-            <p class="tline"><span class="tprompt">$</span> <span class="tcmd">lip daemon --socket /tmp/lip.sock</span></p>
-            <p class="tline tout">LIP daemon v1.3.0 — listening on /tmp/lip.sock</p>
-            <p class="tline tout">Watching ./src  <span class="tdim">3,847 files · Tier 1 warm</span></p>
-            <p class="tline tgap"><span class="tprompt">$</span> <span class="tcmd">lip query blast-radius \</span></p>
-            <p class="tline"><span class="tindent"></span><span class="tcmd">"lip://local/src/auth.rs#AuthService"</span></p>
-            <p class="tline tgap tout">{</p>
-            <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"risk"</span>: <span class="tstr">"high"</span>,</p>
-            <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"direct"</span>: <span class="tnum">12</span>,</p>
-            <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"transitive"</span>: <span class="tnum">847</span>,</p>
-            <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"depth"</span>: <span class="tnum">4</span>,</p>
-            <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"confidence"</span>: <span class="tnum">90</span></p>
-            <p class="tline tout">}</p>
-            <p class="tline tgap"><span class="tprompt">$</span> <span class="tcursor">█</span></p>
-          </div>
-        </div>
-
       </div>
     </div>
   </section>
+
+  <!-- ───────── TERMINAL DEMO ───────── -->
+  <div class="terminal-section">
+    <div class="container">
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="tdot tdot-red"></span>
+          <span class="tdot tdot-yellow"></span>
+          <span class="tdot tdot-green"></span>
+          <span class="terminal-title">lip — bash</span>
+        </div>
+        <div class="terminal-body">
+          <p class="tline"><span class="tprompt">$</span> <span class="tcmd">lip daemon --socket /tmp/lip.sock</span></p>
+          <p class="tline tout">LIP daemon v1.3.0 — listening on /tmp/lip.sock</p>
+          <p class="tline tout">Watching ./src  <span class="tdim">3,847 files · Tier 1 warm</span></p>
+          <p class="tline tgap"><span class="tprompt">$</span> <span class="tcmd">lip query blast-radius \</span></p>
+          <p class="tline"><span class="tindent"></span><span class="tcmd">"lip://local/src/auth.rs#AuthService"</span></p>
+          <p class="tline tgap tout">{</p>
+          <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"risk"</span>: <span class="tstr">"high"</span>,</p>
+          <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"direct"</span>: <span class="tnum">12</span>,</p>
+          <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"transitive"</span>: <span class="tnum">847</span>,</p>
+          <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"depth"</span>: <span class="tnum">4</span>,</p>
+          <p class="tline tout">&nbsp;&nbsp;<span class="tkey">"confidence"</span>: <span class="tnum">90</span></p>
+          <p class="tline tout">}</p>
+          <p class="tline tgap"><span class="tprompt">$</span> <span class="tcursor">█</span></p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- ───────── THE MISSING LAYER ───────── -->
   <section class="layer-section" id="protocol">
@@ -1039,11 +1043,8 @@ import Layout from '../layouts/Layout.astro';
   .hero-panels {
     position: relative;
     z-index: 2;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    align-items: start;
-    gap: 20px;
-    margin-top: 48px;
+    max-width: 900px;
+    margin: 48px auto 0;
     animation: fade-up 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;
   }
   .badge {
@@ -1529,6 +1530,15 @@ import Layout from '../layouts/Layout.astro';
     display: inline-block;
     color: var(--accent);
     animation: blink 1s step-end infinite;
+  }
+
+  /* ── TERMINAL SECTION ── */
+  .terminal-section {
+    padding: 32px 0 64px;
+  }
+  .terminal-section .terminal {
+    max-width: 900px;
+    margin: 0 auto;
   }
 
   /* ── LAYER SECTION ── */
@@ -2217,9 +2227,6 @@ import Layout from '../layouts/Layout.astro';
 
   /* ── RESPONSIVE ── */
   @media (max-width: 900px) {
-    .hero-panels {
-      grid-template-columns: 1fr;
-    }
     .hero-stat-strip {
       flex-wrap: wrap;
     }

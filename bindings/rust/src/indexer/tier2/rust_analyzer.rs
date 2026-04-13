@@ -428,7 +428,9 @@ impl RustAnalyzerBackend {
                 .last()
                 .filter(|n| {
                     !n.is_empty()
-                        && n.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                        && n.chars()
+                            .next()
+                            .map_or(false, |c| c.is_alphabetic() || c == '_')
                         && *n != "let"
                         && *n != "mut"
                         && *n != "ref"
@@ -539,7 +541,10 @@ mod tests {
     #[test]
     fn extract_code_block_with_lang_tag() {
         let md = "```rust\npub fn foo(x: i32) -> Bar\n```\nSome docs.";
-        assert_eq!(extract_code_block(md).as_deref(), Some("pub fn foo(x: i32) -> Bar"));
+        assert_eq!(
+            extract_code_block(md).as_deref(),
+            Some("pub fn foo(x: i32) -> Bar")
+        );
     }
 
     #[test]
