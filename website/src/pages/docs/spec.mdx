@@ -9,7 +9,7 @@ import Badge from '../../components/Badge.astro'
 
 # LIP — Linked Incremental Protocol
 
-**Design Document & Specification v1.5** · MIT License
+**Design Document & Specification v2.0.1** · MIT License
 
 ---
 
@@ -117,7 +117,7 @@ LIP is designed around three axioms:
 
 ## 2. Comparison Matrix
 
-| Property | LSP 3.17 | SCIP | **LIP v1.5** |
+| Property | LSP 3.17 | SCIP | **LIP v2.0.1** |
 |---|---|---|---|
 | Wire format | JSON-RPC 2.0 | Protobuf 3 | **FlatBuffers (zero-copy)** |
 | Framing | HTTP Content-Length | n/a (file) | **4-byte length prefix** |
@@ -1105,13 +1105,56 @@ lip-protocol/
 - [x] **`textDocument/typeDefinition` in all 4 Tier 2 backends** — each symbol now carries an `OwnedRelationship { is_type_definition: true }` pointing to the cross-file definition of its type. Enables "which symbols have type `Foo`?" queries on the blast-radius graph.
 - [x] **`textDocument/inlayHints` in rust-analyzer** — local variable bindings (inside function bodies) are now captured as additional `Variable` symbols with their compiler-inferred types. SCIP does not index locals; this is additive coverage unique to LIP.
 
+### v1.6 — Shipped ✓
+
+- [x] **`ReindexFiles { uris }`** — force a targeted re-index of specific file URIs from disk, bypassing directory scan. Returns `DeltaAck`. Not permitted inside `BatchQuery`.
+- [x] **`Similarity { uri_a, uri_b }`** — pairwise cosine similarity of two stored embeddings. Routes `lip://` to symbol embeddings and `file://` to file embeddings. Returns `SimilarityResult { score: Option<f32> }`. Safe inside `BatchQuery`.
+- [x] **`QueryExpansion { query, top_k, model }`** — embed a query string, find the `top_k` nearest symbols, return display names as expansion terms. Not permitted inside `BatchQuery`.
+- [x] **`Cluster { uris, radius }`** — group URIs by embedding proximity using greedy single-link assignment. Returns `ClusterResult { groups }`. Not permitted inside `BatchQuery`.
+- [x] **`ExportEmbeddings { uris }`** — return raw stored embedding vectors as `HashMap<String, Vec<f32>>`. Enables cross-repo federation. Safe inside `BatchQuery`.
+- [x] **`lip slice --pip`** — Python dependency slice support. Indexes packages in the current Python environment.
+- [x] 5 new MCP tools: `lip_reindex_files`, `lip_similarity`, `lip_query_expansion`, `lip_cluster`, `lip_export_embeddings`.
+
+### v1.7 — Semantic retrieval primitives ✓
+
+- [x] **`QueryNearestByContrast`** — vector-arithmetic contrastive search: `normalize(like − unlike)` → nearest neighbours.
+- [x] **`QueryOutliers`** — leave-one-out mean cosine similarity; returns files most semantically displaced from their group.
+- [x] **`QuerySemanticDrift`** — pairwise cosine distance between two stored embeddings. Scalar drift metric.
+- [x] **`SimilarityMatrix`** — all pairwise cosine similarities for a list of URIs in one call.
+- [x] **`FindSemanticCounterpart`** — ranked search over a candidate pool; finds the test file covering a changed implementation even when naming conventions differ.
+- [x] **`QueryCoverage`** — embedding coverage report under a filesystem root, broken down by directory.
+- [x] 6 new MCP tools: `lip_nearest_by_contrast`, `lip_outliers`, `lip_semantic_drift`, `lip_similarity_matrix`, `lip_find_counterpart`, `lip_coverage`.
+
+### v1.8 — Higher-order semantic analysis ✓
+
+- [x] **`FindBoundaries`** — chunk a file into line-windows, embed each, return positions where cosine distance between adjacent windows exceeds a threshold.
+- [x] **`SemanticDiff`** — embeds two content strings, returns drift distance plus nearest files to the direction of change (`moving_toward`).
+- [x] **`QueryNearestInStore`** — nearest-neighbour search against a caller-provided embedding store. Enables cross-repo federation.
+- [x] **`QueryNoveltyScore`** — per-file `1 − nearest_external_similarity` novelty scores.
+- [x] **`ExtractTerminology`** — rank symbol display names by proximity to the centroid of a file set's embeddings.
+- [x] **`PruneDeleted`** — remove index entries for files no longer on disk. Prevents ghost embeddings from polluting search results.
+- [x] 6 new MCP tools: `lip_find_boundaries`, `lip_semantic_diff`, `lip_nearest_in_store`, `lip_novelty_score`, `lip_extract_terminology`, `lip_prune_deleted`.
+
+### v1.9 — Connective tissue layer ✓
+
+- [x] **`filter: Option<String>`** on all nearest-neighbour search calls — glob pattern restricts the candidate set before scoring.
+- [x] **`min_score: Option<f32>`** on the same calls — quality gate that drops results below a cosine-similarity threshold.
+- [x] **`GetCentroid { uris }`** — compute and return the embedding centroid of a file set server-side. Safe inside `BatchQuery`.
+- [x] **`QueryStaleEmbeddings { root }`** — report files whose stored embedding is older than their current mtime. Not permitted inside `BatchQuery`.
+- [x] 2 new MCP tools (`lip_get_centroid`, `lip_stale_embeddings`) + `filter`/`min_score` params on 5 existing tools.
+
+### v2.0 — Semantic explainability + model provenance ✓
+
+- [x] **`ExplainMatch { query, result_uri, top_k, chunk_lines, model }`** — explain *why* a result file ranked as a strong match. Chunks `result_uri`'s source into line-windows, batch-embeds each, and cosine-scores against the query embedding. Returns `ExplainMatchResult { chunks: Vec<ExplanationChunk>, query_model }`. Not permitted inside `BatchQuery`. New MCP tool: `lip_explain_match`.
+- [x] **Model provenance** — every embedding now records the model name that produced it. `QueryFileStatus` returns `embedding_model: Option<String>`. `QueryIndexStatus` returns `mixed_models: bool` and `models_in_index: Vec<String>` with a `⚠ MIXED MODELS` warning when cosine scores are unreliable across a model upgrade boundary.
+
 ### v1.2 — In progress
 
 - [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
 - [ ] Shared-memory mmap path for zero-copy symbol reads (spec §7.1)
 - [ ] Merkle sync protocol — incremental repo-state reconciliation on daemon connect
 - [x] Tier 2 upgrades to score 90 (was 70) — shipped in v1.4
-- [ ] `lip slice --pip` — Python dependency slices
+- [x] `lip slice --pip` — Python dependency slices (shipped v1.6)
 
 ### v1.3 — Intelligence extensions
 
@@ -1120,7 +1163,7 @@ lip-protocol/
 - [ ] Runtime telemetry overlay (OpenTelemetry integration)
 - [ ] Annotation sync to team registry cache
 
-### v2.0 — Multi-language ecosystem
+### v2.x — Multi-language ecosystem
 
 - [ ] TypeScript and Go bindings (generated from `lip.fbs`)
 - [ ] Frozen schema (backward compat guaranteed within major version)
@@ -1217,5 +1260,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v1.5 · April 2026 · MIT License*
+*LIP Specification v2.0.1 · April 2026 · MIT License*
 *Lisa Welsch*

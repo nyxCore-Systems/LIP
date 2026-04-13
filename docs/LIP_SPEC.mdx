@@ -1100,6 +1100,25 @@ lip-protocol/
 - [x] **`textDocument/typeDefinition` in all 4 Tier 2 backends** — each symbol now carries an `OwnedRelationship { is_type_definition: true }` pointing to the cross-file definition of its type. Enables "which symbols have type `Foo`?" queries on the blast-radius graph.
 - [x] **`textDocument/inlayHints` in rust-analyzer** — local variable bindings (inside function bodies) are now captured as additional `Variable` symbols with their compiler-inferred types. SCIP does not index locals; this is additive coverage unique to LIP.
 
+### v1.5 — Shipped ✓
+
+- [x] **`BatchQueryNearestByText`** — embed N query strings in a single round-trip and return one nearest-neighbour list per query. Replaces N sequential `QueryNearestByText` calls in multi-query workflows.
+- [x] **`QueryNearestBySymbol`** — find symbols similar to a given symbol URI. The daemon embeds the symbol's text (display_name + signature + doc) on demand and searches the symbol embedding store. `EmbeddingBatch` now routes `lip://` URIs to `symbol_embeddings` and `file://` URIs to `file_embeddings`.
+- [x] **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Replaces N sequential `AnnotationGet` calls; safe inside `BatchQuery`.
+- [x] **`IndexChanged` push notification** — emitted to all active sessions after every `Delta::Upsert` via the broadcast channel. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- [x] **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between daemon and client is now detectable at connect time.
+- [x] **`--managed` flag** (`lip daemon start --managed`) — spawns a background watchdog that polls the parent process every 2 s and exits when the parent has exited. Designed for IDE integrations that manage the daemon as a subprocess.
+
+### v1.6 — Shipped ✓
+
+- [x] **`ReindexFiles { uris }`** — force a targeted re-index of specific file URIs from disk, bypassing directory scan. Useful when the client knows exactly which files changed out-of-band. Returns `DeltaAck`. Not permitted inside `BatchQuery`.
+- [x] **`Similarity { uri_a, uri_b }`** — pairwise cosine similarity of two stored embeddings. Routes `lip://` URIs to symbol embeddings and `file://` URIs to file embeddings. Returns `SimilarityResult { score: Option<f32> }`. Safe inside `BatchQuery`.
+- [x] **`QueryExpansion { query, top_k, model }`** — embed a query string, find the `top_k` nearest symbols in the symbol store, return their display names as expansion terms. Designed for compound-search paths: expand a short query before running `QueryWorkspaceSymbols`. Not permitted inside `BatchQuery`.
+- [x] **`Cluster { uris, radius }`** — group URIs by embedding proximity using greedy single-link assignment. Returns `ClusterResult { groups }`. Not permitted inside `BatchQuery`.
+- [x] **`ExportEmbeddings { uris }`** — return raw stored embedding vectors for a set of URIs as `HashMap<String, Vec<f32>>`. Enables cross-repo federation: export from each root, merge, query with `QueryNearestInStore`. Safe inside `BatchQuery`.
+- [x] **`lip slice --pip`** — Python dependency slice support. Indexes packages installed in the current Python environment.
+- [x] 5 new MCP tools: `lip_reindex_files`, `lip_similarity`, `lip_query_expansion`, `lip_cluster`, `lip_export_embeddings`.
+
 ### v1.7 — Semantic retrieval primitives ✓
 
 - [x] **`QueryNearestByContrast`** — vector-arithmetic contrastive search: `normalize(like − unlike)` → nearest neighbours. Enables "similar to X but different from Y" queries.
@@ -1141,7 +1160,7 @@ lip-protocol/
 - [ ] Shared-memory mmap path for zero-copy symbol reads (spec §7.1)
 - [ ] Merkle sync protocol — incremental repo-state reconciliation on daemon connect
 - [x] Tier 2 upgrades to score 90 (was 70) — shipped in v1.4
-- [ ] `lip slice --pip` — Python dependency slices
+- [x] `lip slice --pip` — Python dependency slices (shipped v1.6)
 
 ### v1.3 — Intelligence extensions
 
@@ -1247,5 +1266,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v1.5 · April 2026 · MIT License*
+*LIP Specification v2.0.1 · April 2026 · MIT License*
 *Lisa Welsch*
