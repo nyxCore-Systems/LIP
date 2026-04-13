@@ -1,14 +1,17 @@
 [package]
-name        = "lip-core"
-version.workspace   = true
-edition.workspace   = true
-authors.workspace   = true
-license.workspace   = true
-repository.workspace = true
-homepage.workspace  = true
-description = "LIP — Linked Incremental Protocol: persistent live code intelligence graph"
-keywords    = ["code-intelligence", "lsp", "tree-sitter", "incremental", "mcp"]
-categories  = ["development-tools", "parser-implementations"]
+name          = "lip-core"
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+description   = "LIP — persistent, incremental code intelligence graph. WAL-backed daemon, blast-radius indexing, MCP/LSP protocol, semantic embeddings, and registry slices."
+keywords      = ["code-intelligence", "lsp", "tree-sitter", "incremental", "mcp"]
+categories    = ["development-tools", "parser-implementations"]
+readme        = "README.md"
 
 [dependencies]
 # Tree-sitter (Tier 1 indexer)

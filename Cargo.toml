@@ -7,9 +7,11 @@ members  = [
 ]
 
 [workspace.package]
-version    = "2.0.0"
-edition    = "2021"
-authors    = ["Lisa Welsch <lisa@tastehub.io>"]
-license    = "MIT"
-repository = "https://github.com/nyxCore-Systems/LIP"
-homepage   = "https://lisawelsch.com"
+version       = "2.0.1"
+edition       = "2021"
+rust-version  = "1.78"
+authors       = ["Lisa Welsch <lisa@nyxcore.cloud>"]
+license       = "MIT"
+repository    = "https://github.com/nyxCore-Systems/LIP"
+homepage      = "https://lip-sigma.vercel.app"
+documentation = "https://lip-sigma.vercel.app/docs"
