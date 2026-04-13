@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.6.0] — 2026-04-13
+
+### Added
+
+- **`ReindexFiles { uris }`** — force a targeted re-index of specific file URIs from disk, bypassing the directory scan. The daemon reads each file, detects its language from the URI, and calls `upsert_file`. Useful when the client knows exactly which files changed out-of-band (selective git checkout, build artifact regeneration). Returns `DeltaAck`. Not permitted inside `BatchQuery`.
+- **`Similarity { uri_a, uri_b }`** — pairwise cosine similarity of two stored embeddings. Returns `SimilarityResult { score: Option<f32> }` — `None` when either URI has no cached embedding. Routes `lip://` URIs to the symbol embedding store and `file://` URIs to the file embedding store. Safe inside `BatchQuery`.
+- **`QueryExpansion { query, top_k, model }`** — embed `query`, find the `top_k` nearest symbols in the symbol embedding store, and return their display names as expansion terms. Designed for CKB's compound-search path: expand a short query string into related symbol names before running `QueryWorkspaceSymbols`. Requires `LIP_EMBEDDING_URL`. Returns `QueryExpansionResult { terms }`. Not permitted inside `BatchQuery` (requires async HTTP).
+- **`Cluster { uris, radius }`** — group `uris` by embedding proximity within a cosine-similarity radius. Uses greedy single-link assignment: each URI is placed in the first existing group containing a member with similarity ≥ `radius`, or starts a new group. URIs without a cached embedding are silently excluded. Returns `ClusterResult { groups }`. Not permitted inside `BatchQuery` (requires a coupling pass over embeddings that may trigger HTTP for missing vectors).
+- **`ExportEmbeddings { uris }`** — return the raw stored embedding vectors for `uris` as `ExportEmbeddingsResult { embeddings: HashMap<String, Vec<f32>> }`. URIs with no cached vector are omitted. Routes `lip://` / `file://` by prefix. Safe inside `BatchQuery`.
+
+---
+
 ## [1.5.0] — 2026-04-13
 
 ### Added

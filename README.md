@@ -199,6 +199,11 @@ lip push  slice.json    --registry https://registry.lip.dev
 | `lip_nearest_by_text` | Top-K files most similar to a free-text query |
 | `lip_index_status` | Daemon health: indexed count, embedding coverage, last update |
 | `lip_file_status` | Per-file: indexed, has embedding, age |
+| `lip_reindex_files` | Force re-index of specific file URIs from disk |
+| `lip_similarity` | Pairwise cosine similarity of two stored embeddings |
+| `lip_query_expansion` | Expand a query string into related symbol names via nearest-neighbour |
+| `lip_cluster` | Group URIs by embedding proximity within a given radius |
+| `lip_export_embeddings` | Return raw embedding vectors for external pipelines |
 
 **Recommended agent workflow before modifying code:**
 1. `lip_workspace_symbols` — find URIs for all symbols you plan to touch
@@ -340,7 +345,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.5 — Batch APIs (`BatchQueryNearestByText`, `BatchAnnotationGet`), symbol-level semantic search (`QueryNearestBySymbol`), `IndexChanged` push notifications, `Handshake` protocol version negotiation, `--managed` subprocess lifecycle. Wire format is JSON; FlatBuffers IPC is planned for v1.2 (see roadmap).
+v1.6 — CKB integration layer: `ReindexFiles` (targeted re-index from disk), `Similarity` (pairwise cosine), `QueryExpansion` (embed query → nearest symbol names), `Cluster` (group URIs by embedding proximity), `ExportEmbeddings` (raw vectors for external pipelines). Wire format is JSON; FlatBuffers IPC is planned for v2.0 (see roadmap).
 
 ---
 

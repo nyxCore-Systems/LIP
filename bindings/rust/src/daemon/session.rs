@@ -733,6 +733,173 @@ impl Session {
                     protocol_version: PROTOCOL_VERSION,
                 }
             }
+
+            // ── CKB v1.6: ReindexFiles ────────────────────────────────────
+            ClientMessage::ReindexFiles { uris } => {
+                let mut count = 0usize;
+                for uri in &uris {
+                    let Some(path) = uri_to_path(uri) else {
+                        continue;
+                    };
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        warn!("ReindexFiles: could not read {}", path.display());
+                        continue;
+                    };
+                    let lang = {
+                        use crate::indexer::language::Language;
+                        Language::detect(uri, "").as_str().to_owned()
+                    };
+                    let mut db = self.db.lock().await;
+                    db.upsert_file(uri.clone(), text, lang);
+                    count += 1;
+                }
+                debug!("ReindexFiles: re-indexed {count}/{} files", uris.len());
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
+            }
+
+            // ── CKB v1.6: Similarity ──────────────────────────────────────
+            ClientMessage::Similarity { uri_a, uri_b } => {
+                let db = self.db.lock().await;
+                let va = if uri_a.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri_a).cloned()
+                } else {
+                    db.get_file_embedding(&uri_a).cloned()
+                };
+                let vb = if uri_b.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri_b).cloned()
+                } else {
+                    db.get_file_embedding(&uri_b).cloned()
+                };
+                let score = match (va, vb) {
+                    (Some(a), Some(b)) if a.len() == b.len() => {
+                        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if na > 0.0 && nb > 0.0 {
+                            Some(dot / (na * nb))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                ServerMessage::SimilarityResult { score }
+            }
+
+            // ── CKB v1.6: QueryExpansion ──────────────────────────────────
+            ClientMessage::QueryExpansion {
+                query,
+                top_k,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let (mut vecs, _) =
+                    match client.embed_texts(&[query], model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ServerMessage::Error {
+                                message: format!("embedding failed: {e}"),
+                            }
+                        }
+                    };
+                let query_vec = vecs.pop().unwrap_or_default();
+                let mut db = self.db.lock().await;
+                let hits = db.nearest_symbol_by_vector(&query_vec, top_k, None);
+                // Resolve display names; fall back to URI fragment.
+                let mut terms = Vec::with_capacity(hits.len());
+                for item in hits {
+                    let name = match db.symbol_by_uri(&item.uri) {
+                        Some(s) => s.display_name.clone(),
+                        None => item
+                            .uri
+                            .rfind('#')
+                            .map(|i| item.uri[i + 1..].to_owned())
+                            .unwrap_or(item.uri.clone()),
+                    };
+                    terms.push(name);
+                }
+                ServerMessage::QueryExpansionResult { terms }
+            }
+
+            // ── CKB v1.6: Cluster ─────────────────────────────────────────
+            ClientMessage::Cluster { uris, radius } => {
+                let db = self.db.lock().await;
+                // Collect (uri, vector) pairs, skipping any without an embedding.
+                let pairs: Vec<(String, Vec<f32>)> = uris
+                    .iter()
+                    .filter_map(|uri| {
+                        let v = if uri.starts_with("lip://") {
+                            db.get_symbol_embedding(uri)
+                        } else {
+                            db.get_file_embedding(uri)
+                        };
+                        v.map(|vec| (uri.clone(), vec.clone()))
+                    })
+                    .collect();
+
+                // Single-link greedy clustering: assign each URI to the first
+                // existing group that has a member within `radius`, else new group.
+                let mut groups: Vec<Vec<String>> = vec![];
+                let mut group_vecs: Vec<Vec<Vec<f32>>> = vec![];
+
+                for (uri, vec) in pairs {
+                    let mut placed = false;
+                    'groups: for (gi, members_vecs) in group_vecs.iter().enumerate() {
+                        for mv in members_vecs {
+                            if mv.len() != vec.len() {
+                                continue;
+                            }
+                            let dot: f32 =
+                                vec.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+                            let na: f32 =
+                                vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let nb: f32 =
+                                mv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let sim = if na > 0.0 && nb > 0.0 {
+                                dot / (na * nb)
+                            } else {
+                                0.0
+                            };
+                            if sim >= radius {
+                                groups[gi].push(uri.clone());
+                                group_vecs[gi].push(vec.clone());
+                                placed = true;
+                                break 'groups;
+                            }
+                        }
+                    }
+                    if !placed {
+                        groups.push(vec![uri.clone()]);
+                        group_vecs.push(vec![vec]);
+                    }
+                }
+                ServerMessage::ClusterResult { groups }
+            }
+
+            // ── CKB v1.6: ExportEmbeddings ────────────────────────────────
+            ClientMessage::ExportEmbeddings { uris } => {
+                let db = self.db.lock().await;
+                let embeddings = uris
+                    .iter()
+                    .filter_map(|uri| {
+                        let v = if uri.starts_with("lip://") {
+                            db.get_symbol_embedding(uri)
+                        } else {
+                            db.get_file_embedding(uri)
+                        };
+                        v.map(|vec| (uri.clone(), vec.clone()))
+                    })
+                    .collect();
+                ServerMessage::ExportEmbeddingsResult { embeddings }
+            }
         }
     }
 }
@@ -948,6 +1115,61 @@ fn process_query_sync(
         }
         ClientMessage::QueryNearestBySymbol { .. } => {
             err("QueryNearestBySymbol requires async HTTP; not permitted in BatchQuery")
+        }
+
+        // ── CKB v1.6 variants ─────────────────────────────────────────────
+
+        // ReindexFiles requires filesystem I/O — not permitted in sync batch context.
+        ClientMessage::ReindexFiles { .. } => {
+            err("ReindexFiles is not permitted inside a BatchQuery")
+        }
+
+        // Similarity is a pure read — safe inside a batch.
+        ClientMessage::Similarity { uri_a, uri_b } => {
+            let va = if uri_a.starts_with("lip://") {
+                db.get_symbol_embedding(&uri_a).cloned()
+            } else {
+                db.get_file_embedding(&uri_a).cloned()
+            };
+            let vb = if uri_b.starts_with("lip://") {
+                db.get_symbol_embedding(&uri_b).cloned()
+            } else {
+                db.get_file_embedding(&uri_b).cloned()
+            };
+            let score = match (va, vb) {
+                (Some(a), Some(b)) if a.len() == b.len() => {
+                    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if na > 0.0 && nb > 0.0 { Some(dot / (na * nb)) } else { None }
+                }
+                _ => None,
+            };
+            ok(ServerMessage::SimilarityResult { score })
+        }
+
+        // QueryExpansion and Cluster require async HTTP embedding calls.
+        ClientMessage::QueryExpansion { .. } => {
+            err("QueryExpansion requires async HTTP; not permitted in BatchQuery")
+        }
+        ClientMessage::Cluster { .. } => {
+            err("Cluster requires async HTTP; not permitted in BatchQuery")
+        }
+
+        // ExportEmbeddings is a pure read — safe inside a batch.
+        ClientMessage::ExportEmbeddings { uris } => {
+            let embeddings = uris
+                .iter()
+                .filter_map(|uri| {
+                    let v = if uri.starts_with("lip://") {
+                        db.get_symbol_embedding(uri)
+                    } else {
+                        db.get_file_embedding(uri)
+                    };
+                    v.map(|vec| (uri.clone(), vec.clone()))
+                })
+                .collect();
+            ok(ServerMessage::ExportEmbeddingsResult { embeddings })
         }
     }
 }
