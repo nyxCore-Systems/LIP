@@ -625,6 +625,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1068,11 +1074,12 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lip"
-version = "1.6.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "criterion",
  "dashmap",
+ "glob",
  "hex",
  "libc",
  "memmap2",
@@ -1104,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "lip-cli"
-version = "1.6.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1123,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "lip-registry"
-version = "1.6.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "axum",

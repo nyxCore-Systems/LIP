@@ -4,11 +4,21 @@ All notable changes to this project are documented here.
 
 ---
 
-## [Unreleased] — v1.7 / v1.8 semantic intelligence layer
+## [1.9.0] — 2026-04-13
 
 ### Added
 
-**v1.7 — Semantic retrieval primitives (12 new wire messages)**
+**v1.9 — Search precision + server-side aggregation (4 features)**
+
+- **`filter: Option<String>` on `QueryNearest`, `QueryNearestByText`, `BatchQueryNearestByText`, `QueryNearestByContrast`, `FindSemanticCounterpart`, `QueryNearestInStore`** — restrict candidate URIs with a glob pattern before scoring. Patterns containing `/` are matched against the full path; patterns without are matched against the filename only (e.g. `"internal/auth/**"` or `"*_test.go"`). Implemented via the `glob 0.3` crate in `nearest_by_vector`.
+- **`min_score: Option<f32>` on all search calls above** — quality gate that drops results scoring below the threshold rather than returning low-confidence noise. Clients can fall back cleanly to FTS instead of surfacing the least-bad result.
+- **`GetCentroid { uris: Vec<String> }`** — compute and return the embedding centroid (component-wise mean) of a file set without shipping all raw vectors to the caller. Returns `CentroidResult { vector: Vec<f32>, included: usize }`. Safe inside `BatchQuery`.
+- **`QueryStaleEmbeddings { root: String }`** — report files under `root` whose stored embedding is older than their current filesystem mtime (uses `file_indexed_at` vs `tokio::fs::metadata`). Files with no `indexed_at` record are conservatively reported as stale. Returns `StaleEmbeddingsResult { uris: Vec<String> }`. Not permitted inside `BatchQuery` (requires filesystem I/O).
+- **2 new db methods**: `LipDatabase::centroid()`, `LipDatabase::file_embeddings_in_root()`.
+- **Filter/min_score logic duplicated in `FindSemanticCounterpart` and `QueryNearestInStore`** sync and async paths (those use inline scoring rather than `nearest_by_vector`).
+- **4 new MCP tools**: `lip_nearest` / `lip_nearest_by_text` / `lip_nearest_by_contrast` / `lip_find_counterpart` / `lip_nearest_in_store` gain `filter` + `min_score` optional params; `lip_get_centroid`, `lip_stale_embeddings` are new tools.
+
+**v1.7 — Semantic retrieval primitives (6 new wire messages)**
 
 - **`QueryNearestByContrast { like_uri, unlike_uri, top_k }`** — contrastive nearest-neighbour search using vector arithmetic: computes `normalize(embed(like) − embed(unlike))` then finds the `top_k` files most similar to that direction. Both URIs must have cached embeddings. Returns `NearestResult`. Safe inside `BatchQuery`.
 - **`QueryOutliers { uris, top_k }`** — return the `top_k` files from `uris` that are most semantically dissimilar from the rest of the group. Uses leave-one-out mean cosine similarity: files with the lowest mean similarity to peers are returned first. Returns `OutliersResult { outliers: Vec<NearestItem> }`. Safe inside `BatchQuery`.

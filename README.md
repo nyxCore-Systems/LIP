@@ -222,6 +222,20 @@ lip query export-embeddings file:///src/auth.rs file:///src/session.rs --output 
 | `lip_query_expansion` | Expand a query string into related symbol names via nearest-neighbour |
 | `lip_cluster` | Group URIs by embedding proximity within a given radius |
 | `lip_export_embeddings` | Return raw embedding vectors for external pipelines |
+| `lip_nearest_by_contrast` | Contrastive search: files like A but unlike B (v1.7) |
+| `lip_outliers` | Most semantically misplaced files in a set (v1.7) |
+| `lip_semantic_drift` | Cosine distance scalar between two stored embeddings (v1.7) |
+| `lip_similarity_matrix` | All pairwise cosine similarities for a list of URIs (v1.7) |
+| `lip_find_counterpart` | Rank candidate URIs by similarity to a source file (v1.7) |
+| `lip_coverage` | Embedding coverage by directory under a root path (v1.7) |
+| `lip_find_boundaries` | Detect semantic boundaries within a file by chunk-embedding (v1.8) |
+| `lip_semantic_diff` | Drift distance + direction between two content versions (v1.8) |
+| `lip_nearest_in_store` | Nearest-neighbour search against a caller-provided embedding store (v1.8) |
+| `lip_novelty_score` | Per-file novelty relative to the rest of the codebase (v1.8) |
+| `lip_extract_terminology` | Domain vocabulary most central to a set of files (v1.8) |
+| `lip_prune_deleted` | Remove index entries for files no longer on disk (v1.8) |
+| `lip_get_centroid` | Server-side embedding centroid of a file set (v1.9) |
+| `lip_stale_embeddings` | Files whose embedding is older than their current mtime (v1.9) |
 
 **Recommended agent workflow before modifying code:**
 1. `lip_workspace_symbols` — find URIs for all symbols you plan to touch
@@ -363,7 +377,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.6 — CKB integration layer: `ReindexFiles` (targeted re-index from disk), `Similarity` (pairwise cosine), `QueryExpansion` (embed query → nearest symbol names), `Cluster` (group URIs by embedding proximity), `ExportEmbeddings` (raw vectors for external pipelines). Wire format is JSON; FlatBuffers IPC is planned for v2.0 (see roadmap).
+v1.9 — Connective tissue: `filter` glob + `min_score` threshold on all nearest-neighbour calls, `GetCentroid` (server-side mean embedding, no raw vectors shipped), `QueryStaleEmbeddings` (mtime vs indexed-at freshness probe). v1.8: `FindBoundaries`, `SemanticDiff`, `QueryNearestInStore` (cross-repo federation), `QueryNoveltyScore`, `ExtractTerminology`, `PruneDeleted`. v1.7: 6 semantic retrieval primitives. v1.6: `ReindexFiles`, `Similarity`, `QueryExpansion`, `Cluster`, `ExportEmbeddings`. Wire format is JSON; FlatBuffers IPC is planned for v2.0 (see roadmap).
 
 ---
 

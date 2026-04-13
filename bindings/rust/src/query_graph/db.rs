@@ -930,15 +930,31 @@ impl LipDatabase {
         query_vec: &[f32],
         top_k: usize,
         exclude_uri: Option<&str>,
+        filter: Option<&str>,
+        min_score: Option<f32>,
     ) -> Vec<crate::query_graph::types::NearestItem> {
         let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if q_norm == 0.0 || top_k == 0 {
             return vec![];
         }
+        let pat = filter.and_then(|f| glob::Pattern::new(f).ok());
+        let threshold = min_score.unwrap_or(f32::NEG_INFINITY);
         let mut scored: Vec<(String, f32)> = self
             .file_embeddings
             .iter()
             .filter(|(uri, _)| exclude_uri.map(|e| e != uri.as_str()).unwrap_or(true))
+            .filter(|(uri, _)| match &pat {
+                None => true,
+                Some(p) => {
+                    let path = uri.strip_prefix("file://").unwrap_or(uri);
+                    if p.as_str().contains('/') {
+                        p.matches(path)
+                    } else {
+                        let fname = path.rsplit('/').next().unwrap_or(path);
+                        p.matches(fname)
+                    }
+                }
+            })
             .filter_map(|(uri, vec)| {
                 if vec.len() != query_vec.len() {
                     return None;
@@ -948,7 +964,11 @@ impl LipDatabase {
                 if v_norm == 0.0 {
                     return None;
                 }
-                Some((uri.clone(), dot / (q_norm * v_norm)))
+                let score = dot / (q_norm * v_norm);
+                if score < threshold {
+                    return None;
+                }
+                Some((uri.clone(), score))
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -956,6 +976,53 @@ impl LipDatabase {
             .into_iter()
             .take(top_k)
             .map(|(uri, score)| crate::query_graph::types::NearestItem { uri, score })
+            .collect()
+    }
+
+    /// Compute the embedding centroid (component-wise mean) of `uris`.
+    ///
+    /// Returns `(vector, included)` where `included` is the number of URIs
+    /// that had a cached embedding.  Returns an empty vector when no URI
+    /// had an embedding.
+    pub fn centroid(&self, uris: &[String]) -> (Vec<f32>, usize) {
+        let vecs: Vec<&Vec<f32>> = uris
+            .iter()
+            .filter_map(|u| self.file_embeddings.get(u))
+            .collect();
+        let n = vecs.len();
+        if n == 0 {
+            return (vec![], 0);
+        }
+        let dim = vecs[0].len();
+        let mut result = vec![0.0f32; dim];
+        for v in &vecs {
+            if v.len() == dim {
+                for (r, x) in result.iter_mut().zip(v.iter()) {
+                    *r += x;
+                }
+            }
+        }
+        let nf = n as f32;
+        for r in result.iter_mut() {
+            *r /= nf;
+        }
+        (result, n)
+    }
+
+    /// Return `(uri, indexed_at_ms)` pairs for all files under `root` that have
+    /// a cached embedding.  Files with no `file_indexed_at` entry get `0`
+    /// (treated as stale by callers).
+    pub fn file_embeddings_in_root(&self, root: &str) -> Vec<(String, i64)> {
+        self.file_embeddings
+            .keys()
+            .filter(|uri| {
+                let path = uri.strip_prefix("file://").unwrap_or(uri);
+                path.starts_with(root)
+            })
+            .map(|uri| {
+                let ts = self.file_indexed_at.get(uri).copied().unwrap_or(0);
+                (uri.clone(), ts)
+            })
             .collect()
     }
 
@@ -1193,9 +1260,7 @@ impl LipDatabase {
                         let dot: f32 = qv.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
                         Some((u.clone(), dot / (q_norm * vn)))
                     })
-                    .max_by(|a, b| {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 Some(NoveltyItem {
                     uri: uri.clone(),
@@ -2915,7 +2980,10 @@ impl Greeter {
         let (mean, items) = db.novelty_scores(&["file:///src/billing.rs".to_owned()]);
         assert_eq!(items.len(), 1);
         // Nearest neighbour is auth_helper (closest at ~0.1 similarity), so novelty ≈ 0.9+.
-        assert!(mean > 0.8, "billing.rs should have high novelty; got {mean}");
+        assert!(
+            mean > 0.8,
+            "billing.rs should have high novelty; got {mean}"
+        );
     }
 
     #[test]
@@ -2925,10 +2993,12 @@ impl Greeter {
         db.set_file_embedding("file:///src/auth2.rs", vec![0.99, 0.01]);
 
         // auth2 is the new file; auth is the existing repo.
-        let (mean, items) =
-            db.novelty_scores(&["file:///src/auth2.rs".to_owned()]);
+        let (mean, items) = db.novelty_scores(&["file:///src/auth2.rs".to_owned()]);
         assert_eq!(items.len(), 1);
-        assert!(mean < 0.1, "auth2.rs is very similar to auth.rs; got {mean}");
+        assert!(
+            mean < 0.1,
+            "auth2.rs is very similar to auth.rs; got {mean}"
+        );
         assert_eq!(
             items[0].nearest_existing.as_deref(),
             Some("file:///src/auth.rs")
@@ -2943,10 +3013,8 @@ impl Greeter {
         db.set_file_embedding("file:///other/c.rs", vec![0.0, 1.0]);
 
         // Both a.rs and b.rs are in the input set; nearest_existing should be c.rs.
-        let (_, items) = db.novelty_scores(&[
-            "file:///src/a.rs".to_owned(),
-            "file:///src/b.rs".to_owned(),
-        ]);
+        let (_, items) =
+            db.novelty_scores(&["file:///src/a.rs".to_owned(), "file:///src/b.rs".to_owned()]);
         for item in &items {
             assert_ne!(
                 item.nearest_existing.as_deref(),
@@ -2959,6 +3027,119 @@ impl Greeter {
                 "should not match within input set"
             );
         }
+    }
+
+    // ── nearest_by_vector filter / min_score ─────────────────────────────
+
+    #[test]
+    fn nearest_by_vector_filter_restricts_by_filename() {
+        let mut db = LipDatabase::new();
+        db.file_embeddings
+            .insert("file:///src/auth.rs".to_owned(), vec![1.0, 0.0]);
+        db.file_embeddings
+            .insert("file:///src/auth_test.go".to_owned(), vec![1.0, 0.0]);
+
+        // Only *_test.go files.
+        let hits = db.nearest_by_vector(&[1.0, 0.0], 10, None, Some("*_test.go"), None);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].uri.ends_with("auth_test.go"));
+    }
+
+    #[test]
+    fn nearest_by_vector_filter_restricts_by_path() {
+        let mut db = LipDatabase::new();
+        db.file_embeddings.insert(
+            "file:///project/internal/auth.rs".to_owned(),
+            vec![1.0, 0.0],
+        );
+        db.file_embeddings
+            .insert("file:///project/cmd/main.rs".to_owned(), vec![1.0, 0.0]);
+
+        // Only files under internal/.
+        let hits = db.nearest_by_vector(&[1.0, 0.0], 10, None, Some("/project/internal/**"), None);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].uri.contains("internal/auth.rs"));
+    }
+
+    #[test]
+    fn nearest_by_vector_min_score_gates_results() {
+        let mut db = LipDatabase::new();
+        // Orthogonal: cosine similarity = 0.0
+        db.file_embeddings
+            .insert("file:///a.rs".to_owned(), vec![1.0, 0.0]);
+        db.file_embeddings
+            .insert("file:///b.rs".to_owned(), vec![0.0, 1.0]);
+
+        // Query along [1,0] — a.rs scores 1.0, b.rs scores 0.0.
+        let hits = db.nearest_by_vector(&[1.0, 0.0], 10, None, None, Some(0.5));
+        assert_eq!(hits.len(), 1, "b.rs should be filtered out");
+        assert_eq!(hits[0].uri, "file:///a.rs");
+    }
+
+    // ── centroid ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn centroid_of_two_files_is_component_wise_mean() {
+        let mut db = LipDatabase::new();
+        let uri_a = "file:///a.rs".to_owned();
+        let uri_b = "file:///b.rs".to_owned();
+        db.file_embeddings.insert(uri_a.clone(), vec![1.0, 0.0]);
+        db.file_embeddings.insert(uri_b.clone(), vec![0.0, 1.0]);
+
+        let (vec, included) = db.centroid(&[uri_a, uri_b]);
+        assert_eq!(included, 2);
+        assert_eq!(vec.len(), 2);
+        assert!((vec[0] - 0.5).abs() < 1e-5, "expected 0.5 got {}", vec[0]);
+        assert!((vec[1] - 0.5).abs() < 1e-5, "expected 0.5 got {}", vec[1]);
+    }
+
+    #[test]
+    fn centroid_empty_input_returns_empty_vector() {
+        let db = LipDatabase::new();
+        let (vec, included) = db.centroid(&[]);
+        assert_eq!(included, 0);
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn centroid_excludes_uris_without_embeddings() {
+        let mut db = LipDatabase::new();
+        let uri_a = "file:///a.rs".to_owned();
+        db.file_embeddings.insert(uri_a.clone(), vec![1.0, 0.0]);
+
+        let (vec, included) = db.centroid(&[uri_a, "file:///no_embed.rs".to_owned()]);
+        assert_eq!(included, 1);
+        assert!((vec[0] - 1.0).abs() < 1e-5);
+    }
+
+    // ── file_embeddings_in_root ───────────────────────────────────────────
+
+    #[test]
+    fn file_embeddings_in_root_filters_by_prefix() {
+        let mut db = LipDatabase::new();
+        let in_root = "file:///project/src/a.rs".to_owned();
+        let out_root = "file:///other/b.rs".to_owned();
+        db.file_embeddings.insert(in_root.clone(), vec![1.0]);
+        db.file_embeddings.insert(out_root, vec![0.0]);
+
+        let results = db.file_embeddings_in_root("/project/src");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, in_root);
+    }
+
+    #[test]
+    fn file_embeddings_in_root_missing_indexed_at_returns_zero() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/auth.rs".to_owned();
+        db.file_embeddings.insert(uri.clone(), vec![1.0]);
+        // No file_indexed_at entry.
+
+        let results = db.file_embeddings_in_root("/project");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1, 0,
+            "no indexed_at should yield ts=0 (conservative stale)"
+        );
     }
 
     // ── coverage_root_prefix_filters_correctly ────────────────────────────

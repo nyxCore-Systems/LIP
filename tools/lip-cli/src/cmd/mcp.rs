@@ -196,16 +196,22 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
         "lip_nearest" => ClientMessage::QueryNearest {
             uri: req_str(args, "uri")?,
             top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+            filter: args["filter"].as_str().map(str::to_owned),
+            min_score: args["min_score"].as_f64().map(|f| f as f32),
         },
         "lip_nearest_by_text" => ClientMessage::QueryNearestByText {
             text: req_str(args, "text")?,
             top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
             model: args["model"].as_str().map(str::to_owned),
+            filter: args["filter"].as_str().map(str::to_owned),
+            min_score: args["min_score"].as_f64().map(|f| f as f32),
         },
         "lip_nearest_by_contrast" => ClientMessage::QueryNearestByContrast {
             like_uri: req_str(args, "like_uri")?,
             unlike_uri: req_str(args, "unlike_uri")?,
             top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+            filter: args["filter"].as_str().map(str::to_owned),
+            min_score: args["min_score"].as_f64().map(|f| f as f32),
         },
         "lip_outliers" => {
             let uris_val = args
@@ -240,6 +246,8 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
                 uri: req_str(args, "uri")?,
                 candidates,
                 top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(5),
+                filter: args["filter"].as_str().map(str::to_owned),
+                min_score: args["min_score"].as_f64().map(|f| f as f32),
             }
         }
         "lip_coverage" => ClientMessage::QueryCoverage {
@@ -247,7 +255,10 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
         },
         "lip_find_boundaries" => ClientMessage::FindBoundaries {
             uri: req_str(args, "uri")?,
-            chunk_lines: args["chunk_lines"].as_u64().map(|n| n as usize).unwrap_or(30),
+            chunk_lines: args["chunk_lines"]
+                .as_u64()
+                .map(|n| n as usize)
+                .unwrap_or(30),
             threshold: args["threshold"].as_f64().map(|f| f as f32).unwrap_or(0.3),
             model: args["model"].as_str().map(str::to_owned),
         },
@@ -268,6 +279,8 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
                 uri: req_str(args, "uri")?,
                 store,
                 top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+                filter: args["filter"].as_str().map(str::to_owned),
+                min_score: args["min_score"].as_f64().map(|f| f as f32),
             }
         }
         "lip_novelty_score" => {
@@ -290,6 +303,17 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             }
         }
         "lip_prune_deleted" => ClientMessage::PruneDeleted,
+        "lip_get_centroid" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::GetCentroid { uris }
+        }
+        "lip_stale_embeddings" => ClientMessage::QueryStaleEmbeddings {
+            root: req_str(args, "root")?,
+        },
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -578,8 +602,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             if removed.is_empty() {
                 format!("checked={checked}  removed=0  index is clean")
             } else {
-                let mut out =
-                    format!("checked={checked}  removed={}:\n", removed.len());
+                let mut out = format!("checked={checked}  removed={}:\n", removed.len());
                 for uri in removed {
                     out.push_str(&format!("  {uri}\n"));
                 }
@@ -661,6 +684,31 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 }
             }
             out
+        }
+        ServerMessage::CentroidResult { vector, included } => {
+            if vector.is_empty() {
+                "No embeddings found for the given URIs — call lip_embedding_batch first.".into()
+            } else {
+                format!(
+                    "centroid computed from {included} file(s)  dim={}  \
+                     first_3=[{:.4}, {:.4}, {:.4}]",
+                    vector.len(),
+                    vector.first().copied().unwrap_or(0.0),
+                    vector.get(1).copied().unwrap_or(0.0),
+                    vector.get(2).copied().unwrap_or(0.0),
+                )
+            }
+        }
+        ServerMessage::StaleEmbeddingsResult { uris } => {
+            if uris.is_empty() {
+                "All embeddings under the given root are fresh.".into()
+            } else {
+                let mut out = format!("{} file(s) have stale embeddings:\n", uris.len());
+                for uri in uris {
+                    out.push_str(&format!("  {uri}\n"));
+                }
+                out.trim_end().to_owned()
+            }
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -968,8 +1016,13 @@ fn tools_manifest() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "uri":    { "type": "string",  "description": "Query file URI" },
-                    "top_k":  { "type": "integer", "default": 10 }
+                    "uri":       { "type": "string",  "description": "Query file URI" },
+                    "top_k":     { "type": "integer", "default": 10 },
+                    "filter":    { "type": "string",  "description": "Glob to restrict candidates \
+                                   (e.g. 'internal/auth/**' or '*_test.go'). \
+                                   Patterns with '/' match the full path; others match the filename." },
+                    "min_score": { "type": "number",  "description": "Minimum cosine similarity \
+                                   threshold [0.0, 1.0]. Results below this score are dropped." }
                 },
                 "required": ["uri"]
             }
@@ -982,9 +1035,11 @@ fn tools_manifest() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "text":   { "type": "string",  "description": "Natural language query" },
-                    "top_k":  { "type": "integer", "default": 10 },
-                    "model":  { "type": "string",  "description": "Override embedding model" }
+                    "text":      { "type": "string",  "description": "Natural language query" },
+                    "top_k":     { "type": "integer", "default": 10 },
+                    "model":     { "type": "string",  "description": "Override embedding model" },
+                    "filter":    { "type": "string",  "description": "See lip_nearest.filter" },
+                    "min_score": { "type": "number",  "description": "See lip_nearest.min_score" }
                 },
                 "required": ["text"]
             }
@@ -1002,7 +1057,9 @@ fn tools_manifest() -> Value {
                 "properties": {
                     "like_uri":   { "type": "string",  "description": "URI to move towards" },
                     "unlike_uri": { "type": "string",  "description": "URI to move away from" },
-                    "top_k":      { "type": "integer", "default": 10 }
+                    "top_k":      { "type": "integer", "default": 10 },
+                    "filter":     { "type": "string",  "description": "See lip_nearest.filter" },
+                    "min_score":  { "type": "number",  "description": "See lip_nearest.min_score" }
                 },
                 "required": ["like_uri", "unlike_uri"]
             }
@@ -1081,7 +1138,9 @@ fn tools_manifest() -> Value {
                         "items": { "type": "string" },
                         "description": "Pool of candidate URIs to rank (e.g. all test files)"
                     },
-                    "top_k": { "type": "integer", "default": 5 }
+                    "top_k":     { "type": "integer", "default": 5 },
+                    "filter":    { "type": "string",  "description": "See lip_nearest.filter" },
+                    "min_score": { "type": "number",  "description": "See lip_nearest.min_score" }
                 },
                 "required": ["uri", "candidates"]
             }
@@ -1155,9 +1214,11 @@ fn tools_manifest() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "uri":   { "type": "string",  "description": "Query file URI (must be embedded locally)" },
-                    "store": { "type": "object",  "description": "External embedding store: map of uri→[f32]" },
-                    "top_k": { "type": "integer", "default": 10 }
+                    "uri":       { "type": "string",  "description": "Query file URI (must be embedded locally)" },
+                    "store":     { "type": "object",  "description": "External embedding store: map of uri→[f32]" },
+                    "top_k":     { "type": "integer", "default": 10 },
+                    "filter":    { "type": "string",  "description": "See lip_nearest.filter" },
+                    "min_score": { "type": "number",  "description": "See lip_nearest.min_score" }
                 },
                 "required": ["uri", "store"]
             }
@@ -1214,6 +1275,45 @@ fn tools_manifest() -> Value {
             }
         },
         {
+            "name": "lip_get_centroid",
+            "description": "Compute and return the embedding centroid (component-wise mean) of \
+                            a set of files without shipping all raw vectors over the socket. \
+                            Use in getArchitecture to characterise a module's semantic meaning, \
+                            for federation (compare module centroids across repos), or as the \
+                            query vector for lip_nearest_in_store. Returns the centroid vector \
+                            and the count of URIs that contributed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File (or symbol) URIs to average."
+                    }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_stale_embeddings",
+            "description": "Report files under `root` whose stored embedding is older than \
+                            their current filesystem mtime. Detects the case where LIP was \
+                            offline during a batch of writes and search results may be stale. \
+                            lip_file_status answers 'is this file indexed'; this answers \
+                            'is the semantic index actually fresh'. Returns a list of URIs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root": {
+                        "type": "string",
+                        "description": "Filesystem path prefix to scope the scan \
+                                       (e.g. \"/project/src\")."
+                    }
+                },
+                "required": ["root"]
+            }
+        },
+        {
             "name": "lip_batch_query",
             "description": "Execute multiple queries in a single round-trip — \
                             one socket connection instead of N. \
@@ -1254,7 +1354,8 @@ fn tools_manifest() -> Value {
                                         "query_coverage",
                                         "query_nearest_in_store",
                                         "query_novelty_score",
-                                        "extract_terminology"
+                                        "extract_terminology",
+                                        "get_centroid"
                                     ]
                                 }
                             },
