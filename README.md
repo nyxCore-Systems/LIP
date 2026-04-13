@@ -172,6 +172,24 @@ lip slice --cargo --push --registry https://registry.lip.dev
 # Fetch / publish slices directly
 lip fetch <sha256-hash> --registry https://registry.lip.dev
 lip push  slice.json    --registry https://registry.lip.dev
+
+# Force re-index specific files from disk (v1.6)
+lip query reindex-files file:///src/auth.rs file:///src/generated/schema.rs
+
+# Pairwise cosine similarity of two stored embeddings (v1.6)
+lip query similarity file:///src/auth.rs file:///src/session.rs
+lip query similarity lip://local/src/auth.rs#verifyToken lip://local/src/session.rs#validateSession
+
+# Expand a query into related symbol names (v1.6, requires LIP_EMBEDDING_URL)
+lip query query-expansion "token validation" --top-k 5
+
+# Group files by embedding proximity (v1.6, requires LIP_EMBEDDING_URL)
+lip query cluster --radius 0.85 \
+  file:///src/auth.rs file:///src/session.rs \
+  file:///src/payments.rs file:///src/invoices.rs
+
+# Export raw embedding vectors for external pipelines (v1.6)
+lip query export-embeddings file:///src/auth.rs file:///src/session.rs --output vectors.json
 ```
 
 ---
@@ -199,6 +217,11 @@ lip push  slice.json    --registry https://registry.lip.dev
 | `lip_nearest_by_text` | Top-K files most similar to a free-text query |
 | `lip_index_status` | Daemon health: indexed count, embedding coverage, last update |
 | `lip_file_status` | Per-file: indexed, has embedding, age |
+| `lip_reindex_files` | Force re-index of specific file URIs from disk |
+| `lip_similarity` | Pairwise cosine similarity of two stored embeddings |
+| `lip_query_expansion` | Expand a query string into related symbol names via nearest-neighbour |
+| `lip_cluster` | Group URIs by embedding proximity within a given radius |
+| `lip_export_embeddings` | Return raw embedding vectors for external pipelines |
 
 **Recommended agent workflow before modifying code:**
 1. `lip_workspace_symbols` — find URIs for all symbols you plan to touch
@@ -340,7 +363,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.5 — Batch APIs (`BatchQueryNearestByText`, `BatchAnnotationGet`), symbol-level semantic search (`QueryNearestBySymbol`), `IndexChanged` push notifications, `Handshake` protocol version negotiation, `--managed` subprocess lifecycle. Wire format is JSON; FlatBuffers IPC is planned for v1.2 (see roadmap).
+v1.6 — CKB integration layer: `ReindexFiles` (targeted re-index from disk), `Similarity` (pairwise cosine), `QueryExpansion` (embed query → nearest symbol names), `Cluster` (group URIs by embedding proximity), `ExportEmbeddings` (raw vectors for external pipelines). Wire format is JSON; FlatBuffers IPC is planned for v2.0 (see roadmap).
 
 ---
 

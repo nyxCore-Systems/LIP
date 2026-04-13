@@ -255,6 +255,31 @@ pub enum ServerMessage {
         /// Monotonic integer bumped only on breaking wire-format changes.
         protocol_version: u32,
     },
+
+    // ── CKB v1.6 features ────────────────────────────────────────────────
+    /// Response to [`ClientMessage::Similarity`].
+    /// `None` when either URI has no cached embedding.
+    SimilarityResult {
+        score: Option<f32>,
+    },
+
+    /// Response to [`ClientMessage::QueryExpansion`].
+    QueryExpansionResult {
+        /// Nearest-symbol display names, ordered by descending similarity.
+        terms: Vec<String>,
+    },
+
+    /// Response to [`ClientMessage::Cluster`].
+    ClusterResult {
+        /// Each inner `Vec` is one cluster; URIs appear in exactly one cluster.
+        groups: Vec<Vec<String>>,
+    },
+
+    /// Response to [`ClientMessage::ExportEmbeddings`].
+    ExportEmbeddingsResult {
+        /// Map of URI → embedding vector. Only URIs with a cached vector are included.
+        embeddings: std::collections::HashMap<String, Vec<f32>>,
+    },
 }
 
 /// Wire envelope for client → daemon messages.
@@ -408,6 +433,48 @@ pub enum ClientMessage {
     Handshake {
         client_version: Option<String>,
     },
+
+    // ── CKB v1.6 features ────────────────────────────────────────────────
+    /// Force a re-index of specific file URIs from disk, bypassing the directory
+    /// scan. Useful when the client knows exactly which files changed out-of-band
+    /// (e.g. after a selective git checkout). Returns `DeltaAck`.
+    ReindexFiles {
+        uris: Vec<String>,
+    },
+
+    /// Pairwise cosine similarity of two stored embeddings.
+    /// Returns `SimilarityResult { score: None }` when either URI has no cached
+    /// embedding — call `EmbeddingBatch` first if needed.
+    Similarity {
+        uri_a: String,
+        uri_b: String,
+    },
+
+    /// Nearest-neighbour query-expansion: embed `query`, find the `top_k` nearest
+    /// symbols, and return their display names as expansion terms.
+    /// Returns `QueryExpansionResult`.
+    QueryExpansion {
+        query: String,
+        top_k: usize,
+        model: Option<String>,
+    },
+
+    /// Group `uris` by embedding proximity within `radius` (cosine distance).
+    /// URIs without a cached embedding are silently excluded.
+    /// Returns `ClusterResult`.
+    Cluster {
+        uris: Vec<String>,
+        /// Cosine-similarity threshold: two URIs are in the same group when their
+        /// pairwise similarity is ≥ `radius`.
+        radius: f32,
+    },
+
+    /// Return the raw stored embedding vectors for `uris`.
+    /// URIs with no cached embedding are omitted from the result map.
+    /// Returns `ExportEmbeddingsResult`.
+    ExportEmbeddings {
+        uris: Vec<String>,
+    },
 }
 
 impl ClientMessage {
@@ -422,6 +489,9 @@ impl ClientMessage {
                 | ClientMessage::EmbeddingBatch { .. }
                 | ClientMessage::BatchQueryNearestByText { .. }
                 | ClientMessage::QueryNearestBySymbol { .. }
+                | ClientMessage::ReindexFiles { .. }
+                | ClientMessage::QueryExpansion { .. }
+                | ClientMessage::Cluster { .. }
         )
     }
 }
@@ -590,5 +660,122 @@ mod tests {
             key: "k".into(),
         };
         assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn reindex_files_round_trips() {
+        let msg = ClientMessage::ReindexFiles {
+            uris: vec!["file:///src/main.rs".into(), "file:///src/lib.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::ReindexFiles { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn reindex_files_not_batchable() {
+        let msg = ClientMessage::ReindexFiles { uris: vec![] };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn similarity_round_trips() {
+        let msg = ClientMessage::Similarity {
+            uri_a: "file:///src/a.rs".into(),
+            uri_b: "file:///src/b.rs".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::Similarity { uri_a, uri_b } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri_a, "file:///src/a.rs");
+        assert_eq!(uri_b, "file:///src/b.rs");
+    }
+
+    #[test]
+    fn similarity_is_batchable() {
+        let msg = ClientMessage::Similarity {
+            uri_a: "file:///a.rs".into(),
+            uri_b: "file:///b.rs".into(),
+        };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn similarity_result_round_trips() {
+        let msg = ServerMessage::SimilarityResult { score: Some(0.85) };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::SimilarityResult { score } = rt else {
+            panic!("wrong variant");
+        };
+        assert!((score.unwrap() - 0.85).abs() < 1e-5);
+    }
+
+    #[test]
+    fn query_expansion_not_batchable() {
+        let msg = ClientMessage::QueryExpansion {
+            query: "auth".into(),
+            top_k: 5,
+            model: None,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn cluster_not_batchable() {
+        let msg = ClientMessage::Cluster {
+            uris: vec![],
+            radius: 0.8,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn export_embeddings_round_trips() {
+        let msg = ClientMessage::ExportEmbeddings {
+            uris: vec!["file:///src/main.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::ExportEmbeddings { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 1);
+    }
+
+    #[test]
+    fn export_embeddings_is_batchable() {
+        let msg = ClientMessage::ExportEmbeddings { uris: vec![] };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn cluster_result_round_trips() {
+        let msg = ServerMessage::ClusterResult {
+            groups: vec![
+                vec!["file:///a.rs".into(), "file:///b.rs".into()],
+                vec!["file:///c.rs".into()],
+            ],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::ClusterResult { groups } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn export_embeddings_result_round_trips() {
+        let mut embeddings = std::collections::HashMap::new();
+        embeddings.insert("file:///a.rs".to_owned(), vec![0.1f32, 0.2, 0.3]);
+        let msg = ServerMessage::ExportEmbeddingsResult { embeddings };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::ExportEmbeddingsResult { embeddings } = rt else {
+            panic!("wrong variant");
+        };
+        assert!(embeddings.contains_key("file:///a.rs"));
+        assert_eq!(embeddings["file:///a.rs"].len(), 3);
     }
 }

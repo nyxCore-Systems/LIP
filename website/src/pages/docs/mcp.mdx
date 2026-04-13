@@ -1,7 +1,7 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: MCP Integration
-description: 19 MCP tools for AI agents — full schema reference, annotation patterns, and agent workflows.
+description: 24 MCP tools for AI agents — full schema reference, annotation patterns, and agent workflows.
 ---
 
 # MCP Integration
@@ -33,6 +33,11 @@ description: 19 MCP tools for AI agents — full schema reference, annotation pa
 | `lip_nearest_by_text` | Top-K files most similar to a free-text query |
 | `lip_index_status` | Daemon health: indexed count, embedding coverage, last update |
 | `lip_file_status` | Per-file indexing status and embedding age |
+| `lip_reindex_files` | Force re-index of specific file URIs from disk |
+| `lip_similarity` | Pairwise cosine similarity of two stored embeddings |
+| `lip_query_expansion` | Expand a query string into related symbol names |
+| `lip_cluster` | Group URIs by embedding proximity within a given radius |
+| `lip_export_embeddings` | Return raw stored vectors for external pipelines |
 
 All tools are backed by the live LIP daemon — results are always current, never a stale snapshot.
 
@@ -328,6 +333,111 @@ file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
 
 ---
 
+## v1.6 embedding integration tools
+
+These tools require `LIP_EMBEDDING_URL` to be set unless otherwise noted.
+
+### lip_reindex_files
+
+Force a re-index of specific file URIs from disk. Does not require embeddings — reads each file, detects its language, and updates the symbol graph.
+
+**Input:**
+```json
+{ "uris": ["file:///src/auth.rs", "file:///src/session.rs"] }
+```
+
+Use this after out-of-band changes that the daemon's file watcher didn't catch (e.g. selective `git checkout` or CI-generated files). Returns `DeltaAck`.
+
+---
+
+### lip_similarity
+
+Pairwise cosine similarity of two stored embeddings.
+
+**Input:**
+```json
+{ "uri_a": "file:///src/auth.rs", "uri_b": "file:///src/session.rs" }
+```
+
+**Output:**
+```
+score=0.9214
+```
+
+Returns `null` when either URI has no cached embedding — call `lip_embedding_batch` first. Accepts both `file://` (file embeddings) and `lip://` (symbol embeddings) URIs. Safe inside `lip_batch_query`.
+
+---
+
+### lip_query_expansion
+
+Embed a short query string and return the display names of the nearest symbols — useful before `lip_workspace_symbols` when the exact symbol name isn't known.
+
+**Input:**
+```json
+{ "query": "token validation", "top_k": 5 }
+```
+
+**Output:**
+```
+verifyToken
+validateSession
+checkJwt
+parseBearer
+refreshToken
+```
+
+Requires symbols to have embeddings in the symbol store (populate with `lip_embedding_batch` using `lip://` URIs).
+
+---
+
+### lip_cluster
+
+Group a list of URIs into clusters based on embedding proximity.
+
+**Input:**
+```json
+{
+  "uris": [
+    "file:///src/auth.rs",
+    "file:///src/session.rs",
+    "file:///src/payments.rs",
+    "file:///src/invoices.rs"
+  ],
+  "radius": 0.85
+}
+```
+
+**Output:**
+```
+Group 1: file:///src/auth.rs  file:///src/session.rs
+Group 2: file:///src/payments.rs  file:///src/invoices.rs
+```
+
+`radius` is the cosine-similarity threshold. Two URIs land in the same group when their similarity is ≥ the radius. URIs without a cached embedding are silently excluded.
+
+---
+
+### lip_export_embeddings
+
+Return the raw stored embedding vectors for a list of URIs. Useful for passing to external re-ranking, custom clustering, or visualization tools.
+
+**Input:**
+```json
+{ "uris": ["file:///src/auth.rs", "file:///src/session.rs"] }
+```
+
+**Output:**
+```json
+{
+  "file:///src/auth.rs":    [0.021, -0.044, 0.117, ...],
+  "file:///src/session.rs": [0.019, -0.051, 0.109, ...]
+}
+```
+
+URIs with no cached embedding are omitted from the result. Safe inside `lip_batch_query`.
+
+---
+
 ## How agents should use LIP
 
 **Planning a multi-symbol refactor (use batch):**
@@ -393,5 +503,8 @@ lip_file_status(target_uri) # confirm specific file is indexed and fresh
 | `findReferences` | `lip_references` | Same semantics |
 | `getCallGraph` | `lip_references` + CPG edges | LIP CPG via Tier 2 |
 | `prepareChange` | `lip_blast_radius` + `lip_annotation_get` | LIP adds annotation check |
+| `batchSearch` | `lip_query_expansion` + `lip_workspace_symbols` | Expand → search replaces compound text scan |
+| `explore` | `lip_cluster` + `lip_nearest_by_text` | Group and navigate by semantic proximity |
+| `recentlyRelevant` | `lip_similarity` + `lip_export_embeddings` | Feed raw vectors into CKB's re-ranking tier |
 
 With LIP as CKB's backend, `analyzeImpact` and `prepareChange` are always current — no more `ckb index` needed.
