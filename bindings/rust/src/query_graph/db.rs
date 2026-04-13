@@ -160,6 +160,10 @@ pub struct LipDatabase {
     /// Cached embedding vectors: file_uri → dense float vector.
     /// Set by the daemon after an `EmbeddingBatch` call; never derived from source.
     file_embeddings: HashMap<String, Vec<f32>>,
+    /// Cached embedding vectors for individual symbols: symbol_uri → dense float vector.
+    /// Keyed by `lip://` URIs. Populated on demand by `QueryNearestBySymbol` or by
+    /// `EmbeddingBatch` when called with `lip://` URIs.
+    symbol_embeddings: HashMap<String, Vec<f32>>,
     /// Unix timestamps (ms) recording when each URI was last upserted.
     file_indexed_at: HashMap<String, i64>,
 }
@@ -184,6 +188,7 @@ impl LipDatabase {
             mounted_packages: HashMap::new(),
             file_consumed_names: HashMap::new(),
             file_embeddings: HashMap::new(),
+            symbol_embeddings: HashMap::new(),
             file_indexed_at: HashMap::new(),
         }
     }
@@ -854,6 +859,53 @@ impl LipDatabase {
     /// Retrieve the stored embedding vector for a file, if any.
     pub fn get_file_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
         self.file_embeddings.get(uri)
+    }
+
+    /// Store a pre-computed embedding vector for a symbol URI (`lip://` scheme).
+    pub fn set_symbol_embedding(&mut self, uri: &str, vector: Vec<f32>) {
+        self.symbol_embeddings.insert(uri.to_owned(), vector);
+    }
+
+    /// Retrieve the stored embedding vector for a symbol URI, if any.
+    pub fn get_symbol_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
+        self.symbol_embeddings.get(uri)
+    }
+
+    /// Find the `top_k` symbols whose embedding is most similar (cosine) to `query_vec`.
+    ///
+    /// Mirrors `nearest_by_vector` but operates over `symbol_embeddings`.
+    pub fn nearest_symbol_by_vector(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_uri: Option<&str>,
+    ) -> Vec<crate::query_graph::types::NearestItem> {
+        let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if q_norm == 0.0 || top_k == 0 {
+            return vec![];
+        }
+        let mut scored: Vec<(String, f32)> = self
+            .symbol_embeddings
+            .iter()
+            .filter(|(uri, _)| exclude_uri.map(|e| e != uri.as_str()).unwrap_or(true))
+            .filter_map(|(uri, vec)| {
+                if vec.len() != query_vec.len() {
+                    return None;
+                }
+                let dot: f32 = query_vec.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
+                let v_norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if v_norm == 0.0 {
+                    return None;
+                }
+                Some((uri.clone(), dot / (q_norm * v_norm)))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(top_k)
+            .map(|(uri, score)| crate::query_graph::types::NearestItem { uri, score })
+            .collect()
     }
 
     /// Number of files that have been indexed but whose embedding is not yet stored.
@@ -2374,5 +2426,60 @@ impl Greeter {
             "removed file must not appear in consumers; got {:?}",
             consumers
         );
+    }
+
+    // ── symbol_embeddings / nearest_symbol_by_vector ──────────────────────
+
+    #[test]
+    fn set_get_symbol_embedding_roundtrip() {
+        let mut db = LipDatabase::new();
+        let uri = "lip://local/src/main.rs#foo";
+        let vec = vec![1.0_f32, 0.0, 0.0];
+        db.set_symbol_embedding(uri, vec.clone());
+        assert_eq!(db.get_symbol_embedding(uri), Some(&vec));
+        assert!(db
+            .get_symbol_embedding("lip://local/src/main.rs#missing")
+            .is_none());
+    }
+
+    #[test]
+    fn nearest_symbol_by_vector_orders_by_cosine() {
+        let mut db = LipDatabase::new();
+        // Three orthogonal unit vectors; query aligns with "foo".
+        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0, 0.0]);
+        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.0, 1.0, 0.0]);
+        db.set_symbol_embedding("lip://local/f.rs#baz", vec![0.0, 0.0, 1.0]);
+
+        let query = vec![1.0_f32, 0.0, 0.0];
+        let results = db.nearest_symbol_by_vector(&query, 3, None);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].uri, "lip://local/f.rs#foo");
+        assert!(
+            (results[0].score - 1.0).abs() < 1e-5,
+            "score should be ~1.0"
+        );
+        assert!(results[1].score < results[0].score);
+    }
+
+    #[test]
+    fn nearest_symbol_by_vector_excludes_self() {
+        let mut db = LipDatabase::new();
+        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0]);
+        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.9, 0.1]);
+
+        let query = vec![1.0_f32, 0.0];
+        let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"));
+        assert!(
+            !results.iter().any(|r| r.uri == "lip://local/f.rs#foo"),
+            "excluded URI must not appear in results"
+        );
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn nearest_symbol_by_vector_empty_store_returns_empty() {
+        let db = LipDatabase::new();
+        let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None);
+        assert!(results.is_empty());
     }
 }

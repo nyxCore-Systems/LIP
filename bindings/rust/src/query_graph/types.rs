@@ -227,9 +227,33 @@ pub enum ServerMessage {
         /// Seconds since the file was last indexed. `None` if never indexed.
         age_seconds: Option<u64>,
     },
-    /// Response to [`ClientMessage::QueryNearest`] and [`ClientMessage::QueryNearestByText`].
+    /// Response to [`ClientMessage::QueryNearest`] and [`ClientMessage::QueryNearestByText`]
+    /// and [`ClientMessage::QueryNearestBySymbol`].
     NearestResult {
         results: Vec<NearestItem>,
+    },
+    /// Response to [`ClientMessage::BatchQueryNearestByText`].
+    /// `results[i]` is the nearest-neighbor list for `queries[i]`.
+    BatchNearestResult {
+        results: Vec<Vec<NearestItem>>,
+    },
+    /// Response to [`ClientMessage::BatchAnnotationGet`].
+    /// Map of symbol_uri → annotation value string (`None` = not found or expired).
+    BatchAnnotationResult {
+        entries: std::collections::HashMap<String, Option<String>>,
+    },
+    /// Push notification: one or more files were upserted into the daemon's index.
+    /// Sent to all active sessions after a successful `Delta::Upsert`.
+    IndexChanged {
+        indexed_files: usize,
+        affected_uris: Vec<String>,
+    },
+    /// Response to [`ClientMessage::Handshake`].
+    HandshakeResult {
+        /// Semver string of the running daemon binary.
+        daemon_version: String,
+        /// Monotonic integer bumped only on breaking wire-format changes.
+        protocol_version: u32,
     },
 }
 
@@ -357,6 +381,33 @@ pub enum ClientMessage {
         top_k: usize,
         model: Option<String>,
     },
+    /// Embed multiple query strings in one round-trip and return the top-k nearest
+    /// files for each. Returns `BatchNearestResult`.
+    BatchQueryNearestByText {
+        queries: Vec<String>,
+        top_k: usize,
+        model: Option<String>,
+    },
+    /// Find the `top_k` symbols whose stored embedding is most similar to the given
+    /// symbol. The daemon embeds the symbol's text on the fly (using display_name +
+    /// signature + doc) and searches the symbol embedding store.
+    /// Returns `NearestResult`.
+    QueryNearestBySymbol {
+        symbol_uri: String,
+        top_k: usize,
+        model: Option<String>,
+    },
+    /// Get annotations for multiple symbol URIs under a single db lock.
+    /// Returns `BatchAnnotationResult`.
+    BatchAnnotationGet {
+        uris: Vec<String>,
+        key: String,
+    },
+    /// Protocol version handshake. Returns `HandshakeResult`.
+    /// Clients should send this immediately on connect to detect version drift.
+    Handshake {
+        client_version: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -369,6 +420,175 @@ impl ClientMessage {
             ClientMessage::Batch { .. }
                 | ClientMessage::LoadSlice { .. }
                 | ClientMessage::EmbeddingBatch { .. }
+                | ClientMessage::BatchQueryNearestByText { .. }
+                | ClientMessage::QueryNearestBySymbol { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip_client(msg: &ClientMessage) -> ClientMessage {
+        let json = serde_json::to_string(msg).expect("serialize");
+        serde_json::from_str(&json).expect("deserialize")
+    }
+
+    fn round_trip_server(msg: &ServerMessage) -> ServerMessage {
+        let json = serde_json::to_string(msg).expect("serialize");
+        serde_json::from_str(&json).expect("deserialize")
+    }
+
+    #[test]
+    fn batch_query_nearest_by_text_round_trips() {
+        let msg = ClientMessage::BatchQueryNearestByText {
+            queries: vec!["verify token".into(), "hash password".into()],
+            top_k: 5,
+            model: None,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::BatchQueryNearestByText { queries, top_k, .. } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(queries.len(), 2);
+        assert_eq!(top_k, 5);
+    }
+
+    #[test]
+    fn query_nearest_by_symbol_round_trips() {
+        let msg = ClientMessage::QueryNearestBySymbol {
+            symbol_uri: "lip://local/src/main.rs#foo".into(),
+            top_k: 3,
+            model: Some("text-embedding-3-small".into()),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryNearestBySymbol {
+            symbol_uri, top_k, ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(symbol_uri, "lip://local/src/main.rs#foo");
+        assert_eq!(top_k, 3);
+    }
+
+    #[test]
+    fn batch_annotation_get_round_trips() {
+        let msg = ClientMessage::BatchAnnotationGet {
+            uris: vec!["lip://local/a.rs#foo".into(), "lip://local/b.rs#bar".into()],
+            key: "team:owner".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::BatchAnnotationGet { uris, key } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+        assert_eq!(key, "team:owner");
+    }
+
+    #[test]
+    fn handshake_round_trips() {
+        let msg = ClientMessage::Handshake {
+            client_version: Some("1.5.0".into()),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::Handshake { client_version } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(client_version.as_deref(), Some("1.5.0"));
+    }
+
+    #[test]
+    fn handshake_result_round_trips() {
+        let msg = ServerMessage::HandshakeResult {
+            daemon_version: "1.5.0".into(),
+            protocol_version: 1,
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::HandshakeResult {
+            daemon_version,
+            protocol_version,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(daemon_version, "1.5.0");
+        assert_eq!(protocol_version, 1);
+    }
+
+    #[test]
+    fn index_changed_round_trips() {
+        let msg = ServerMessage::IndexChanged {
+            indexed_files: 42,
+            affected_uris: vec!["file:///src/main.rs".into()],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::IndexChanged {
+            indexed_files,
+            affected_uris,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(indexed_files, 42);
+        assert_eq!(affected_uris.len(), 1);
+    }
+
+    #[test]
+    fn batch_nearest_result_round_trips() {
+        let msg = ServerMessage::BatchNearestResult {
+            results: vec![
+                vec![NearestItem {
+                    uri: "file:///a.rs".into(),
+                    score: 0.9,
+                }],
+                vec![],
+            ],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::BatchNearestResult { results } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].len(), 1);
+        assert!((results[0][0].score - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn batch_nearest_not_batchable() {
+        let msg = ClientMessage::BatchQueryNearestByText {
+            queries: vec![],
+            top_k: 1,
+            model: None,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn query_nearest_by_symbol_not_batchable() {
+        let msg = ClientMessage::QueryNearestBySymbol {
+            symbol_uri: "lip://x".into(),
+            top_k: 1,
+            model: None,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn handshake_is_batchable() {
+        let msg = ClientMessage::Handshake {
+            client_version: None,
+        };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn batch_annotation_get_is_batchable() {
+        let msg = ClientMessage::BatchAnnotationGet {
+            uris: vec![],
+            key: "k".into(),
+        };
+        assert!(msg.is_batchable());
     }
 }
