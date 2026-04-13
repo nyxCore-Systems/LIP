@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::indexer::tier2::clangd::ClangdBackend;
+use crate::indexer::tier2::gopls::GoplsBackend;
 use crate::indexer::tier2::dart_ls::DartBackend;
 use crate::indexer::tier2::py_ls::PythonBackend;
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
@@ -62,6 +63,9 @@ struct Tier2Backends {
 
     clangd: Option<ClangdBackend>,
     clangd_disabled: bool,
+
+    gopls: Option<GoplsBackend>,
+    gopls_disabled: bool,
 }
 
 impl Tier2Backends {
@@ -78,6 +82,8 @@ impl Tier2Backends {
             dart_disabled: false,
             clangd: None,
             clangd_disabled: false,
+            gopls: None,
+            gopls_disabled: false,
         }
     }
 }
@@ -134,6 +140,8 @@ impl Tier2Manager {
             || job.uri.ends_with(".hxx")
         {
             self.handle_clangd(job).await;
+        } else if job.uri.ends_with(".go") {
+            self.handle_gopls(job).await;
         }
         // Unknown extension — nothing to do; Tier 1 results remain.
     }
@@ -388,6 +396,54 @@ impl Tier2Manager {
             Err(e) => {
                 error!("tier2: clangd verification failed for {}: {e}", job.uri);
                 self.backends.clangd = None;
+            }
+        }
+    }
+
+    // ── Go ────────────────────────────────────────────────────────────────────
+
+    async fn ensure_gopls_backend(&mut self, workspace_root: Option<PathBuf>) {
+        if self.backends.gopls.is_some() || self.backends.gopls_disabled {
+            return;
+        }
+
+        match GoplsBackend::new(workspace_root).await {
+            Ok(b) => {
+                info!("tier2: gopls backend ready");
+                self.backends.gopls = Some(b);
+            }
+            Err(e) => {
+                warn!("tier2: gopls unavailable, disabling: {e}");
+                self.backends.gopls_disabled = true;
+            }
+        }
+    }
+
+    async fn handle_gopls(&mut self, job: VerificationJob) {
+        if self.backends.gopls_disabled {
+            return;
+        }
+
+        self.ensure_gopls_backend(job.workspace_root.clone()).await;
+        if self.backends.gopls_disabled {
+            return;
+        }
+
+        let backend = self.backends.gopls.as_mut().unwrap();
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
+            Ok(result) => {
+                let upgraded = result.symbols.len();
+                let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
+                db.upgrade_file_symbols(&result.uri, &result.symbols);
+                debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
+            }
+            Err(e) => {
+                error!("tier2: gopls verification failed for {}: {e}", job.uri);
+                self.backends.gopls = None;
             }
         }
     }

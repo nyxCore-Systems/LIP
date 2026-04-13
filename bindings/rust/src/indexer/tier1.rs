@@ -145,6 +145,7 @@ mod tests {
         assert!(sym("", Language::Dart).is_empty());
         assert!(sym("", Language::C).is_empty());
         assert!(sym("", Language::Cpp).is_empty());
+        assert!(sym("", Language::Go).is_empty());
     }
 
     #[test]
@@ -596,5 +597,78 @@ mod tests {
     fn empty_source_returns_empty_c_cpp() {
         assert!(sym("", Language::C).is_empty());
         assert!(sym("", Language::Cpp).is_empty());
+    }
+
+    // ── Go ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn go_function_extracted() {
+        let syms = sym("package p\nfunc DoThing() {}", Language::Go);
+        let s = find(&syms, "DoThing");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.confidence_score, 30);
+        assert!(s.is_exported, "uppercase Go function should be exported");
+    }
+
+    #[test]
+    fn go_unexported_function() {
+        let syms = sym("package p\nfunc internal() {}", Language::Go);
+        assert!(
+            !find(&syms, "internal").is_exported,
+            "lowercase Go function should not be exported"
+        );
+    }
+
+    #[test]
+    fn go_struct_extracted() {
+        let syms = sym("package p\ntype Point struct { X, Y int }", Language::Go);
+        assert_eq!(find(&syms, "Point").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn go_interface_extracted() {
+        let syms = sym("package p\ntype Reader interface { Read() }", Language::Go);
+        assert_eq!(find(&syms, "Reader").kind, SymbolKind::Interface);
+    }
+
+    #[test]
+    fn go_type_alias_extracted() {
+        let syms = sym("package p\ntype MyInt int", Language::Go);
+        assert_eq!(find(&syms, "MyInt").kind, SymbolKind::TypeAlias);
+    }
+
+    #[test]
+    fn go_const_extracted() {
+        let syms = sym("package p\nconst MaxSize = 100", Language::Go);
+        let s = find(&syms, "MaxSize");
+        assert_eq!(s.kind, SymbolKind::Variable);
+        assert_eq!(s.confidence_score, 25);
+        assert!(s.is_exported);
+    }
+
+    #[test]
+    fn go_cpg_call_edge() {
+        let src = "package p\nfunc Caller() { Callee() }\nfunc Callee() {}";
+        let es = edges(src, Language::Go);
+        assert!(
+            es.iter()
+                .any(|e| e.from_uri.contains("#Caller") && e.to_uri.contains("#Callee")),
+            "expected Caller→Callee edge, got: {es:?}"
+        );
+    }
+
+    #[test]
+    fn go_method_call_selector() {
+        let src = "package p\nfunc Run() { db.Query() }";
+        let es = edges(src, Language::Go);
+        assert!(
+            es.iter().any(|e| e.to_uri.contains("#Query")),
+            "selector method call should produce an edge"
+        );
+    }
+
+    #[test]
+    fn empty_source_returns_empty_go() {
+        assert!(sym("", Language::Go).is_empty());
     }
 }

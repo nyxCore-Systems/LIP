@@ -53,6 +53,7 @@ impl<'a> SymbolExtractor<'a> {
             Language::Dart => self.dart_calls(node, caller, edges),
             Language::C => self.c_calls(node, caller, edges),
             Language::Cpp => self.cpp_calls(node, caller, edges),
+            Language::Go => self.go_calls(node, caller, edges),
             Language::Unknown => {}
         }
     }
@@ -91,6 +92,7 @@ impl<'a> SymbolExtractor<'a> {
             Language::Dart => self.dart_symbols(node, out),
             Language::C => self.c_symbols(node, out),
             Language::Cpp => self.cpp_symbols(node, out),
+            Language::Go => self.go_symbols(node, out),
             Language::Unknown => {}
         }
     }
@@ -103,6 +105,7 @@ impl<'a> SymbolExtractor<'a> {
             Language::Dart => self.dart_occurrences(node, out),
             Language::C => self.c_occurrences(node, out),
             Language::Cpp => self.cpp_occurrences(node, out),
+            Language::Go => self.go_occurrences(node, out),
             Language::Unknown => {}
         }
     }
@@ -1098,4 +1101,184 @@ impl<'a> SymbolExtractor<'a> {
             }
         }
     }
+
+    // ─── Go ──────────────────────────────────────────────────────────────────
+
+    fn go_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        match node.kind() {
+            "function_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name.clone(),
+                            kind: SymbolKind::Function,
+                            confidence_score: 30,
+                            is_exported: go_is_exported(&name),
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "method_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name.clone(),
+                            kind: SymbolKind::Method,
+                            confidence_score: 30,
+                            is_exported: go_is_exported(&name),
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "type_declaration" => {
+                // type_declaration contains one or more type_spec children.
+                for i in 0..node.named_child_count() {
+                    if let Some(spec) = node.named_child(i) {
+                        if spec.kind() == "type_spec" {
+                            if let Some(name_node) = spec.child_by_field_name("name") {
+                                let name = self.node_text(&name_node).to_owned();
+                                if !name.is_empty() {
+                                    let kind = spec
+                                        .child_by_field_name("type")
+                                        .map(|t| match t.kind() {
+                                            "struct_type" => SymbolKind::Class,
+                                            "interface_type" => SymbolKind::Interface,
+                                            _ => SymbolKind::TypeAlias,
+                                        })
+                                        .unwrap_or(SymbolKind::TypeAlias);
+                                    out.push(OwnedSymbolInfo {
+                                        uri: self.lip_uri(&name),
+                                        display_name: name.clone(),
+                                        kind,
+                                        confidence_score: 30,
+                                        is_exported: go_is_exported(&name),
+                                        ..OwnedSymbolInfo::new("", "")
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                return; // children already walked above
+            }
+            "const_declaration" => {
+                for i in 0..node.named_child_count() {
+                    if let Some(spec) = node.named_child(i) {
+                        if spec.kind() == "const_spec" {
+                            if let Some(name_node) = spec.child_by_field_name("name") {
+                                let name = self.node_text(&name_node).to_owned();
+                                if !name.is_empty() {
+                                    out.push(OwnedSymbolInfo {
+                                        uri: self.lip_uri(&name),
+                                        display_name: name.clone(),
+                                        kind: SymbolKind::Variable,
+                                        confidence_score: 25,
+                                        is_exported: go_is_exported(&name),
+                                        ..OwnedSymbolInfo::new("", "")
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.go_symbols(child, out);
+            }
+        }
+    }
+
+    fn go_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_def = matches!(
+                        parent.kind(),
+                        "function_declaration"
+                            | "method_declaration"
+                            | "type_spec"
+                            | "const_spec"
+                            | "var_spec"
+                    ) && parent
+                        .child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_def {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc: None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.go_occurrences(child, out);
+            }
+        }
+    }
+
+    fn go_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller: Option<String> = match node.kind() {
+            "function_declaration" | "method_declaration" => node
+                .child_by_field_name("name")
+                .map(|n| self.node_text(&n).to_owned()),
+            _ => None,
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee: &str = match func_node.kind() {
+                    "identifier" => self.node_text(&func_node),
+                    "selector_expression" => func_node
+                        .child_by_field_name("field")
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.go_calls(child, effective.clone(), edges);
+            }
+        }
+    }
+}
+
+/// Go exports by capitalization: an identifier is exported if its first character
+/// is an uppercase Unicode letter.
+fn go_is_exported(name: &str) -> bool {
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }

@@ -9,6 +9,7 @@ pub enum Language {
     Dart,
     C,
     Cpp,
+    Go,
     Unknown,
 }
 
@@ -23,6 +24,7 @@ impl Language {
             "dart" => return Language::Dart,
             "c" => return Language::C,
             "cpp" | "c++" | "cxx" => return Language::Cpp,
+            "go" => return Language::Go,
             _ => {}
         }
 
@@ -40,6 +42,7 @@ impl Language {
             "dart" => Language::Dart,
             "c" | "h" => Language::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Language::Cpp,
+            "go" => Language::Go,
             _ => Language::Unknown,
         }
     }
@@ -53,6 +56,7 @@ impl Language {
             Language::Dart => Some(tree_sitter_dart::language()),
             Language::C => Some(tree_sitter_c::language()),
             Language::Cpp => Some(tree_sitter_cpp::language()),
+            Language::Go => Some(tree_sitter_go::language()),
             Language::Unknown => None,
         }
     }
@@ -65,6 +69,7 @@ impl Language {
             Language::Dart => "dart",
             Language::C => "c",
             Language::Cpp => "cpp",
+            Language::Go => "go",
             Language::Unknown => "unknown",
         }
     }
