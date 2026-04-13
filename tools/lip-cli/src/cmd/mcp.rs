@@ -314,6 +314,24 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
         "lip_stale_embeddings" => ClientMessage::QueryStaleEmbeddings {
             root: req_str(args, "root")?,
         },
+        "lip_explain_match" => ClientMessage::ExplainMatch {
+            query: req_str(args, "query")?,
+            result_uri: req_str(args, "result_uri")?,
+            top_k: args
+                .get("top_k")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(5),
+            chunk_lines: args
+                .get("chunk_lines")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(20),
+            model: args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        },
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -515,6 +533,8 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             pending_embedding_files,
             last_updated_ms,
             embedding_model,
+            mixed_models,
+            models_in_index,
         } => {
             let last = last_updated_ms
                 .map(|ms| format!("  last_updated={ms}ms"))
@@ -523,18 +543,28 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 .as_deref()
                 .map(|m| format!("  embedding_model={m}"))
                 .unwrap_or_else(|| "  embedding_model=(not configured)".into());
-            format!("indexed={indexed_files}  pending_embeddings={pending_embedding_files}{last}{model}")
+            let mixed = if *mixed_models {
+                format!("  ⚠ MIXED MODELS ({})", models_in_index.join(", "))
+            } else {
+                String::new()
+            };
+            format!("indexed={indexed_files}  pending_embeddings={pending_embedding_files}{last}{model}{mixed}")
         }
         ServerMessage::FileStatusResult {
             uri,
             indexed,
             has_embedding,
             age_seconds,
+            embedding_model,
         } => {
             let age = age_seconds
                 .map(|s| format!("  age={s}s"))
                 .unwrap_or_default();
-            format!("{uri}  indexed={indexed}  has_embedding={has_embedding}{age}")
+            let model = embedding_model
+                .as_deref()
+                .map(|m| format!("  embedding_model={m}"))
+                .unwrap_or_default();
+            format!("{uri}  indexed={indexed}  has_embedding={has_embedding}{age}{model}")
         }
         ServerMessage::NearestResult { results } => {
             if results.is_empty() {
@@ -709,6 +739,26 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 }
                 out.trim_end().to_owned()
             }
+        }
+        ServerMessage::ExplainMatchResult {
+            chunks,
+            query_model,
+        } => {
+            if chunks.is_empty() {
+                return "No explanation chunks found.".into();
+            }
+            let mut out = format!("Top {} chunk(s)  model={query_model}\n", chunks.len());
+            for (i, c) in chunks.iter().enumerate() {
+                out.push_str(&format!(
+                    "\n[{}] lines {}-{}  score={:.4}\n{}\n",
+                    i + 1,
+                    c.start_line,
+                    c.end_line,
+                    c.score,
+                    c.chunk_text
+                ));
+            }
+            out.trim_end().to_owned()
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -1311,6 +1361,42 @@ fn tools_manifest() -> Value {
                     }
                 },
                 "required": ["root"]
+            }
+        },
+        {
+            "name": "lip_explain_match",
+            "description": "Explain WHY result_uri was a strong semantic match for a query. \
+                            Chunks result_uri's source into windows, embeds each chunk, and \
+                            scores against the query embedding. Returns the top-k chunks with \
+                            line ranges and contribution scores. Use when you need to tell the \
+                            user which part of a file is semantically relevant, not just that \
+                            the file is relevant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A file URI (uses its cached embedding) or free-text \
+                                       query (embedded on the fly)."
+                    },
+                    "result_uri": {
+                        "type": "string",
+                        "description": "URI of the file whose source will be chunked and scored."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of top-scoring chunks to return (default 5)."
+                    },
+                    "chunk_lines": {
+                        "type": "integer",
+                        "description": "Lines per chunk window (default 20)."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Override embedding model for this request."
+                    }
+                },
+                "required": ["query", "result_uri"]
             }
         },
         {

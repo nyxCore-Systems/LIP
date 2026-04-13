@@ -261,6 +261,11 @@ pub enum ServerMessage {
         last_updated_ms: Option<i64>,
         /// The embedding model name, if configured.
         embedding_model: Option<String>,
+        /// `true` when the index contains embeddings produced by more than one model.
+        /// Mixed-model indexes are unreliable for cosine search — re-embed to resolve.
+        mixed_models: bool,
+        /// Distinct model names present across all stored file embeddings, sorted.
+        models_in_index: Vec<String>,
     },
     /// Response to [`ClientMessage::QueryFileStatus`].
     FileStatusResult {
@@ -271,6 +276,8 @@ pub enum ServerMessage {
         has_embedding: bool,
         /// Seconds since the file was last indexed. `None` if never indexed.
         age_seconds: Option<u64>,
+        /// The model that produced this file's embedding, if known.
+        embedding_model: Option<String>,
     },
     /// Response to [`ClientMessage::QueryNearest`] and [`ClientMessage::QueryNearestByText`]
     /// and [`ClientMessage::QueryNearestBySymbol`].
@@ -428,6 +435,30 @@ pub enum ServerMessage {
         /// mtime, or whose index timestamp is unknown.
         uris: Vec<String>,
     },
+
+    // ── v2.0 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::ExplainMatch`].
+    ExplainMatchResult {
+        /// Top-scoring chunks of `result_uri`, ordered by descending contribution score.
+        chunks: Vec<ExplanationChunk>,
+        /// The embedding model used to score the chunks.
+        query_model: String,
+    },
+}
+
+/// A contiguous region of a file that contributes to a semantic match.
+///
+/// Returned as part of [`ServerMessage::ExplainMatchResult`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExplanationChunk {
+    /// 0-based first line of this chunk (inclusive).
+    pub start_line: u32,
+    /// 0-based last line of this chunk (inclusive).
+    pub end_line: u32,
+    /// The source text of this chunk.
+    pub chunk_text: String,
+    /// Cosine similarity of this chunk against the query embedding.
+    pub score: f32,
 }
 
 /// Wire envelope for client → daemon messages.
@@ -816,6 +847,29 @@ pub enum ClientMessage {
         /// Filesystem path prefix to scope the scan (e.g. `"/project/src"`).
         root: String,
     },
+
+    // ── v2.0 features ────────────────────────────────────────────────────
+    /// Explain *why* `result_uri` was ranked as a strong semantic match for `query`.
+    ///
+    /// The daemon chunks `result_uri`'s source text into `chunk_lines`-line windows,
+    /// embeds each chunk, then cosine-scores each against the query embedding
+    /// (cached for URI queries; computed on the fly for text queries).
+    /// Returns the top `top_k` chunks in descending score order.
+    ///
+    /// Returns `ExplainMatchResult`.
+    ExplainMatch {
+        /// Either a file URI (`file://…`) to use its cached embedding, or a
+        /// free-text query to embed on the fly.
+        query: String,
+        /// The file URI whose source will be chunked and scored.
+        result_uri: String,
+        /// Number of top-scoring chunks to return. Defaults to 5 if 0 is passed.
+        top_k: usize,
+        /// Lines per chunk window. Defaults to 20 if 0 is passed.
+        chunk_lines: usize,
+        /// Override the embedding model for this request.
+        model: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -837,6 +891,7 @@ impl ClientMessage {
                 | ClientMessage::SemanticDiff { .. }
                 | ClientMessage::PruneDeleted
                 | ClientMessage::QueryStaleEmbeddings { .. }
+                | ClientMessage::ExplainMatch { .. }
         )
     }
 }
