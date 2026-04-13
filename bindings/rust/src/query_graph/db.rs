@@ -160,10 +160,14 @@ pub struct LipDatabase {
     /// Cached embedding vectors: file_uri → dense float vector.
     /// Set by the daemon after an `EmbeddingBatch` call; never derived from source.
     file_embeddings: HashMap<String, Vec<f32>>,
+    /// Model name that produced each file embedding: file_uri → model string.
+    file_embedding_models: HashMap<String, String>,
     /// Cached embedding vectors for individual symbols: symbol_uri → dense float vector.
     /// Keyed by `lip://` URIs. Populated on demand by `QueryNearestBySymbol` or by
     /// `EmbeddingBatch` when called with `lip://` URIs.
     symbol_embeddings: HashMap<String, Vec<f32>>,
+    /// Model name that produced each symbol embedding: symbol_uri → model string.
+    symbol_embedding_models: HashMap<String, String>,
     /// Unix timestamps (ms) recording when each URI was last upserted.
     file_indexed_at: HashMap<String, i64>,
 }
@@ -188,7 +192,9 @@ impl LipDatabase {
             mounted_packages: HashMap::new(),
             file_consumed_names: HashMap::new(),
             file_embeddings: HashMap::new(),
+            file_embedding_models: HashMap::new(),
             symbol_embeddings: HashMap::new(),
+            symbol_embedding_models: HashMap::new(),
             file_indexed_at: HashMap::new(),
         }
     }
@@ -338,6 +344,7 @@ impl LipDatabase {
         self.remove_file_call_edges(uri);
         self.file_consumed_names.remove(uri);
         self.file_embeddings.remove(uri);
+        self.file_embedding_models.remove(uri);
         self.file_indexed_at.remove(uri);
     }
 
@@ -851,9 +858,11 @@ impl LipDatabase {
 
     // ── Embedding / observability ─────────────────────────────────────────
 
-    /// Store a pre-computed embedding vector for a file.
-    pub fn set_file_embedding(&mut self, uri: &str, vector: Vec<f32>) {
+    /// Store a pre-computed embedding vector for a file, recording which model produced it.
+    pub fn set_file_embedding(&mut self, uri: &str, vector: Vec<f32>, model: &str) {
         self.file_embeddings.insert(uri.to_owned(), vector);
+        self.file_embedding_models
+            .insert(uri.to_owned(), model.to_owned());
     }
 
     /// Retrieve the stored embedding vector for a file, if any.
@@ -861,14 +870,36 @@ impl LipDatabase {
         self.file_embeddings.get(uri)
     }
 
-    /// Store a pre-computed embedding vector for a symbol URI (`lip://` scheme).
-    pub fn set_symbol_embedding(&mut self, uri: &str, vector: Vec<f32>) {
+    /// Retrieve the model that produced the stored embedding for a file, if any.
+    pub fn file_embedding_model(&self, uri: &str) -> Option<&str> {
+        self.file_embedding_models.get(uri).map(String::as_str)
+    }
+
+    /// Store a pre-computed embedding vector for a symbol URI (`lip://` scheme),
+    /// recording which model produced it.
+    pub fn set_symbol_embedding(&mut self, uri: &str, vector: Vec<f32>, model: &str) {
         self.symbol_embeddings.insert(uri.to_owned(), vector);
+        self.symbol_embedding_models
+            .insert(uri.to_owned(), model.to_owned());
     }
 
     /// Retrieve the stored embedding vector for a symbol URI, if any.
     pub fn get_symbol_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
         self.symbol_embeddings.get(uri)
+    }
+
+    /// Return the distinct model names present across all stored file embeddings.
+    /// Used to detect mixed-model indexes after a model upgrade.
+    pub fn file_embedding_model_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .file_embedding_models
+            .values()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort();
+        names
     }
 
     /// Find the `top_k` symbols whose embedding is most similar (cosine) to `query_vec`.
@@ -2825,7 +2856,7 @@ impl Greeter {
         let mut db = LipDatabase::new();
         let uri = "lip://local/src/main.rs#foo";
         let vec = vec![1.0_f32, 0.0, 0.0];
-        db.set_symbol_embedding(uri, vec.clone());
+        db.set_symbol_embedding(uri, vec.clone(), "test-model");
         assert_eq!(db.get_symbol_embedding(uri), Some(&vec));
         assert!(db
             .get_symbol_embedding("lip://local/src/main.rs#missing")
@@ -2836,9 +2867,9 @@ impl Greeter {
     fn nearest_symbol_by_vector_orders_by_cosine() {
         let mut db = LipDatabase::new();
         // Three orthogonal unit vectors; query aligns with "foo".
-        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0, 0.0]);
-        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.0, 1.0, 0.0]);
-        db.set_symbol_embedding("lip://local/f.rs#baz", vec![0.0, 0.0, 1.0]);
+        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0, 0.0], "test-model");
+        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.0, 1.0, 0.0], "test-model");
+        db.set_symbol_embedding("lip://local/f.rs#baz", vec![0.0, 0.0, 1.0], "test-model");
 
         let query = vec![1.0_f32, 0.0, 0.0];
         let results = db.nearest_symbol_by_vector(&query, 3, None);
@@ -2854,8 +2885,8 @@ impl Greeter {
     #[test]
     fn nearest_symbol_by_vector_excludes_self() {
         let mut db = LipDatabase::new();
-        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0]);
-        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.9, 0.1]);
+        db.set_symbol_embedding("lip://local/f.rs#foo", vec![1.0, 0.0], "test-model");
+        db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.9, 0.1], "test-model");
 
         let query = vec![1.0_f32, 0.0];
         let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"));
@@ -2879,10 +2910,10 @@ impl Greeter {
     fn outliers_returns_lowest_mean_similarity_first() {
         let mut db = LipDatabase::new();
         // Three tightly clustered files and one outlier in an orthogonal direction.
-        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0, 0.0]);
-        db.set_file_embedding("file:///b.rs", vec![0.9, 0.1, 0.0]);
-        db.set_file_embedding("file:///c.rs", vec![0.95, 0.05, 0.0]);
-        db.set_file_embedding("file:///outlier.rs", vec![0.0, 0.0, 1.0]);
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0, 0.0], "test-model");
+        db.set_file_embedding("file:///b.rs", vec![0.9, 0.1, 0.0], "test-model");
+        db.set_file_embedding("file:///c.rs", vec![0.95, 0.05, 0.0], "test-model");
+        db.set_file_embedding("file:///outlier.rs", vec![0.0, 0.0, 1.0], "test-model");
 
         let uris = vec![
             "file:///a.rs".into(),
@@ -2907,8 +2938,8 @@ impl Greeter {
     #[test]
     fn similarity_matrix_diagonal_is_one() {
         let mut db = LipDatabase::new();
-        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
-        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0]);
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0], "test-model");
+        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0], "test-model");
 
         let uris = vec!["file:///a.rs".into(), "file:///b.rs".into()];
         let (result_uris, matrix) = db.similarity_matrix(&uris);
@@ -2920,8 +2951,8 @@ impl Greeter {
     #[test]
     fn similarity_matrix_symmetric_and_orthogonal() {
         let mut db = LipDatabase::new();
-        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
-        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0]);
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0], "test-model");
+        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0], "test-model");
 
         let uris = vec!["file:///a.rs".into(), "file:///b.rs".into()];
         let (_, matrix) = db.similarity_matrix(&uris);
@@ -2932,7 +2963,7 @@ impl Greeter {
     #[test]
     fn similarity_matrix_excludes_uris_without_embeddings() {
         let mut db = LipDatabase::new();
-        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0], "test-model");
         // file:///missing.rs has no embedding.
 
         let uris = vec!["file:///a.rs".into(), "file:///missing.rs".into()];
@@ -2957,7 +2988,7 @@ impl Greeter {
             "fn b() {}".into(),
             "rust".into(),
         );
-        db.set_file_embedding("file:///project/src/a.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///project/src/a.rs", vec![1.0, 0.0], "test-model");
         // b.rs is indexed but has no embedding.
 
         let (total, embedded, dirs) = db.coverage("/project/src");
@@ -2972,10 +3003,14 @@ impl Greeter {
     fn novelty_scores_high_for_orthogonal_file() {
         let mut db = LipDatabase::new();
         // Existing repo: two similar auth files.
-        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0, 0.0]);
-        db.set_file_embedding("file:///src/auth_helper.rs", vec![0.9, 0.1, 0.0]);
+        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0, 0.0], "test-model");
+        db.set_file_embedding(
+            "file:///src/auth_helper.rs",
+            vec![0.9, 0.1, 0.0],
+            "test-model",
+        );
         // New file: completely different direction.
-        db.set_file_embedding("file:///src/billing.rs", vec![0.0, 1.0, 0.0]);
+        db.set_file_embedding("file:///src/billing.rs", vec![0.0, 1.0, 0.0], "test-model");
 
         let (mean, items) = db.novelty_scores(&["file:///src/billing.rs".to_owned()]);
         assert_eq!(items.len(), 1);
@@ -2989,8 +3024,8 @@ impl Greeter {
     #[test]
     fn novelty_scores_low_for_similar_file() {
         let mut db = LipDatabase::new();
-        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0]);
-        db.set_file_embedding("file:///src/auth2.rs", vec![0.99, 0.01]);
+        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0], "test-model");
+        db.set_file_embedding("file:///src/auth2.rs", vec![0.99, 0.01], "test-model");
 
         // auth2 is the new file; auth is the existing repo.
         let (mean, items) = db.novelty_scores(&["file:///src/auth2.rs".to_owned()]);
@@ -3008,9 +3043,9 @@ impl Greeter {
     #[test]
     fn novelty_scores_excludes_input_set_from_neighbour_search() {
         let mut db = LipDatabase::new();
-        db.set_file_embedding("file:///src/a.rs", vec![1.0, 0.0]);
-        db.set_file_embedding("file:///src/b.rs", vec![1.0, 0.0]); // identical direction
-        db.set_file_embedding("file:///other/c.rs", vec![0.0, 1.0]);
+        db.set_file_embedding("file:///src/a.rs", vec![1.0, 0.0], "test-model");
+        db.set_file_embedding("file:///src/b.rs", vec![1.0, 0.0], "test-model"); // identical direction
+        db.set_file_embedding("file:///other/c.rs", vec![0.0, 1.0], "test-model");
 
         // Both a.rs and b.rs are in the input set; nearest_existing should be c.rs.
         let (_, items) =

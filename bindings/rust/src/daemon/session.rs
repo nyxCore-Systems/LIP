@@ -506,9 +506,9 @@ impl Session {
                     let mut db = self.db.lock().await;
                     for (uri, vec) in miss_uris.iter().zip(new_vecs.iter()) {
                         if uri.starts_with("lip://") {
-                            db.set_symbol_embedding(uri, vec.clone());
+                            db.set_symbol_embedding(uri, vec.clone(), &used_model);
                         } else {
-                            db.set_file_embedding(uri, vec.clone());
+                            db.set_file_embedding(uri, vec.clone(), &used_model);
                         }
                     }
                 }
@@ -564,22 +564,28 @@ impl Session {
                     .as_ref()
                     .as_ref()
                     .map(|c| c.default_model().to_owned());
+                let models_in_index = db.file_embedding_model_names();
+                let mixed_models = models_in_index.len() > 1;
                 ServerMessage::IndexStatusResult {
                     indexed_files,
                     pending_embedding_files: pending,
                     last_updated_ms: last_ms,
                     embedding_model,
+                    mixed_models,
+                    models_in_index,
                 }
             }
 
             ClientMessage::QueryFileStatus { uri } => {
                 let db = self.db.lock().await;
                 let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
                 ServerMessage::FileStatusResult {
                     uri,
                     indexed,
                     has_embedding,
                     age_seconds,
+                    embedding_model,
                 }
             }
 
@@ -706,19 +712,20 @@ impl Session {
                     };
                     // Embed — no db lock held during HTTP call.
                     let texts = vec![embed_text];
-                    let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
+                    let (mut vecs, sym_model) =
+                        match client.embed_texts(&texts, model.as_deref()).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return ServerMessage::Error {
+                                    message: format!("embedding failed: {e}"),
+                                }
                             }
-                        }
-                    };
+                        };
                     let v = vecs.pop().unwrap_or_default();
                     // Cache the computed vector for future calls.
                     {
                         let mut db = self.db.lock().await;
-                        db.set_symbol_embedding(&symbol_uri, v.clone());
+                        db.set_symbol_embedding(&symbol_uri, v.clone(), &sym_model);
                     }
                     v
                 };
@@ -1362,6 +1369,134 @@ impl Session {
                 }
                 ServerMessage::StaleEmbeddingsResult { uris: stale }
             }
+
+            // ── v2.0: ExplainMatch ────────────────────────────────────────
+            ClientMessage::ExplainMatch {
+                query,
+                result_uri,
+                top_k,
+                chunk_lines,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let effective_top_k = if top_k == 0 { 5 } else { top_k };
+                let chunk_size = if chunk_lines == 0 { 20 } else { chunk_lines };
+
+                // Resolve the query embedding.
+                let (query_vec, query_model) = {
+                    let db = self.db.lock().await;
+                    if let Some(v) = db.get_file_embedding(&query) {
+                        let m = db
+                            .file_embedding_model(&query)
+                            .unwrap_or_else(|| client.default_model())
+                            .to_owned();
+                        (v.clone(), m)
+                    } else {
+                        drop(db);
+                        // Not a cached URI — treat as free-text query.
+                        let texts = vec![query];
+                        match client.embed_texts(&texts, model.as_deref()).await {
+                            Ok((mut vecs, m)) => (vecs.pop().unwrap_or_default(), m),
+                            Err(e) => {
+                                return ServerMessage::Error {
+                                    message: format!("embedding failed: {e}"),
+                                }
+                            }
+                        }
+                    }
+                };
+
+                if query_vec.is_empty() {
+                    return ServerMessage::Error {
+                        message: "could not obtain query embedding".into(),
+                    };
+                }
+
+                // Read source text for result_uri.
+                let source = {
+                    let db = self.db.lock().await;
+                    db.file_source_text(&result_uri).unwrap_or_default()
+                };
+                if source.is_empty() {
+                    return ServerMessage::ExplainMatchResult {
+                        chunks: vec![],
+                        query_model,
+                    };
+                }
+
+                // Chunk the source.
+                let lines: Vec<&str> = source.lines().collect();
+                let raw_chunks: Vec<(u32, u32, String)> = lines
+                    .chunks(chunk_size)
+                    .enumerate()
+                    .map(|(i, chunk_lines_slice)| {
+                        let start = (i * chunk_size) as u32;
+                        let end = (start as usize + chunk_lines_slice.len() - 1) as u32;
+                        (start, end, chunk_lines_slice.join("\n"))
+                    })
+                    .collect();
+
+                if raw_chunks.is_empty() {
+                    return ServerMessage::ExplainMatchResult {
+                        chunks: vec![],
+                        query_model,
+                    };
+                }
+
+                // Embed all chunks in one call.
+                let chunk_texts: Vec<String> =
+                    raw_chunks.iter().map(|(_, _, t)| t.clone()).collect();
+                let (chunk_vecs, chunk_model) =
+                    match client.embed_texts(&chunk_texts, model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ServerMessage::Error {
+                                message: format!("embedding failed: {e}"),
+                            }
+                        }
+                    };
+                let _ = chunk_model; // we report query_model, not per-chunk model
+
+                // Score each chunk against the query vector.
+                let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let mut scored: Vec<crate::query_graph::types::ExplanationChunk> = raw_chunks
+                    .into_iter()
+                    .zip(chunk_vecs.into_iter())
+                    .filter_map(|((start_line, end_line, chunk_text), vec)| {
+                        if vec.len() != query_vec.len() || q_norm == 0.0 {
+                            return None;
+                        }
+                        let v_norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if v_norm == 0.0 {
+                            return None;
+                        }
+                        let dot: f32 = query_vec.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
+                        let score = dot / (q_norm * v_norm);
+                        Some(crate::query_graph::types::ExplanationChunk {
+                            start_line,
+                            end_line,
+                            chunk_text,
+                            score,
+                        })
+                    })
+                    .collect();
+
+                scored.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                scored.truncate(effective_top_k);
+
+                ServerMessage::ExplainMatchResult {
+                    chunks: scored,
+                    query_model,
+                }
+            }
         }
     }
 }
@@ -1523,21 +1658,27 @@ fn process_query_sync(
         // Status queries are read-only and safe inside a batch.
         ClientMessage::QueryIndexStatus => {
             let (indexed_files, pending, last_ms) = db.index_status();
+            let models_in_index = db.file_embedding_model_names();
+            let mixed_models = models_in_index.len() > 1;
             ok(ServerMessage::IndexStatusResult {
                 indexed_files,
                 pending_embedding_files: pending,
                 last_updated_ms: last_ms,
                 embedding_model: None, // no client reference available in sync context
+                mixed_models,
+                models_in_index,
             })
         }
 
         ClientMessage::QueryFileStatus { uri } => {
             let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+            let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
             ok(ServerMessage::FileStatusResult {
                 uri,
                 indexed,
                 has_embedding,
                 age_seconds,
+                embedding_model,
             })
         }
 
@@ -1898,6 +2039,10 @@ fn process_query_sync(
 
         ClientMessage::QueryStaleEmbeddings { .. } => {
             err("QueryStaleEmbeddings requires filesystem I/O; not permitted in BatchQuery")
+        }
+
+        ClientMessage::ExplainMatch { .. } => {
+            err("ExplainMatch requires async HTTP; not permitted in BatchQuery")
         }
     }
 }

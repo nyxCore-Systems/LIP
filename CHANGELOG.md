@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.0.0] — 2026-04-13
+
+### Added
+
+**v2.0 — Semantic explainability + model provenance**
+
+- **`ExplainMatch { query, result_uri, top_k, chunk_lines, model }`** — explain *why* `result_uri` ranked as a strong semantic match. Chunks `result_uri`'s source into `chunk_lines`-line windows, embeds each in one batch call, cosine-scores each against the query embedding (cached for URI queries; embedded on the fly for text queries), and returns the top-`top_k` chunks with `(start_line, end_line, chunk_text, score)`. Turns "this file is relevant" into "these specific lines are relevant." Not permitted inside `BatchQuery` (requires HTTP). Returns `ExplainMatchResult { chunks: Vec<ExplanationChunk>, query_model }`.
+- **Model provenance** — every `set_file_embedding` and `set_symbol_embedding` now records the model name that produced the vector. The name is supplied by the `EmbeddingBatch` handler from `embed_texts`'s return value, so it reflects the model actually used (not just what was configured). `QueryFileStatus` now returns `embedding_model: Option<String>`. `QueryIndexStatus` now returns `mixed_models: bool` and `models_in_index: Vec<String>` — clients can warn users when a model upgrade left the index with mixed-model vectors, making cosine scores unreliable across the boundary.
+- **New wire types**: `ExplanationChunk { start_line, end_line, chunk_text, score }`.
+- **1 new MCP tool**: `lip_explain_match`.
+- **MCP updates**: `lip_file_status` response now includes `embedding_model`; `lip_index_status` response now includes `mixed_models` flag and `models_in_index` list with a `⚠ MIXED MODELS` warning in text output.
+
+---
+
 ## [1.9.0] — 2026-04-13
 
 ### Added

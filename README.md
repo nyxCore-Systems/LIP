@@ -236,6 +236,7 @@ lip query export-embeddings file:///src/auth.rs file:///src/session.rs --output 
 | `lip_prune_deleted` | Remove index entries for files no longer on disk (v1.8) |
 | `lip_get_centroid` | Server-side embedding centroid of a file set (v1.9) |
 | `lip_stale_embeddings` | Files whose embedding is older than their current mtime (v1.9) |
+| `lip_explain_match` | Why a result matched: top-scoring chunks of `result_uri` against a query (v2.0) |
 
 **Recommended agent workflow before modifying code:**
 1. `lip_workspace_symbols` — find URIs for all symbols you plan to touch
@@ -377,7 +378,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v1.9 — Connective tissue: `filter` glob + `min_score` threshold on all nearest-neighbour calls, `GetCentroid` (server-side mean embedding, no raw vectors shipped), `QueryStaleEmbeddings` (mtime vs indexed-at freshness probe). v1.8: `FindBoundaries`, `SemanticDiff`, `QueryNearestInStore` (cross-repo federation), `QueryNoveltyScore`, `ExtractTerminology`, `PruneDeleted`. v1.7: 6 semantic retrieval primitives. v1.6: `ReindexFiles`, `Similarity`, `QueryExpansion`, `Cluster`, `ExportEmbeddings`. Wire format is JSON; FlatBuffers IPC is planned for v2.0 (see roadmap).
+v2.0 — `ExplainMatch` (chunk-level explanation: which lines in a result file drove the match), model provenance (`FileStatus` exposes the embedding model per file; `IndexStatus` warns when the index contains mixed-model vectors). v1.9: `filter` glob + `min_score` on all NN calls, `GetCentroid`, `QueryStaleEmbeddings`. v1.8: `FindBoundaries`, `SemanticDiff`, `QueryNearestInStore` (cross-repo federation), `QueryNoveltyScore`, `ExtractTerminology`, `PruneDeleted`. v1.7: 6 semantic retrieval primitives. v1.6: `ReindexFiles`, `Similarity`, `QueryExpansion`, `Cluster`, `ExportEmbeddings`. Wire format is JSON.
 
 ---
 

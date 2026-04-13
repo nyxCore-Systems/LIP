@@ -1,11 +1,11 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v1.9"
+subtitle: "Design Document & Specification v2.0"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
 created: "2026-04-09"
-version: "1.9.0"
+version: "2.0.0"
 repository: "https://github.com/nyxCore-Systems/LIP"
 ---
 
@@ -1122,6 +1122,11 @@ lip-protocol/
 - [x] New response types: `BoundariesResult`, `SemanticDiffResult`, `NoveltyScoreResult`, `TerminologyResult`, `PruneDeletedResult`; new structs `BoundaryRange`, `NoveltyItem`, `TermItem`.
 - [x] 6 new MCP tools: `lip_find_boundaries`, `lip_semantic_diff`, `lip_nearest_in_store`, `lip_novelty_score`, `lip_extract_terminology`, `lip_prune_deleted`.
 
+### v2.0 — Semantic explainability + model provenance ✓
+
+- [x] **`ExplainMatch { query, result_uri, top_k, chunk_lines, model }`** — explain *why* a result file ranked as a strong match. Chunks `result_uri`'s source into `chunk_lines`-line windows (default 20), batch-embeds each chunk, and cosine-scores against the query embedding. The query can be a file URI (uses cached embedding) or free text (embedded on the fly). Returns `ExplainMatchResult { chunks: Vec<ExplanationChunk>, query_model }` where `ExplanationChunk = { start_line, end_line, chunk_text, score }`. Not permitted inside `BatchQuery` (requires HTTP). New MCP tool: `lip_explain_match`.
+- [x] **Model provenance** — `set_file_embedding` and `set_symbol_embedding` now record the model name that produced each vector. The `EmbeddingBatch` handler captures `used_model` from `embed_texts` and persists it. `QueryFileStatus` now returns `embedding_model: Option<String>`. `QueryIndexStatus` now returns `mixed_models: bool` and `models_in_index: Vec<String>`. When `mixed_models` is true, the MCP `lip_index_status` output displays a `⚠ MIXED MODELS` warning — cosine scores across the model boundary are meaningless and a full re-embed is required. `LipDatabase::file_embedding_model_names()` is the db-level accessor.
+
 ### v1.9 — Connective tissue layer ✓
 
 - [x] **`filter: Option<String>`** on all nearest-neighbour search calls (`QueryNearest`, `QueryNearestByText`, `BatchQueryNearestByText`, `QueryNearestByContrast`, `FindSemanticCounterpart`, `QueryNearestInStore`) — glob pattern restricts the candidate set before scoring. Patterns with `/` match the full path; others match the filename only. Eliminates over-fetching and wasted `top_k` slots on irrelevant results.
@@ -1145,7 +1150,7 @@ lip-protocol/
 - [ ] Runtime telemetry overlay (OpenTelemetry integration)
 - [ ] Annotation sync to team registry cache
 
-### v2.0 — Multi-language ecosystem
+### v2.x — Multi-language ecosystem
 
 - [ ] TypeScript and Go bindings (generated from `lip.fbs`)
 - [ ] Frozen schema (backward compat guaranteed within major version)
