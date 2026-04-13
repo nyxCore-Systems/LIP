@@ -698,6 +698,7 @@ pub enum ClientMessage {
     /// - `distance`: cosine distance `1 − similarity` — the drift magnitude.
     /// - `moving_toward`: `top_k` nearest files to the *direction* of change
     ///   (`normalize(new − old)`), naming what concepts the content moved towards.
+    ///
     /// Requires `LIP_EMBEDDING_URL`. Returns `SemanticDiffResult`.
     SemanticDiff {
         content_a: String,
@@ -1331,7 +1332,10 @@ mod tests {
         };
         assert!((score - 0.65).abs() < 1e-5);
         assert_eq!(per_file.len(), 1);
-        assert_eq!(per_file[0].nearest_existing.as_deref(), Some("file:///src/auth.rs"));
+        assert_eq!(
+            per_file[0].nearest_existing.as_deref(),
+            Some("file:///src/auth.rs")
+        );
     }
 
     #[test]
