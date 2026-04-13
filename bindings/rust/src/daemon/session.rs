@@ -659,9 +659,7 @@ impl Session {
                 let db = self.db.lock().await;
                 let results = vecs
                     .iter()
-                    .map(|qv| {
-                        db.nearest_by_vector(qv, top_k, None, filter.as_deref(), min_score)
-                    })
+                    .map(|qv| db.nearest_by_vector(qv, top_k, None, filter.as_deref(), min_score))
                     .collect();
                 ServerMessage::BatchNearestResult { results }
             }
@@ -1893,7 +1891,6 @@ fn process_query_sync(
         }
 
         // ── v1.9 variants ──────────────────────────────────────────────────
-
         ClientMessage::GetCentroid { uris } => {
             let (vector, included) = db.centroid(&uris);
             ok(ServerMessage::CentroidResult { vector, included })

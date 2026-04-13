@@ -413,7 +413,6 @@ pub enum ServerMessage {
     },
 
     // ── v1.9 features ────────────────────────────────────────────────────
-
     /// Response to [`ClientMessage::GetCentroid`].
     CentroidResult {
         /// Mean embedding vector of the included files.  Empty when no URI had
@@ -795,7 +794,6 @@ pub enum ClientMessage {
     PruneDeleted,
 
     // ── v1.9 features ────────────────────────────────────────────────────
-
     /// Compute and return the embedding centroid of a set of files without
     /// shipping all raw vectors to the caller.
     ///
@@ -1379,7 +1377,10 @@ mod tests {
             min_score: None,
         };
         let rt = round_trip_client(&msg);
-        let ClientMessage::QueryNearestInStore { uri, store, top_k, .. } = rt else {
+        let ClientMessage::QueryNearestInStore {
+            uri, store, top_k, ..
+        } = rt
+        else {
             panic!("wrong variant");
         };
         assert_eq!(uri, "file:///src/auth.rs");
@@ -1603,9 +1604,7 @@ mod tests {
         };
         let rt = round_trip_client(&msg);
         let ClientMessage::QueryNearest {
-            filter,
-            min_score,
-            ..
+            filter, min_score, ..
         } = rt
         else {
             panic!("wrong variant");

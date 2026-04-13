@@ -3048,8 +3048,10 @@ impl Greeter {
     #[test]
     fn nearest_by_vector_filter_restricts_by_path() {
         let mut db = LipDatabase::new();
-        db.file_embeddings
-            .insert("file:///project/internal/auth.rs".to_owned(), vec![1.0, 0.0]);
+        db.file_embeddings.insert(
+            "file:///project/internal/auth.rs".to_owned(),
+            vec![1.0, 0.0],
+        );
         db.file_embeddings
             .insert("file:///project/cmd/main.rs".to_owned(), vec![1.0, 0.0]);
 
@@ -3134,7 +3136,10 @@ impl Greeter {
 
         let results = db.file_embeddings_in_root("/project");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, 0, "no indexed_at should yield ts=0 (conservative stale)");
+        assert_eq!(
+            results[0].1, 0,
+            "no indexed_at should yield ts=0 (conservative stale)"
+        );
     }
 
     // ── coverage_root_prefix_filters_correctly ────────────────────────────
