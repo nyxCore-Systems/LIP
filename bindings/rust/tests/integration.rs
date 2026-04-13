@@ -17,13 +17,26 @@ async fn send(stream: &mut UnixStream, msg: &ClientMessage) -> anyhow::Result<()
     Ok(())
 }
 
-async fn recv(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
+async fn recv_raw(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body).await?;
     Ok(serde_json::from_slice(&body)?)
+}
+
+/// Read the next non-notification message, discarding any push events
+/// (`IndexChanged`, `SymbolUpgraded`) that the daemon may have sent between
+/// responses. Tests that expect a specific query response use this.
+async fn recv(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
+    loop {
+        let msg = recv_raw(stream).await?;
+        match msg {
+            ServerMessage::IndexChanged { .. } | ServerMessage::SymbolUpgraded { .. } => continue,
+            other => return Ok(other),
+        }
+    }
 }
 
 // ─── Helper: build a document with known source ───────────────────────────────

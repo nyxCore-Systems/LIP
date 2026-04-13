@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+use crate::indexer::tier2::clangd::ClangdBackend;
 use crate::indexer::tier2::dart_ls::DartBackend;
 use crate::indexer::tier2::py_ls::PythonBackend;
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
@@ -58,6 +59,9 @@ struct Tier2Backends {
 
     dart: Option<DartBackend>,
     dart_disabled: bool,
+
+    clangd: Option<ClangdBackend>,
+    clangd_disabled: bool,
 }
 
 impl Tier2Backends {
@@ -72,6 +76,8 @@ impl Tier2Backends {
             python_disabled: false,
             dart: None,
             dart_disabled: false,
+            clangd: None,
+            clangd_disabled: false,
         }
     }
 }
@@ -119,6 +125,15 @@ impl Tier2Manager {
             self.handle_python(job).await;
         } else if job.uri.ends_with(".dart") {
             self.handle_dart(job).await;
+        } else if job.uri.ends_with(".c")
+            || job.uri.ends_with(".h")
+            || job.uri.ends_with(".cpp")
+            || job.uri.ends_with(".cc")
+            || job.uri.ends_with(".cxx")
+            || job.uri.ends_with(".hpp")
+            || job.uri.ends_with(".hxx")
+        {
+            self.handle_clangd(job).await;
         }
         // Unknown extension — nothing to do; Tier 1 results remain.
     }
@@ -325,6 +340,54 @@ impl Tier2Manager {
             Err(e) => {
                 error!("tier2: dart verification failed for {}: {e}", job.uri);
                 self.backends.dart = None;
+            }
+        }
+    }
+
+    // ── C / C++ ───────────────────────────────────────────────────────────────
+
+    async fn ensure_clangd_backend(&mut self, workspace_root: Option<PathBuf>) {
+        if self.backends.clangd.is_some() || self.backends.clangd_disabled {
+            return;
+        }
+
+        match ClangdBackend::new(workspace_root).await {
+            Ok(b) => {
+                info!("tier2: clangd backend ready");
+                self.backends.clangd = Some(b);
+            }
+            Err(e) => {
+                warn!("tier2: clangd unavailable, disabling: {e}");
+                self.backends.clangd_disabled = true;
+            }
+        }
+    }
+
+    async fn handle_clangd(&mut self, job: VerificationJob) {
+        if self.backends.clangd_disabled {
+            return;
+        }
+
+        self.ensure_clangd_backend(job.workspace_root.clone()).await;
+        if self.backends.clangd_disabled {
+            return;
+        }
+
+        let backend = self.backends.clangd.as_mut().unwrap();
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
+            Ok(result) => {
+                let upgraded = result.symbols.len();
+                let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
+                db.upgrade_file_symbols(&result.uri, &result.symbols);
+                debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
+            }
+            Err(e) => {
+                error!("tier2: clangd verification failed for {}: {e}", job.uri);
+                self.backends.clangd = None;
             }
         }
     }

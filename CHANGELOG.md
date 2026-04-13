@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.5.0] — 2026-04-13
+
+### Added
+
+- **`BatchQueryNearestByText`** — embed N query strings in a single round-trip and return one nearest-neighbor list per query. Replaces N sequential `QueryNearestByText` calls used by CKB's compound search operations.
+- **`QueryNearestBySymbol`** — find symbols similar to a given symbol URI. The daemon embeds the symbol's text (display_name + signature + doc) on demand and searches against a new per-symbol embedding store. `EmbeddingBatch` now routes `lip://` URIs to `symbol_embeddings` and `file://` URIs to `file_embeddings`.
+- **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Safe inside `BatchQuery`. Replaces N sequential `AnnotationGet` calls used by CKB's agent-lock check at change time.
+- **`IndexChanged` push notification** — emitted to all active sessions after every `Delta::Upsert` via the existing broadcast channel. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between independently updated daemon and clients is now detectable at connect time rather than producing silent bad results.
+- **`--managed` flag** (`lip daemon start --managed`) — spawns a background watchdog that polls the parent process every 2 s and calls `std::process::exit(0)` when the parent has exited. Designed for IDE integrations (CKB, VS Code extension) that manage the daemon as a subprocess.
+
+### Changed
+
+- `EmbeddingBatch` URI routing: `lip://` URIs are now stored in `symbol_embeddings` (new field on `LipDatabase`); `file://` URIs continue to use `file_embeddings`. The response format is unchanged.
+
+---
+
 ## [1.4.0] — 2026-04-12
 
 ### Added

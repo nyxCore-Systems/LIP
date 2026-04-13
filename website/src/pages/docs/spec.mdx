@@ -9,7 +9,7 @@ import Badge from '../../components/Badge.astro'
 
 # LIP — Linked Incremental Protocol
 
-**Design Document & Specification v0.1** · Draft · Apache 2.0
+**Design Document & Specification v1.5** · MIT License
 
 ---
 
@@ -117,7 +117,7 @@ LIP is designed around three axioms:
 
 ## 2. Comparison Matrix
 
-| Property | LSP 3.17 | SCIP | **LIP v0.1** |
+| Property | LSP 3.17 | SCIP | **LIP v1.5** |
 |---|---|---|---|
 | Wire format | JSON-RPC 2.0 | Protobuf 3 | **FlatBuffers (zero-copy)** |
 | Framing | HTTP Content-Length | n/a (file) | **4-byte length prefix** |
@@ -298,8 +298,8 @@ rationale over Protobuf/SCIP's choice.
 
 ```flatbuffers
 // lip.fbs — LIP FlatBuffers Schema
-// Version: 0.1.0
-// License: Apache 2.0
+// Version: 1.5.0
+// License: MIT
 
 namespace lip;
 
@@ -1014,7 +1014,7 @@ the declared offset and length are within the region bounds before reading.
 
 Taint labels (`taint_labels` on `SymbolInfo`) are advisory. They are propagated by
 the daemon but never enforced. Integration with security tooling (SAST) is out of
-scope for v0.1 but is a planned extension.
+scope for the current architecture but is a planned extension.
 
 ---
 
@@ -1022,7 +1022,7 @@ scope for v0.1 but is a planned extension.
 
 ```
 lip-protocol/
-├── LICENSE                        # Apache 2.0
+├── LICENSE                        # MIT
 ├── README.md
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
@@ -1086,6 +1086,16 @@ lip-protocol/
 - [x] Dead code detection (`QueryDeadSymbols`)
 - [x] Push notifications (`SymbolUpgraded`) — broadcast when Tier 2 upgrades a symbol
 - [x] Persisted query graph (survives daemon restarts via WAL journal)
+
+### v1.5 — Shipped ✓
+
+- [x] **`BatchQueryNearestByText`** — embed N query strings in one HTTP round-trip and return one nearest-neighbour list per query. Replaces N sequential `QueryNearestByText` calls.
+- [x] **`QueryNearestBySymbol`** — find symbols semantically similar to a given `lip://` URI. The daemon embeds the symbol's display name, signature, and docs on demand and searches the per-symbol embedding store.
+- [x] **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Replaces N sequential `AnnotationGet` calls.
+- [x] **`IndexChanged` push notification** — emitted to all active sessions after every successful `Delta::Upsert`. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- [x] **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between independently updated daemon and clients is detectable at connect time.
+- [x] **`--managed` flag** (`lip daemon start --managed`) — spawns a parent-process watchdog that calls `std::process::exit(0)` when the parent process exits. Designed for IDE integrations (CKB, VS Code extension) that manage the daemon as a subprocess.
+- [x] **`EmbeddingBatch` URI routing** — `lip://` URIs now route to `symbol_embeddings` (new field); `file://` URIs continue to use `file_embeddings`. Enables per-symbol dense vector search via `QueryNearestBySymbol`.
 
 ### v1.4 — Shipped ✓
 
@@ -1207,5 +1217,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v0.1 · April 2026 · Apache 2.0*
-*Drafted by Lisa Küpper, TasteHub GmbH, Vienna*
+*LIP Specification v1.5 · April 2026 · MIT License*
+*Lisa Welsch*

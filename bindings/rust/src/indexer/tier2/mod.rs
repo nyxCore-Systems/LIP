@@ -1,10 +1,11 @@
 //! Tier 2 compiler-backed indexer (spec §3.3, confidence 51–90).
 //!
-//! Ships four LSP backends:
+//! Ships five LSP backends:
 //! - [`rust_analyzer`]: `rust-analyzer` for Rust files
 //! - [`ts_server`]: `typescript-language-server` for TypeScript/TSX files
 //! - [`py_ls`]: `pyright-langserver` (or `pylsp` fallback) for Python files
 //! - [`dart_ls`]: `dart language-server` for Dart files
+//! - [`clangd`]: `clangd` for C and C++ files
 //!
 //! # Integration
 //!
@@ -21,12 +22,14 @@
 //! permanently disables that language's Tier 2 work for the session. Tier 1
 //! results remain fully functional.
 
+pub mod clangd;
 pub mod dart_ls;
 pub mod lsp_client;
 pub mod py_ls;
 pub mod rust_analyzer;
 pub mod ts_server;
 
+pub use clangd::ClangdBackend;
 pub use dart_ls::DartBackend;
 pub use py_ls::PythonBackend;
 pub use rust_analyzer::VerificationResult;

@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
+#[cfg(unix)]
+use libc;
+
 use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
@@ -28,6 +31,8 @@ pub struct LipDaemon {
     notify_tx: broadcast::Sender<ServerMessage>,
     /// Shared embedding client. `None` when `LIP_EMBEDDING_URL` is not set.
     embedding_client: Arc<Option<EmbeddingClient>>,
+    /// When `true`, spawn a watchdog that exits the process when the parent dies.
+    managed: bool,
 }
 
 impl LipDaemon {
@@ -42,12 +47,21 @@ impl LipDaemon {
             watch_files: true,
             notify_tx,
             embedding_client: Arc::new(EmbeddingClient::from_env()),
+            managed: false,
         }
     }
 
     /// Disable the filesystem watcher (useful in tests).
     pub fn without_file_watcher(mut self) -> Self {
         self.watch_files = false;
+        self
+    }
+
+    /// Enable the parent-process watchdog. When set, the daemon polls its parent pid
+    /// every 2 seconds and calls `std::process::exit(0)` when the parent has exited.
+    /// Intended for IDE integrations that spawn the daemon as a managed subprocess.
+    pub fn managed(mut self, enabled: bool) -> Self {
+        self.managed = enabled;
         self
     }
 
@@ -131,6 +145,27 @@ impl LipDaemon {
         } else {
             None
         };
+
+        // Feature 6: parent-process watchdog for --managed mode.
+        // Polls the parent pid every 2 s and exits when the parent has terminated.
+        // `std::process::exit` is intentional: journal writes are synchronous and
+        // already flushed before each loop iteration; async teardown is not needed.
+        #[cfg(unix)]
+        if self.managed {
+            let ppid = unsafe { libc::getppid() };
+            info!("managed mode: monitoring parent pid {ppid}");
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if unsafe { libc::kill(ppid, 0) } != 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    {
+                        info!("managed: parent {ppid} exited — shutting down");
+                        std::process::exit(0);
+                    }
+                }
+            });
+        }
 
         loop {
             let (stream, _) = listener.accept().await?;

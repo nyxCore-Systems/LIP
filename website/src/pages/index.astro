@@ -41,7 +41,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="hero-head">
         <div class="badge">
           <span class="badge-dot"></span>
-          v1.3.0 — MIT License
+          v1.5.0 — MIT License
         </div>
         <h1 class="hero-title">
           Live code intelligence.<br />
@@ -56,10 +56,8 @@ import Layout from '../layouts/Layout.astro';
         <div class="hero-actions">
           <a href="#start" class="btn btn-primary">Get Started</a>
           <a
-            href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/LIP_SPEC_v03_final.md"
+            href="/docs/spec"
             class="btn btn-ghost"
-            target="_blank"
-            rel="noopener"
           >
             Read the Spec
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -224,7 +222,7 @@ import Layout from '../layouts/Layout.astro';
         </div>
         <div class="terminal-body">
           <p class="tline"><span class="tprompt">$</span> <span class="tcmd">lip daemon --socket /tmp/lip.sock</span></p>
-          <p class="tline tout">LIP daemon v1.3.0 — listening on /tmp/lip.sock</p>
+          <p class="tline tout">LIP daemon v1.5.0 — listening on /tmp/lip.sock</p>
           <p class="tline tout">Watching ./src  <span class="tdim">3,847 files · Tier 1 warm</span></p>
           <p class="tline tgap"><span class="tprompt">$</span> <span class="tcmd">lip query blast-radius \</span></p>
           <p class="tline"><span class="tindent"></span><span class="tcmd">"lip://local/src/auth.rs#AuthService"</span></p>
@@ -801,10 +799,8 @@ import Layout from '../layouts/Layout.astro';
 
         <div class="start-links reveal">
           <a
-            href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/user/getting-started.md"
+            href="/docs/getting-started"
             class="start-link"
-            target="_blank"
-            rel="noopener"
           >
             <div class="start-link-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -822,10 +818,8 @@ import Layout from '../layouts/Layout.astro';
           </a>
 
           <a
-            href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/user/cli-reference.md"
+            href="/docs/cli-reference"
             class="start-link"
-            target="_blank"
-            rel="noopener"
           >
             <div class="start-link-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -843,10 +837,8 @@ import Layout from '../layouts/Layout.astro';
           </a>
 
           <a
-            href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/user/mcp-integration.md"
+            href="/docs/mcp"
             class="start-link"
-            target="_blank"
-            rel="noopener"
           >
             <div class="start-link-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -864,10 +856,8 @@ import Layout from '../layouts/Layout.astro';
           </a>
 
           <a
-            href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/LIP_SPEC_v03_final.md"
+            href="/docs/spec"
             class="start-link"
-            target="_blank"
-            rel="noopener"
           >
             <div class="start-link-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -878,7 +868,7 @@ import Layout from '../layouts/Layout.astro';
               </svg>
             </div>
             <div>
-              <div class="start-link-title">Protocol Spec v0.3</div>
+              <div class="start-link-title">Protocol Spec</div>
               <div class="start-link-sub">Wire format, symbol URIs, query types</div>
             </div>
             <svg class="start-link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -896,11 +886,11 @@ import Layout from '../layouts/Layout.astro';
       <div class="footer-left">
         <div class="footer-logo">LIP</div>
         <div class="footer-tagline">Linked Incremental Protocol</div>
-        <div class="footer-meta">MIT License · v1.3.0 · © 2026 Lisa Welsch</div>
+        <div class="footer-meta">MIT License · v1.5.0 · © 2026 Lisa Welsch</div>
       </div>
       <div class="footer-links">
         <a href="https://github.com/nyxCore-Systems/LIP" target="_blank" rel="noopener">GitHub</a>
-        <a href="https://github.com/nyxCore-Systems/LIP/blob/main/docs/LIP_SPEC_v03_final.md" target="_blank" rel="noopener">Spec</a>
+        <a href="/docs/spec">Spec</a>
         <a href="https://github.com/nyxCore-Systems/LIP/tree/main/docs/user" target="_blank" rel="noopener">Docs</a>
         <a href="https://github.com/nyxCore-Systems/LIP/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
       </div>

@@ -143,6 +143,8 @@ mod tests {
         assert!(sym("", Language::TypeScript).is_empty());
         assert!(sym("", Language::Python).is_empty());
         assert!(sym("", Language::Dart).is_empty());
+        assert!(sym("", Language::C).is_empty());
+        assert!(sym("", Language::Cpp).is_empty());
     }
 
     #[test]
@@ -499,5 +501,100 @@ mod tests {
         let a = Tier1Indexer::new().index_file("file:///a.rs", "fn a() {}", Language::Rust);
         let b = Tier1Indexer::new().index_file("file:///a.rs", "fn b() {}", Language::Rust);
         assert_ne!(a.content_hash, b.content_hash);
+    }
+
+    // ── C ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn c_function_extracted() {
+        let syms = sym("void do_thing(int x) {}", Language::C);
+        let s = find(&syms, "do_thing");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.confidence_score, 30);
+        assert!(s.is_exported, "top-level C function should be exported");
+    }
+
+    #[test]
+    fn c_static_function_not_exported() {
+        let syms = sym("static void internal(void) {}", Language::C);
+        assert!(
+            !find(&syms, "internal").is_exported,
+            "static function should not be exported"
+        );
+    }
+
+    #[test]
+    fn c_struct_extracted() {
+        let syms = sym("struct Point { int x; int y; };", Language::C);
+        let s = find(&syms, "Point");
+        assert_eq!(s.kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn c_enum_extracted() {
+        let syms = sym("enum Color { Red, Green, Blue };", Language::C);
+        assert_eq!(find(&syms, "Color").kind, SymbolKind::Enum);
+    }
+
+    #[test]
+    fn c_typedef_extracted() {
+        let syms = sym("typedef unsigned int uint32;", Language::C);
+        assert_eq!(find(&syms, "uint32").kind, SymbolKind::TypeAlias);
+    }
+
+    #[test]
+    fn c_cpg_call_edge() {
+        let src = "void caller(void) { callee(); } void callee(void) {}";
+        let es = edges(src, Language::C);
+        assert!(
+            es.iter()
+                .any(|e| { e.from_uri.contains("#caller") && e.to_uri.contains("#callee") }),
+            "expected caller→callee edge, got: {es:?}"
+        );
+    }
+
+    // ── C++ ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_function_extracted() {
+        let syms = sym("void greet() {}", Language::Cpp);
+        let s = find(&syms, "greet");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert!(s.is_exported);
+    }
+
+    #[test]
+    fn cpp_class_extracted() {
+        let syms = sym("class Engine {};", Language::Cpp);
+        assert_eq!(find(&syms, "Engine").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn cpp_namespace_extracted() {
+        let syms = sym("namespace utils {}", Language::Cpp);
+        assert_eq!(find(&syms, "utils").kind, SymbolKind::Namespace);
+    }
+
+    #[test]
+    fn cpp_struct_extracted() {
+        let syms = sym("struct Vec2 { float x; float y; };", Language::Cpp);
+        assert_eq!(find(&syms, "Vec2").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn cpp_cpg_call_edge() {
+        let src = "void dispatch() { handle(); } void handle() {}";
+        let es = edges(src, Language::Cpp);
+        assert!(
+            es.iter()
+                .any(|e| { e.from_uri.contains("#dispatch") && e.to_uri.contains("#handle") }),
+            "expected dispatch→handle edge"
+        );
+    }
+
+    #[test]
+    fn empty_source_returns_empty_c_cpp() {
+        assert!(sym("", Language::C).is_empty());
+        assert!(sym("", Language::Cpp).is_empty());
     }
 }

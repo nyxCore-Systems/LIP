@@ -51,6 +51,8 @@ impl<'a> SymbolExtractor<'a> {
             Language::TypeScript => self.ts_calls(node, caller, edges),
             Language::Python => self.py_calls(node, caller, edges),
             Language::Dart => self.dart_calls(node, caller, edges),
+            Language::C => self.c_calls(node, caller, edges),
+            Language::Cpp => self.cpp_calls(node, caller, edges),
             Language::Unknown => {}
         }
     }
@@ -87,6 +89,8 @@ impl<'a> SymbolExtractor<'a> {
             Language::TypeScript => self.ts_symbols(node, out),
             Language::Python => self.py_symbols(node, out),
             Language::Dart => self.dart_symbols(node, out),
+            Language::C => self.c_symbols(node, out),
+            Language::Cpp => self.cpp_symbols(node, out),
             Language::Unknown => {}
         }
     }
@@ -97,6 +101,8 @@ impl<'a> SymbolExtractor<'a> {
             Language::TypeScript => self.ts_occurrences(node, out),
             Language::Python => self.py_occurrences(node, out),
             Language::Dart => self.dart_occurrences(node, out),
+            Language::C => self.c_occurrences(node, out),
+            Language::Cpp => self.cpp_occurrences(node, out),
             Language::Unknown => {}
         }
     }
@@ -695,6 +701,400 @@ impl<'a> SymbolExtractor<'a> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
                 self.py_calls(child, effective.clone(), edges);
+            }
+        }
+    }
+
+    // ─── C ───────────────────────────────────────────────────────────────────
+
+    /// Recursively resolve an identifier name from a C/C++ declarator node.
+    ///
+    /// In tree-sitter-c/cpp, function names are buried inside nested declarator
+    /// nodes: `function_declarator → pointer_declarator → identifier`.
+    fn c_declarator_name(&self, node: Node) -> Option<String> {
+        match node.kind() {
+            "identifier" => {
+                let name = self.node_text(&node);
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_owned())
+                }
+            }
+            "function_declarator"
+            | "pointer_declarator"
+            | "array_declarator"
+            | "abstract_function_declarator"
+            | "parenthesized_declarator"
+            | "reference_declarator" => node
+                .child_by_field_name("declarator")
+                .and_then(|child| self.c_declarator_name(child)),
+            _ => None,
+        }
+    }
+
+    fn c_function_name(&self, node: &Node) -> Option<String> {
+        node.child_by_field_name("declarator")
+            .and_then(|decl| self.c_declarator_name(decl))
+    }
+
+    /// Returns `true` if the node has a `static` storage-class specifier child.
+    fn c_has_static_storage(&self, node: &Node) -> bool {
+        (0..node.child_count()).any(|i| {
+            node.child(i)
+                .map(|c| c.kind() == "storage_class_specifier" && self.node_text(&c) == "static")
+                .unwrap_or(false)
+        })
+    }
+
+    fn c_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        match node.kind() {
+            "function_definition" => {
+                if let Some(name) = self.c_function_name(&node) {
+                    let is_exported = !self.c_has_static_storage(&node);
+                    out.push(OwnedSymbolInfo {
+                        uri: self.lip_uri(&name),
+                        display_name: name,
+                        kind: SymbolKind::Function,
+                        confidence_score: 30,
+                        is_exported,
+                        ..OwnedSymbolInfo::new("", "")
+                    });
+                }
+            }
+            "struct_specifier" | "union_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Class,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "enum_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Enum,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "type_definition" => {
+                if let Some(decl_node) = node.child_by_field_name("declarator") {
+                    if decl_node.kind() == "type_identifier" {
+                        let name = self.node_text(&decl_node).to_owned();
+                        if !name.is_empty() {
+                            out.push(OwnedSymbolInfo {
+                                uri: self.lip_uri(&name),
+                                display_name: name,
+                                kind: SymbolKind::TypeAlias,
+                                confidence_score: 30,
+                                is_exported: true,
+                                ..OwnedSymbolInfo::new("", "")
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.c_symbols(child, out);
+            }
+        }
+    }
+
+    fn c_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_def = matches!(
+                        parent.kind(),
+                        "function_definition"
+                            | "function_declarator"
+                            | "struct_specifier"
+                            | "union_specifier"
+                            | "enum_specifier"
+                            | "type_definition"
+                    ) && (parent
+                        .child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false)
+                        || parent
+                            .child_by_field_name("declarator")
+                            .map(|n| n.id() == node.id())
+                            .unwrap_or(false));
+                    if is_def {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc: None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.c_occurrences(child, out);
+            }
+        }
+    }
+
+    fn c_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller: Option<String> = if node.kind() == "function_definition" {
+            self.c_function_name(&node)
+        } else {
+            None
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee: &str = match func_node.kind() {
+                    "identifier" => self.node_text(&func_node),
+                    "field_expression" => func_node
+                        .child_by_field_name("field")
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.c_calls(child, effective.clone(), edges);
+            }
+        }
+    }
+
+    // ─── C++ ─────────────────────────────────────────────────────────────────
+
+    fn cpp_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        match node.kind() {
+            // Shared with C
+            "function_definition" => {
+                if let Some(name) = self.c_function_name(&node) {
+                    let is_exported = !self.c_has_static_storage(&node);
+                    out.push(OwnedSymbolInfo {
+                        uri: self.lip_uri(&name),
+                        display_name: name,
+                        kind: SymbolKind::Function,
+                        confidence_score: 30,
+                        is_exported,
+                        ..OwnedSymbolInfo::new("", "")
+                    });
+                }
+            }
+            "struct_specifier" | "union_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Class,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "enum_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Enum,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "type_definition" => {
+                if let Some(decl_node) = node.child_by_field_name("declarator") {
+                    if decl_node.kind() == "type_identifier" {
+                        let name = self.node_text(&decl_node).to_owned();
+                        if !name.is_empty() {
+                            out.push(OwnedSymbolInfo {
+                                uri: self.lip_uri(&name),
+                                display_name: name,
+                                kind: SymbolKind::TypeAlias,
+                                confidence_score: 30,
+                                is_exported: true,
+                                ..OwnedSymbolInfo::new("", "")
+                            });
+                        }
+                    }
+                }
+            }
+            // C++ only
+            "class_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Class,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            "namespace_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.node_text(&name_node).to_owned();
+                    if !name.is_empty() {
+                        out.push(OwnedSymbolInfo {
+                            uri: self.lip_uri(&name),
+                            display_name: name,
+                            kind: SymbolKind::Namespace,
+                            confidence_score: 30,
+                            is_exported: true,
+                            ..OwnedSymbolInfo::new("", "")
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.cpp_symbols(child, out);
+            }
+        }
+    }
+
+    fn cpp_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_def = matches!(
+                        parent.kind(),
+                        "function_definition"
+                            | "function_declarator"
+                            | "struct_specifier"
+                            | "union_specifier"
+                            | "enum_specifier"
+                            | "type_definition"
+                            | "class_specifier"
+                            | "namespace_definition"
+                    ) && (parent
+                        .child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false)
+                        || parent
+                            .child_by_field_name("declarator")
+                            .map(|n| n.id() == node.id())
+                            .unwrap_or(false));
+                    if is_def {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc: None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.cpp_occurrences(child, out);
+            }
+        }
+    }
+
+    fn cpp_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller: Option<String> = if node.kind() == "function_definition" {
+            self.c_function_name(&node)
+        } else {
+            None
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee: &str = match func_node.kind() {
+                    "identifier" => self.node_text(&func_node),
+                    "field_expression" => func_node
+                        .child_by_field_name("field")
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    "qualified_identifier" => func_node
+                        .child_by_field_name("name")
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.cpp_calls(child, effective.clone(), edges);
             }
         }
     }

@@ -17,6 +17,8 @@ tree-sitter-rust       = "0.21"
 tree-sitter-python     = "0.21"
 tree-sitter-typescript = "0.21"
 tree-sitter-dart       = "0.0.4"
+tree-sitter-c          = "0.21"
+tree-sitter-cpp        = "0.21"
 # LSP bridge — use tower-lsp's bundled lsp-types to avoid version conflicts
 tower-lsp  = "0.20"
 # Async
@@ -37,6 +39,8 @@ notify     = "6"
 parking_lot = "0.12"
 tracing    = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Parent-process watchdog for --managed daemon mode (Unix only).
+libc       = "0.2"
 
 [dev-dependencies]
 criterion  = { version = "0.5", features = ["async_tokio"] }

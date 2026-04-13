@@ -7,6 +7,8 @@ pub enum Language {
     TypeScript,
     Python,
     Dart,
+    C,
+    Cpp,
     Unknown,
 }
 
@@ -19,6 +21,8 @@ impl Language {
             "typescript" | "ts" => return Language::TypeScript,
             "python" | "py" => return Language::Python,
             "dart" => return Language::Dart,
+            "c" => return Language::C,
+            "cpp" | "c++" | "cxx" => return Language::Cpp,
             _ => {}
         }
 
@@ -34,6 +38,8 @@ impl Language {
             "ts" | "tsx" => Language::TypeScript,
             "py" => Language::Python,
             "dart" => Language::Dart,
+            "c" | "h" => Language::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Language::Cpp,
             _ => Language::Unknown,
         }
     }
@@ -45,6 +51,8 @@ impl Language {
             Language::TypeScript => Some(tree_sitter_typescript::language_typescript()),
             Language::Python => Some(tree_sitter_python::language()),
             Language::Dart => Some(tree_sitter_dart::language()),
+            Language::C => Some(tree_sitter_c::language()),
+            Language::Cpp => Some(tree_sitter_cpp::language()),
             Language::Unknown => None,
         }
     }
@@ -55,6 +63,8 @@ impl Language {
             Language::TypeScript => "typescript",
             Language::Python => "python",
             Language::Dart => "dart",
+            Language::C => "c",
+            Language::Cpp => "cpp",
             Language::Unknown => "unknown",
         }
     }

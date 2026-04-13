@@ -15,6 +15,10 @@ use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
 use super::watcher::{uri_to_path, FileWatcherHandle};
 
+/// Monotonic protocol version. Bumped only on breaking wire-format changes.
+/// Clients can detect drift by comparing against this value in `HandshakeResult`.
+const PROTOCOL_VERSION: u32 = 1;
+
 /// Per-connection session state.
 pub struct Session {
     pub db: Arc<Mutex<LipDatabase>>,
@@ -234,6 +238,18 @@ impl Session {
                     }
                 }
 
+                // Feature 4: push IndexChanged to all active sessions after an upsert.
+                if matches!(action, Action::Upsert) {
+                    if let Some(tx) = &self.notify_tx {
+                        let indexed_files = self.db.lock().await.file_count();
+                        // SendError only occurs when there are zero active receivers — benign.
+                        let _ = tx.send(ServerMessage::IndexChanged {
+                            indexed_files,
+                            affected_uris: vec![uri.clone()],
+                        });
+                    }
+                }
+
                 // Spec §6.5: send DeltaAck immediately on receipt, before analysis.
                 // v0.2 will stream DeltaStream on a separate framing slot after analysis.
                 ServerMessage::DeltaAck {
@@ -446,8 +462,14 @@ impl Session {
                     let db = self.db.lock().await;
                     uris.iter()
                         .map(|uri| {
-                            if let Some(v) = db.get_file_embedding(uri) {
-                                (Some(v.clone()), None)
+                            // Route by URI scheme: lip:// → symbol store, file:// → file store.
+                            let cached = if uri.starts_with("lip://") {
+                                db.get_symbol_embedding(uri).cloned()
+                            } else {
+                                db.get_file_embedding(uri).cloned()
+                            };
+                            if let Some(v) = cached {
+                                (Some(v), None)
                             } else {
                                 let text = db.file_source_text(uri).unwrap_or_default();
                                 (None, Some((uri.clone(), text)))
@@ -479,20 +501,29 @@ impl Session {
                     }
                 };
 
-                // Store new vectors in db and assemble the response.
+                // Store new vectors in db (routed by URI scheme) and assemble the response.
                 {
                     let mut db = self.db.lock().await;
                     for (uri, vec) in miss_uris.iter().zip(new_vecs.iter()) {
-                        db.set_file_embedding(uri, vec.clone());
+                        if uri.starts_with("lip://") {
+                            db.set_symbol_embedding(uri, vec.clone());
+                        } else {
+                            db.set_file_embedding(uri, vec.clone());
+                        }
                     }
                 }
 
                 let mut miss_iter = new_vecs.into_iter();
                 let dims = {
                     let db = self.db.lock().await;
-                    db.get_file_embedding(miss_uris.first().unwrap_or(&String::new()))
-                        .map(|v| v.len())
-                        .unwrap_or(0)
+                    let empty = String::new();
+                    let first = miss_uris.first().unwrap_or(&empty);
+                    let v = if first.starts_with("lip://") {
+                        db.get_symbol_embedding(first)
+                    } else {
+                        db.get_file_embedding(first)
+                    };
+                    v.map(|v| v.len()).unwrap_or(0)
                 };
                 let vectors: Vec<Option<Vec<f32>>> = cached_hits
                     .into_iter()
@@ -583,6 +614,124 @@ impl Session {
                 let db = self.db.lock().await;
                 let results = db.nearest_by_vector(&query_vec, top_k, None);
                 ServerMessage::NearestResult { results }
+            }
+
+            // ── Feature 1: BatchQueryNearestByText ────────────────────────
+            ClientMessage::BatchQueryNearestByText {
+                queries,
+                top_k,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                // Embed all queries in one HTTP batch call; no lock held during await.
+                let (vecs, _) = match client.embed_texts(&queries, model.as_deref()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return ServerMessage::Error {
+                            message: format!("embedding failed: {e}"),
+                        }
+                    }
+                };
+                let db = self.db.lock().await;
+                let results = vecs
+                    .iter()
+                    .map(|qv| db.nearest_by_vector(qv, top_k, None))
+                    .collect();
+                ServerMessage::BatchNearestResult { results }
+            }
+
+            // ── Feature 2: QueryNearestBySymbol ───────────────────────────
+            ClientMessage::QueryNearestBySymbol {
+                symbol_uri,
+                top_k,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                // Check cache — avoid re-embedding the same symbol repeatedly.
+                let cached_vec: Option<Vec<f32>> = {
+                    let db = self.db.lock().await;
+                    db.get_symbol_embedding(&symbol_uri).cloned()
+                };
+                let query_vec = if let Some(v) = cached_vec {
+                    v
+                } else {
+                    // Build embedding text from symbol metadata.
+                    let embed_text = {
+                        let mut db = self.db.lock().await;
+                        match db.symbol_by_uri(&symbol_uri) {
+                            Some(sym) => {
+                                let mut parts = vec![sym.display_name.clone()];
+                                if let Some(sig) = &sym.signature {
+                                    parts.push(sig.clone());
+                                }
+                                if let Some(doc) = &sym.documentation {
+                                    parts.push(doc.clone());
+                                }
+                                parts.join(" ")
+                            }
+                            None => {
+                                return ServerMessage::Error {
+                                    message: format!("symbol not found: {symbol_uri}"),
+                                }
+                            }
+                        }
+                    };
+                    // Embed — no db lock held during HTTP call.
+                    let texts = vec![embed_text];
+                    let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ServerMessage::Error {
+                                message: format!("embedding failed: {e}"),
+                            }
+                        }
+                    };
+                    let v = vecs.pop().unwrap_or_default();
+                    // Cache the computed vector for future calls.
+                    {
+                        let mut db = self.db.lock().await;
+                        db.set_symbol_embedding(&symbol_uri, v.clone());
+                    }
+                    v
+                };
+                let db = self.db.lock().await;
+                let results =
+                    db.nearest_symbol_by_vector(&query_vec, top_k, Some(symbol_uri.as_str()));
+                ServerMessage::NearestResult { results }
+            }
+
+            // ── Feature 3: BatchAnnotationGet ─────────────────────────────
+            ClientMessage::BatchAnnotationGet { uris, key } => {
+                let db = self.db.lock().await;
+                let entries = uris
+                    .iter()
+                    .map(|u| {
+                        (
+                            u.clone(),
+                            db.annotation_get(u, &key).map(|e| e.value.clone()),
+                        )
+                    })
+                    .collect();
+                ServerMessage::BatchAnnotationResult { entries }
+            }
+
+            // ── Feature 5: Handshake ──────────────────────────────────────
+            ClientMessage::Handshake { client_version } => {
+                if let Some(ref v) = client_version {
+                    debug!("client handshake: client_version={v}");
+                }
+                ServerMessage::HandshakeResult {
+                    daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    protocol_version: PROTOCOL_VERSION,
+                }
             }
         }
     }
@@ -769,6 +918,36 @@ fn process_query_sync(
         }
         ClientMessage::QueryNearestByText { .. } => {
             err("QueryNearestByText is not permitted inside a BatchQuery")
+        }
+
+        // ── New v1.5 variants ─────────────────────────────────────────────
+
+        // Handshake is trivially synchronous.
+        ClientMessage::Handshake { .. } => ok(ServerMessage::HandshakeResult {
+            daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+        }),
+
+        // BatchAnnotationGet is a pure read — safe inside a batch.
+        ClientMessage::BatchAnnotationGet { uris, key } => {
+            let entries = uris
+                .iter()
+                .map(|u| {
+                    (
+                        u.clone(),
+                        db.annotation_get(u, &key).map(|e| e.value.clone()),
+                    )
+                })
+                .collect();
+            ok(ServerMessage::BatchAnnotationResult { entries })
+        }
+
+        // These two require async HTTP embedding calls.
+        ClientMessage::BatchQueryNearestByText { .. } => {
+            err("BatchQueryNearestByText requires async HTTP; not permitted in BatchQuery")
+        }
+        ClientMessage::QueryNearestBySymbol { .. } => {
+            err("QueryNearestBySymbol requires async HTTP; not permitted in BatchQuery")
         }
     }
 }
