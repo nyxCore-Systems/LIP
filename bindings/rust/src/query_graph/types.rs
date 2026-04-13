@@ -52,7 +52,7 @@ pub struct ImpactItem {
 }
 
 impl ImpactItem {
-    /// Confidence schedule matching CKB's `analyzeImpact` weighting.
+    /// Confidence schedule for blast-radius weighting.
     pub fn confidence_at(distance: u32) -> f32 {
         match distance {
             1 => 0.95,
@@ -70,6 +70,51 @@ pub struct NearestItem {
     pub uri: String,
     /// Cosine similarity in [0.0, 1.0] — higher is more similar.
     pub score: f32,
+}
+
+/// A line-range chunk boundary returned by [`ServerMessage::BoundariesResult`].
+///
+/// `[start_line, end_line]` is the chunk *before* the semantic shift.
+/// `shift_magnitude` is the cosine distance to the next chunk — higher means a sharper boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryRange {
+    pub start_line: u32,
+    pub end_line: u32,
+    /// Cosine distance in `[0.0, 2.0]` between this chunk and the following one.
+    pub shift_magnitude: f32,
+}
+
+/// Per-file novelty score in a [`ServerMessage::NoveltyScoreResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoveltyItem {
+    pub uri: String,
+    /// `1 − similarity_to_nearest_existing_file`. Range `[0.0, 1.0]`; higher = more novel.
+    pub score: f32,
+    /// The most semantically similar file *outside* the input set, or `None` when the index
+    /// has no other files with embeddings.
+    pub nearest_existing: Option<String>,
+}
+
+/// A domain term returned by [`ServerMessage::TerminologyResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermItem {
+    /// Symbol display name that is semantically central to the input file set.
+    pub term: String,
+    /// Cosine similarity to the centroid of the input files' embeddings.
+    pub score: f32,
+    /// URI of the file that defines this symbol.
+    pub source_uri: String,
+}
+
+/// Per-directory breakdown inside a [`ServerMessage::CoverageResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryCoverage {
+    /// The directory URI prefix (e.g. `file:///project/src`).
+    pub directory: String,
+    /// Number of indexed files under this directory.
+    pub total_files: usize,
+    /// Number of those files that have a cached embedding.
+    pub embedded_files: usize,
 }
 
 /// A single fuzzy-search hit returned by `ClientMessage::SimilarSymbols`.
@@ -256,7 +301,7 @@ pub enum ServerMessage {
         protocol_version: u32,
     },
 
-    // ── CKB v1.6 features ────────────────────────────────────────────────
+    // ── v1.6 features ────────────────────────────────────────────────────
     /// Response to [`ClientMessage::Similarity`].
     /// `None` when either URI has no cached embedding.
     SimilarityResult {
@@ -279,6 +324,92 @@ pub enum ServerMessage {
     ExportEmbeddingsResult {
         /// Map of URI → embedding vector. Only URIs with a cached vector are included.
         embeddings: std::collections::HashMap<String, Vec<f32>>,
+    },
+
+    // ── v1.7 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::QueryNearestByContrast`] and
+    /// [`ClientMessage::FindSemanticCounterpart`].
+    ///
+    /// Reuses [`NearestResult`] — same shape, different query semantics.
+
+    /// Response to [`ClientMessage::QueryOutliers`].
+    ///
+    /// `outliers[i].score` is the leave-one-out mean cosine similarity to the rest of the
+    /// input set — **lower score = more outlier-like**.
+    OutliersResult {
+        outliers: Vec<NearestItem>,
+    },
+
+    /// Response to [`ClientMessage::QuerySemanticDrift`].
+    ///
+    /// `distance` is the cosine distance `1 − similarity` in `[0.0, 2.0]`.
+    /// `None` when either URI has no cached embedding.
+    SemanticDriftResult {
+        distance: Option<f32>,
+    },
+
+    /// Response to [`ClientMessage::SimilarityMatrix`].
+    ///
+    /// `uris[i]` corresponds to row/column `i` of `matrix`.
+    /// URIs from the input without a cached embedding are silently excluded.
+    SimilarityMatrixResult {
+        /// URIs present in the matrix, in row order.
+        uris: Vec<String>,
+        /// Row-major N×N cosine-similarity matrix. `matrix[i][j]` = sim(`uris[i]`, `uris[j]`).
+        matrix: Vec<Vec<f32>>,
+    },
+
+    /// Response to [`ClientMessage::QueryCoverage`].
+    CoverageResult {
+        /// The root path that was queried.
+        root: String,
+        /// Total indexed files under `root`.
+        total_files: usize,
+        /// Files under `root` that have a cached embedding.
+        embedded_files: usize,
+        /// `embedded_files / total_files`. `None` when `total_files == 0`.
+        coverage_fraction: Option<f32>,
+        /// Per-directory breakdown, sorted by directory path.
+        by_directory: Vec<DirectoryCoverage>,
+    },
+
+    // ── v1.8 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::FindBoundaries`].
+    BoundariesResult {
+        /// The file that was scanned.
+        uri: String,
+        /// Chunk boundaries ordered by line number. Only chunks above `threshold` are returned.
+        boundaries: Vec<BoundaryRange>,
+    },
+
+    /// Response to [`ClientMessage::SemanticDiff`].
+    SemanticDiffResult {
+        /// Cosine distance `1 − similarity` between the two content embeddings. `[0.0, 2.0]`.
+        distance: f32,
+        /// Nearest files to the *direction* the content moved (i.e. nearest to `new − old`).
+        moving_toward: Vec<NearestItem>,
+    },
+
+    /// Response to [`ClientMessage::QueryNoveltyScore`].
+    NoveltyScoreResult {
+        /// Mean novelty across all scored input files. `0.0` when no file had an embedding.
+        score: f32,
+        /// Per-file breakdown, sorted by descending novelty score.
+        per_file: Vec<NoveltyItem>,
+    },
+
+    /// Response to [`ClientMessage::ExtractTerminology`].
+    TerminologyResult {
+        /// Domain terms ranked by semantic centrality to the input file set.
+        terms: Vec<TermItem>,
+    },
+
+    /// Response to [`ClientMessage::PruneDeleted`].
+    PruneDeletedResult {
+        /// Number of tracked file URIs that were checked against the filesystem.
+        checked: usize,
+        /// URIs that no longer exist on disk and were removed from the index.
+        removed: Vec<String>,
     },
 }
 
@@ -434,7 +565,7 @@ pub enum ClientMessage {
         client_version: Option<String>,
     },
 
-    // ── CKB v1.6 features ────────────────────────────────────────────────
+    // ── v1.6 features ────────────────────────────────────────────────────
     /// Force a re-index of specific file URIs from disk, bypassing the directory
     /// scan. Useful when the client knows exactly which files changed out-of-band
     /// (e.g. after a selective git checkout). Returns `DeltaAck`.
@@ -475,6 +606,147 @@ pub enum ClientMessage {
     ExportEmbeddings {
         uris: Vec<String>,
     },
+
+    // ── v1.7 features ────────────────────────────────────────────────────
+    /// Contrastive nearest-neighbour search using vector arithmetic.
+    ///
+    /// Computes `normalize(embed(like_uri) − embed(unlike_uri))` then finds the
+    /// `top_k` files most similar to that direction.  Both URIs must have cached
+    /// embeddings — call `EmbeddingBatch` first if needed.
+    /// Returns `NearestResult`.
+    QueryNearestByContrast {
+        /// URI of the file whose embedding we want to move *towards*.
+        like_uri: String,
+        /// URI of the file whose embedding we want to move *away from*.
+        unlike_uri: String,
+        top_k: usize,
+    },
+
+    /// Return the `top_k` files from `uris` that are most semantically dissimilar
+    /// from the rest of the group.
+    ///
+    /// Uses leave-one-out mean cosine similarity: for each URI compute the mean
+    /// similarity to all other URIs in the set; the lowest-scoring URIs are the
+    /// outliers. URIs without a cached embedding are silently excluded.
+    /// Returns `OutliersResult`.
+    QueryOutliers {
+        uris: Vec<String>,
+        top_k: usize,
+    },
+
+    /// Compute the semantic drift between two URIs as a cosine distance scalar.
+    ///
+    /// `distance = 1 − cosine_similarity`.  Range `[0.0, 2.0]`; `0.0` = identical.
+    /// Returns `None` when either URI has no cached embedding.
+    /// Returns `SemanticDriftResult`.
+    QuerySemanticDrift {
+        uri_a: String,
+        uri_b: String,
+    },
+
+    /// Compute all pairwise cosine similarities for a list of URIs in one call.
+    ///
+    /// Only URIs that already have a cached embedding are included in the result;
+    /// the rest are silently excluded.  Returns `SimilarityMatrixResult`.
+    SimilarityMatrix {
+        uris: Vec<String>,
+    },
+
+    /// Given a source URI and a pool of candidate URIs, return the `top_k` candidates
+    /// most semantically similar to the source.
+    ///
+    /// The source must have a cached embedding.  Candidates without embeddings are
+    /// silently excluded.  Returns `NearestResult`.
+    FindSemanticCounterpart {
+        /// The file (or symbol) to match against.
+        uri: String,
+        /// Candidate URIs to rank.
+        candidates: Vec<String>,
+        top_k: usize,
+    },
+
+    /// Report how much of the index under a filesystem root has embedding coverage.
+    ///
+    /// `root` is matched as a path prefix against `file://` URIs tracked by the daemon
+    /// (e.g. `"/project/src"` matches `file:///project/src/foo.rs`).
+    /// Returns `CoverageResult`.
+    QueryCoverage {
+        /// Filesystem path prefix to scope the report (e.g. `"/project/src"`).
+        root: String,
+    },
+
+    // ── v1.8 features ────────────────────────────────────────────────────
+    /// Detect semantic boundaries within a file by chunking and embedding.
+    ///
+    /// Splits the file's source text into windows of `chunk_lines` lines, embeds each window,
+    /// and returns the positions where cosine distance between adjacent windows exceeds
+    /// `threshold`. Useful for identifying natural split points during extract refactors.
+    /// Requires `LIP_EMBEDDING_URL`. Returns `BoundariesResult`.
+    FindBoundaries {
+        /// File URI to scan.
+        uri: String,
+        /// Number of lines per embedding window. Default 30.
+        chunk_lines: usize,
+        /// Minimum cosine distance to report as a boundary. Default 0.3.
+        threshold: f32,
+        model: Option<String>,
+    },
+
+    /// Measure how much the semantic content of a file has changed between two versions.
+    ///
+    /// Embeds `content_a` (old) and `content_b` (new), returns:
+    /// - `distance`: cosine distance `1 − similarity` — the drift magnitude.
+    /// - `moving_toward`: `top_k` nearest files to the *direction* of change
+    ///   (`normalize(new − old)`), naming what concepts the content moved towards.
+    /// Requires `LIP_EMBEDDING_URL`. Returns `SemanticDiffResult`.
+    SemanticDiff {
+        content_a: String,
+        content_b: String,
+        top_k: usize,
+        model: Option<String>,
+    },
+
+    /// Semantic nearest-neighbour search against a caller-provided embedding store.
+    ///
+    /// Useful for cross-repo federation: export embeddings from each repo root via
+    /// `ExportEmbeddings`, merge the maps, then query across all roots in one call.
+    /// The query `uri` must have a cached embedding in the daemon's own index.
+    /// Returns `NearestResult`.
+    QueryNearestInStore {
+        /// The file whose embedding is used as the query vector.
+        uri: String,
+        /// External embedding store: map of URI → embedding vector.
+        store: std::collections::HashMap<String, Vec<f32>>,
+        top_k: usize,
+    },
+
+    /// Compute how semantically novel a set of files is relative to the existing codebase.
+    ///
+    /// For each URI in `uris`, finds its nearest neighbour *outside* the set and returns
+    /// `1 − similarity` as that file's novelty score. The overall `score` is the mean.
+    /// URIs without a cached embedding are skipped. Returns `NoveltyScoreResult`.
+    QueryNoveltyScore {
+        uris: Vec<String>,
+    },
+
+    /// Extract the domain vocabulary most semantically central to a set of files.
+    ///
+    /// Computes the centroid of the input files' embeddings, then scores each symbol
+    /// defined in those files by its embedding's similarity to the centroid. Returns
+    /// the `top_k` most central symbol display names.
+    ///
+    /// Requires symbol embeddings — call `EmbeddingBatch` with `lip://` URIs first.
+    /// Returns `TerminologyResult`.
+    ExtractTerminology {
+        uris: Vec<String>,
+        top_k: usize,
+    },
+
+    /// Remove index entries for files that no longer exist on disk.
+    ///
+    /// Iterates all tracked file URIs, checks each against the filesystem, and
+    /// removes stale entries (including their embeddings). Returns `PruneDeletedResult`.
+    PruneDeleted,
 }
 
 impl ClientMessage {
@@ -492,6 +764,9 @@ impl ClientMessage {
                 | ClientMessage::ReindexFiles { .. }
                 | ClientMessage::QueryExpansion { .. }
                 | ClientMessage::Cluster { .. }
+                | ClientMessage::FindBoundaries { .. }
+                | ClientMessage::SemanticDiff { .. }
+                | ClientMessage::PruneDeleted
         )
     }
 }
@@ -747,6 +1022,419 @@ mod tests {
     #[test]
     fn export_embeddings_is_batchable() {
         let msg = ClientMessage::ExportEmbeddings { uris: vec![] };
+        assert!(msg.is_batchable());
+    }
+
+    // ── v1.7 round-trip tests ─────────────────────────────────────────────
+
+    #[test]
+    fn query_nearest_by_contrast_round_trips() {
+        let msg = ClientMessage::QueryNearestByContrast {
+            like_uri: "file:///src/new_auth.rs".into(),
+            unlike_uri: "file:///src/legacy_auth.rs".into(),
+            top_k: 5,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryNearestByContrast {
+            like_uri,
+            unlike_uri,
+            top_k,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(like_uri, "file:///src/new_auth.rs");
+        assert_eq!(unlike_uri, "file:///src/legacy_auth.rs");
+        assert_eq!(top_k, 5);
+    }
+
+    #[test]
+    fn query_outliers_round_trips() {
+        let msg = ClientMessage::QueryOutliers {
+            uris: vec!["file:///src/a.rs".into(), "file:///src/b.rs".into()],
+            top_k: 3,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryOutliers { uris, top_k } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+        assert_eq!(top_k, 3);
+    }
+
+    #[test]
+    fn outliers_result_round_trips() {
+        let msg = ServerMessage::OutliersResult {
+            outliers: vec![NearestItem {
+                uri: "file:///src/billing.go".into(),
+                score: 0.12,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::OutliersResult { outliers } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(outliers.len(), 1);
+        assert!((outliers[0].score - 0.12).abs() < 1e-5);
+    }
+
+    #[test]
+    fn query_semantic_drift_round_trips() {
+        let msg = ClientMessage::QuerySemanticDrift {
+            uri_a: "file:///a.rs".into(),
+            uri_b: "file:///b.rs".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QuerySemanticDrift { uri_a, uri_b } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri_a, "file:///a.rs");
+        assert_eq!(uri_b, "file:///b.rs");
+    }
+
+    #[test]
+    fn semantic_drift_result_round_trips() {
+        let msg = ServerMessage::SemanticDriftResult {
+            distance: Some(0.42),
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::SemanticDriftResult { distance } = rt else {
+            panic!("wrong variant");
+        };
+        assert!((distance.unwrap() - 0.42).abs() < 1e-5);
+    }
+
+    #[test]
+    fn similarity_matrix_round_trips() {
+        let msg = ClientMessage::SimilarityMatrix {
+            uris: vec!["file:///a.rs".into(), "file:///b.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::SimilarityMatrix { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn similarity_matrix_result_round_trips() {
+        let msg = ServerMessage::SimilarityMatrixResult {
+            uris: vec!["file:///a.rs".into(), "file:///b.rs".into()],
+            matrix: vec![vec![1.0, 0.7], vec![0.7, 1.0]],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::SimilarityMatrixResult { uris, matrix } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+        assert!((matrix[0][1] - 0.7).abs() < 1e-5);
+        assert!((matrix[1][0] - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn find_semantic_counterpart_round_trips() {
+        let msg = ClientMessage::FindSemanticCounterpart {
+            uri: "file:///src/auth.rs".into(),
+            candidates: vec![
+                "file:///tests/auth_test.rs".into(),
+                "file:///tests/other_test.rs".into(),
+            ],
+            top_k: 1,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::FindSemanticCounterpart {
+            uri,
+            candidates,
+            top_k,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/auth.rs");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(top_k, 1);
+    }
+
+    #[test]
+    fn query_coverage_round_trips() {
+        let msg = ClientMessage::QueryCoverage {
+            root: "/project/src".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryCoverage { root } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(root, "/project/src");
+    }
+
+    #[test]
+    fn coverage_result_round_trips() {
+        let msg = ServerMessage::CoverageResult {
+            root: "/project/src".into(),
+            total_files: 10,
+            embedded_files: 7,
+            coverage_fraction: Some(0.7),
+            by_directory: vec![DirectoryCoverage {
+                directory: "file:///project/src".into(),
+                total_files: 10,
+                embedded_files: 7,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::CoverageResult {
+            total_files,
+            embedded_files,
+            coverage_fraction,
+            by_directory,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(total_files, 10);
+        assert_eq!(embedded_files, 7);
+        assert!((coverage_fraction.unwrap() - 0.7).abs() < 1e-5);
+        assert_eq!(by_directory.len(), 1);
+    }
+
+    // ── v1.8 round-trip tests ─────────────────────────────────────────────
+
+    #[test]
+    fn find_boundaries_round_trips() {
+        let msg = ClientMessage::FindBoundaries {
+            uri: "file:///src/large.rs".into(),
+            chunk_lines: 30,
+            threshold: 0.3,
+            model: None,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::FindBoundaries {
+            uri,
+            chunk_lines,
+            threshold,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/large.rs");
+        assert_eq!(chunk_lines, 30);
+        assert!((threshold - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn boundaries_result_round_trips() {
+        let msg = ServerMessage::BoundariesResult {
+            uri: "file:///src/large.rs".into(),
+            boundaries: vec![BoundaryRange {
+                start_line: 0,
+                end_line: 29,
+                shift_magnitude: 0.55,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::BoundariesResult { uri, boundaries } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/large.rs");
+        assert_eq!(boundaries.len(), 1);
+        assert!((boundaries[0].shift_magnitude - 0.55).abs() < 1e-5);
+    }
+
+    #[test]
+    fn semantic_diff_round_trips() {
+        let msg = ClientMessage::SemanticDiff {
+            content_a: "old content".into(),
+            content_b: "new content".into(),
+            top_k: 5,
+            model: None,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::SemanticDiff {
+            content_a,
+            content_b,
+            top_k,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(content_a, "old content");
+        assert_eq!(content_b, "new content");
+        assert_eq!(top_k, 5);
+    }
+
+    #[test]
+    fn semantic_diff_result_round_trips() {
+        let msg = ServerMessage::SemanticDiffResult {
+            distance: 0.22,
+            moving_toward: vec![NearestItem {
+                uri: "file:///src/auth.rs".into(),
+                score: 0.91,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::SemanticDiffResult {
+            distance,
+            moving_toward,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert!((distance - 0.22).abs() < 1e-5);
+        assert_eq!(moving_toward.len(), 1);
+    }
+
+    #[test]
+    fn query_nearest_in_store_round_trips() {
+        let mut store = std::collections::HashMap::new();
+        store.insert("file:///other/a.rs".to_owned(), vec![1.0f32, 0.0]);
+        let msg = ClientMessage::QueryNearestInStore {
+            uri: "file:///src/auth.rs".into(),
+            store,
+            top_k: 3,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryNearestInStore { uri, store, top_k } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/auth.rs");
+        assert_eq!(top_k, 3);
+        assert!(store.contains_key("file:///other/a.rs"));
+    }
+
+    #[test]
+    fn query_novelty_score_round_trips() {
+        let msg = ClientMessage::QueryNoveltyScore {
+            uris: vec!["file:///src/new.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryNoveltyScore { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 1);
+    }
+
+    #[test]
+    fn novelty_score_result_round_trips() {
+        let msg = ServerMessage::NoveltyScoreResult {
+            score: 0.65,
+            per_file: vec![NoveltyItem {
+                uri: "file:///src/new.rs".into(),
+                score: 0.65,
+                nearest_existing: Some("file:///src/auth.rs".into()),
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::NoveltyScoreResult { score, per_file } = rt else {
+            panic!("wrong variant");
+        };
+        assert!((score - 0.65).abs() < 1e-5);
+        assert_eq!(per_file.len(), 1);
+        assert_eq!(per_file[0].nearest_existing.as_deref(), Some("file:///src/auth.rs"));
+    }
+
+    #[test]
+    fn extract_terminology_round_trips() {
+        let msg = ClientMessage::ExtractTerminology {
+            uris: vec!["file:///src/auth.rs".into()],
+            top_k: 10,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::ExtractTerminology { uris, top_k } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 1);
+        assert_eq!(top_k, 10);
+    }
+
+    #[test]
+    fn terminology_result_round_trips() {
+        let msg = ServerMessage::TerminologyResult {
+            terms: vec![TermItem {
+                term: "authenticate".into(),
+                score: 0.88,
+                source_uri: "file:///src/auth.rs".into(),
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::TerminologyResult { terms } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].term, "authenticate");
+    }
+
+    #[test]
+    fn prune_deleted_round_trips() {
+        let msg = ClientMessage::PruneDeleted;
+        let rt = round_trip_client(&msg);
+        assert!(matches!(rt, ClientMessage::PruneDeleted));
+    }
+
+    #[test]
+    fn prune_deleted_result_round_trips() {
+        let msg = ServerMessage::PruneDeletedResult {
+            checked: 42,
+            removed: vec!["file:///src/gone.rs".into()],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::PruneDeletedResult { checked, removed } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(checked, 42);
+        assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn find_boundaries_not_batchable() {
+        let msg = ClientMessage::FindBoundaries {
+            uri: "file:///src/f.rs".into(),
+            chunk_lines: 30,
+            threshold: 0.3,
+            model: None,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn semantic_diff_not_batchable() {
+        let msg = ClientMessage::SemanticDiff {
+            content_a: String::new(),
+            content_b: String::new(),
+            top_k: 5,
+            model: None,
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn prune_deleted_not_batchable() {
+        assert!(!ClientMessage::PruneDeleted.is_batchable());
+    }
+
+    #[test]
+    fn query_nearest_in_store_is_batchable() {
+        let msg = ClientMessage::QueryNearestInStore {
+            uri: "file:///a.rs".into(),
+            store: std::collections::HashMap::new(),
+            top_k: 5,
+        };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn query_novelty_score_is_batchable() {
+        let msg = ClientMessage::QueryNoveltyScore { uris: vec![] };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn extract_terminology_is_batchable() {
+        let msg = ClientMessage::ExtractTerminology {
+            uris: vec![],
+            top_k: 10,
+        };
         assert!(msg.is_batchable());
     }
 

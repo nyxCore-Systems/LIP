@@ -202,6 +202,94 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
             top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
             model: args["model"].as_str().map(str::to_owned),
         },
+        "lip_nearest_by_contrast" => ClientMessage::QueryNearestByContrast {
+            like_uri: req_str(args, "like_uri")?,
+            unlike_uri: req_str(args, "unlike_uri")?,
+            top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+        },
+        "lip_outliers" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::QueryOutliers {
+                uris,
+                top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(5),
+            }
+        }
+        "lip_semantic_drift" => ClientMessage::QuerySemanticDrift {
+            uri_a: req_str(args, "uri_a")?,
+            uri_b: req_str(args, "uri_b")?,
+        },
+        "lip_similarity_matrix" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::SimilarityMatrix { uris }
+        }
+        "lip_find_counterpart" => {
+            let candidates_val = args
+                .get("candidates")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `candidates`"))?;
+            let candidates: Vec<String> = serde_json::from_value(candidates_val.clone())
+                .map_err(|e| anyhow::anyhow!("`candidates` must be an array of strings: {e}"))?;
+            ClientMessage::FindSemanticCounterpart {
+                uri: req_str(args, "uri")?,
+                candidates,
+                top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(5),
+            }
+        }
+        "lip_coverage" => ClientMessage::QueryCoverage {
+            root: req_str(args, "root")?,
+        },
+        "lip_find_boundaries" => ClientMessage::FindBoundaries {
+            uri: req_str(args, "uri")?,
+            chunk_lines: args["chunk_lines"].as_u64().map(|n| n as usize).unwrap_or(30),
+            threshold: args["threshold"].as_f64().map(|f| f as f32).unwrap_or(0.3),
+            model: args["model"].as_str().map(str::to_owned),
+        },
+        "lip_semantic_diff" => ClientMessage::SemanticDiff {
+            content_a: req_str(args, "content_a")?,
+            content_b: req_str(args, "content_b")?,
+            top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(5),
+            model: args["model"].as_str().map(str::to_owned),
+        },
+        "lip_nearest_in_store" => {
+            let store_val = args
+                .get("store")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `store`"))?;
+            let store: std::collections::HashMap<String, Vec<f32>> =
+                serde_json::from_value(store_val.clone())
+                    .map_err(|e| anyhow::anyhow!("`store` must be a map of uri→[f32]: {e}"))?;
+            ClientMessage::QueryNearestInStore {
+                uri: req_str(args, "uri")?,
+                store,
+                top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(10),
+            }
+        }
+        "lip_novelty_score" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::QueryNoveltyScore { uris }
+        }
+        "lip_extract_terminology" => {
+            let uris_val = args
+                .get("uris")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `uris`"))?;
+            let uris: Vec<String> = serde_json::from_value(uris_val.clone())
+                .map_err(|e| anyhow::anyhow!("`uris` must be an array of strings: {e}"))?;
+            ClientMessage::ExtractTerminology {
+                uris,
+                top_k: args["top_k"].as_u64().map(|n| n as usize).unwrap_or(20),
+            }
+        }
+        "lip_prune_deleted" => ClientMessage::PruneDeleted,
         other => anyhow::bail!("unknown LIP tool: {other}"),
     };
 
@@ -433,6 +521,146 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
                 .map(|r| format!("score={:.4}  {}", r.score, r.uri))
                 .collect::<Vec<_>>()
                 .join("\n")
+        }
+        ServerMessage::BoundariesResult { uri, boundaries } => {
+            if boundaries.is_empty() {
+                return format!("{uri}: no semantic boundaries detected above threshold");
+            }
+            let mut out = format!("{uri}  ({} boundaries)\n", boundaries.len());
+            for b in boundaries {
+                out.push_str(&format!(
+                    "  lines {:>5}–{:<5}  shift={:.4}\n",
+                    b.start_line, b.end_line, b.shift_magnitude
+                ));
+            }
+            out.trim_end().to_owned()
+        }
+        ServerMessage::SemanticDiffResult {
+            distance,
+            moving_toward,
+        } => {
+            let mut out = format!("drift={distance:.4}");
+            if !moving_toward.is_empty() {
+                out.push_str("  moving toward:");
+                for r in moving_toward {
+                    out.push_str(&format!("\n  score={:.4}  {}", r.score, r.uri));
+                }
+            }
+            out
+        }
+        ServerMessage::NoveltyScoreResult { score, per_file } => {
+            let mut out = format!("novelty score={score:.4}  ({} files)\n", per_file.len());
+            for item in per_file {
+                let nearest = item
+                    .nearest_existing
+                    .as_deref()
+                    .unwrap_or("(none — no other embeddings)");
+                out.push_str(&format!(
+                    "  novelty={:.4}  {}  nearest={}\n",
+                    item.score, item.uri, nearest
+                ));
+            }
+            out.trim_end().to_owned()
+        }
+        ServerMessage::TerminologyResult { terms } => {
+            if terms.is_empty() {
+                return "No terminology extracted (ensure symbol embeddings are populated \
+                         via lip_embedding_batch with lip:// URIs)."
+                    .into();
+            }
+            terms
+                .iter()
+                .map(|t| format!("score={:.4}  {:<30}  {}", t.score, t.term, t.source_uri))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ServerMessage::PruneDeletedResult { checked, removed } => {
+            if removed.is_empty() {
+                format!("checked={checked}  removed=0  index is clean")
+            } else {
+                let mut out =
+                    format!("checked={checked}  removed={}:\n", removed.len());
+                for uri in removed {
+                    out.push_str(&format!("  {uri}\n"));
+                }
+                out.trim_end().to_owned()
+            }
+        }
+        ServerMessage::OutliersResult { outliers } => {
+            if outliers.is_empty() {
+                return "No outliers found (no embeddings for the given URIs).".into();
+            }
+            outliers
+                .iter()
+                .map(|r| format!("mean_sim={:.4}  {}", r.score, r.uri))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ServerMessage::SemanticDriftResult { distance } => match distance {
+            Some(d) => format!("drift={d:.4}  (cosine distance; 0.0=identical, 2.0=opposite)"),
+            None => "no cached embeddings for one or both URIs — call embedding_batch first".into(),
+        },
+        ServerMessage::SimilarityMatrixResult { uris, matrix } => {
+            if uris.is_empty() {
+                return "No indexed URIs with embeddings in the provided list.".into();
+            }
+            // Header row with short labels
+            let labels: Vec<String> = uris
+                .iter()
+                .map(|u| {
+                    u.rsplit('/')
+                        .next()
+                        .unwrap_or(u.as_str())
+                        .chars()
+                        .take(12)
+                        .collect()
+                })
+                .collect();
+            let col_w = 7usize;
+            let row_label_w = labels.iter().map(|l| l.len()).max().unwrap_or(0).max(4);
+            let mut out = format!("{:<row_label_w$}", "");
+            for label in &labels {
+                out.push_str(&format!("  {:>col_w$}", label));
+            }
+            for (i, row) in matrix.iter().enumerate() {
+                out.push_str(&format!("\n{:<row_label_w$}", labels[i]));
+                for val in row {
+                    out.push_str(&format!("  {:>col_w$.4}", val));
+                }
+            }
+            out
+        }
+        ServerMessage::CoverageResult {
+            root,
+            total_files,
+            embedded_files,
+            coverage_fraction,
+            by_directory,
+        } => {
+            let pct = coverage_fraction
+                .map(|f| format!("{:.1}%", f * 100.0))
+                .unwrap_or_else(|| "n/a".into());
+            let mut out = format!(
+                "coverage: {embedded_files}/{total_files} files embedded ({pct})  root={root}"
+            );
+            if !by_directory.is_empty() {
+                out.push_str("\n\nby directory:");
+                for dir in by_directory {
+                    let dir_pct = if dir.total_files > 0 {
+                        format!(
+                            "{:.0}%",
+                            dir.embedded_files as f32 / dir.total_files as f32 * 100.0
+                        )
+                    } else {
+                        "n/a".into()
+                    };
+                    out.push_str(&format!(
+                        "\n  {:<5}  {}/{} embedded  {}",
+                        dir_pct, dir.embedded_files, dir.total_files, dir.directory
+                    ));
+                }
+            }
+            out
         }
         ServerMessage::Error { message } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
@@ -762,6 +990,230 @@ fn tools_manifest() -> Value {
             }
         },
         {
+            "name": "lip_nearest_by_contrast",
+            "description": "Contrastive semantic search: find files similar to `like_uri` \
+                            but different from `unlike_uri`. \
+                            Computes normalize(embed(like) − embed(unlike)) then runs cosine search. \
+                            Example: like=new_auth.rs unlike=legacy_auth.rs → files in the style \
+                            of the new module but not the old one. \
+                            Both URIs must have cached embeddings — call lip_embedding_batch first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "like_uri":   { "type": "string",  "description": "URI to move towards" },
+                    "unlike_uri": { "type": "string",  "description": "URI to move away from" },
+                    "top_k":      { "type": "integer", "default": 10 }
+                },
+                "required": ["like_uri", "unlike_uri"]
+            }
+        },
+        {
+            "name": "lip_outliers",
+            "description": "Identify semantically misplaced files within a set. \
+                            For each URI computes its leave-one-out mean cosine similarity \
+                            to the rest of the group; returns the top_k lowest-scoring files. \
+                            Useful for finding files that conceptually don't belong in a package \
+                            even when they are structurally co-located.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris":  {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File URIs to analyse (all must have cached embeddings)"
+                    },
+                    "top_k": { "type": "integer", "default": 5 }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_semantic_drift",
+            "description": "Measure how semantically different two files are. \
+                            Returns cosine distance in [0.0, 2.0]: 0.0 = identical meaning, \
+                            ~0.3 = similar, ~1.0 = unrelated, 2.0 = opposite. \
+                            Useful for tracking how much a module's identity has shifted \
+                            between versions. Both URIs must have cached embeddings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri_a": { "type": "string", "description": "First file URI" },
+                    "uri_b": { "type": "string", "description": "Second file URI" }
+                },
+                "required": ["uri_a", "uri_b"]
+            }
+        },
+        {
+            "name": "lip_similarity_matrix",
+            "description": "Compute all pairwise cosine similarities for a list of files \
+                            in a single call. Returns a labelled N×N matrix. \
+                            Useful for building a semantic coupling graph over a module — \
+                            two files can be tightly coupled conceptually even if they \
+                            never co-change. URIs without embeddings are silently excluded.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File URIs to compare"
+                    }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_find_counterpart",
+            "description": "Given a source file and a pool of candidates, return the candidates \
+                            most semantically similar to the source. \
+                            Finds test files that cover a changed implementation even when naming \
+                            conventions differ or tests live in a separate repo. \
+                            The source URI must have a cached embedding.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri": {
+                        "type": "string",
+                        "description": "The implementation file to match against"
+                    },
+                    "candidates": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Pool of candidate URIs to rank (e.g. all test files)"
+                    },
+                    "top_k": { "type": "integer", "default": 5 }
+                },
+                "required": ["uri", "candidates"]
+            }
+        },
+        {
+            "name": "lip_coverage",
+            "description": "Report embedding coverage under a filesystem path. \
+                            Shows what percentage of indexed files have embeddings, \
+                            broken down by directory. \
+                            Use to diagnose silent degradation during warm-up: \
+                            semantic search quality is proportional to coverage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root": {
+                        "type": "string",
+                        "description": "Filesystem path prefix to scope the report, \
+                                        e.g. \"/project/src\""
+                    }
+                },
+                "required": ["root"]
+            }
+        },
+        {
+            "name": "lip_find_boundaries",
+            "description": "Detect semantic boundaries within a file by chunking it into \
+                            line-windows and embedding each window. Returns the positions \
+                            where meaning shifts significantly — useful for identifying \
+                            natural split points during extract refactors, or for \
+                            understanding how a file is conceptually organized beyond its \
+                            AST structure. Requires LIP_EMBEDDING_URL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri":         { "type": "string",  "description": "File URI to scan" },
+                    "chunk_lines": { "type": "integer", "default": 30,
+                                     "description": "Lines per embedding window" },
+                    "threshold":   { "type": "number",  "default": 0.3,
+                                     "description": "Min cosine distance to report (0.0–2.0)" },
+                    "model":       { "type": "string",  "description": "Override embedding model" }
+                },
+                "required": ["uri"]
+            }
+        },
+        {
+            "name": "lip_semantic_diff",
+            "description": "Measure how much the semantic content of a file changed between \
+                            two versions. Returns a drift distance (0.0 = identical, 2.0 = opposite) \
+                            and the nearest files to the *direction* of change — naming the concepts \
+                            the content moved toward. Catches semantic breaking changes that \
+                            structural diffs miss: a renamed function whose body quietly changed \
+                            to do something different. Requires LIP_EMBEDDING_URL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content_a": { "type": "string", "description": "Old file content" },
+                    "content_b": { "type": "string", "description": "New file content" },
+                    "top_k":     { "type": "integer", "default": 5 },
+                    "model":     { "type": "string",  "description": "Override embedding model" }
+                },
+                "required": ["content_a", "content_b"]
+            }
+        },
+        {
+            "name": "lip_nearest_in_store",
+            "description": "Semantic nearest-neighbour search against a caller-provided \
+                            embedding store. Use for cross-repo federation: export embeddings \
+                            from each repo root via lip_embedding_batch with ExportEmbeddings, \
+                            merge the maps, then search across all repos in one call. \
+                            The query URI must have a cached embedding in the local daemon.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri":   { "type": "string",  "description": "Query file URI (must be embedded locally)" },
+                    "store": { "type": "object",  "description": "External embedding store: map of uri→[f32]" },
+                    "top_k": { "type": "integer", "default": 10 }
+                },
+                "required": ["uri", "store"]
+            }
+        },
+        {
+            "name": "lip_novelty_score",
+            "description": "Quantify how semantically novel a set of files is relative to \
+                            the rest of the codebase. For each file finds its nearest existing \
+                            neighbour (outside the set) and returns 1 − similarity as novelty. \
+                            High novelty means the PR introduces concepts not seen elsewhere — \
+                            worth extra review attention regardless of structural complexity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File URIs to score (typically the PR diff set)"
+                    }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_extract_terminology",
+            "description": "Extract the domain vocabulary most semantically central to a \
+                            set of files. Ranks symbol display names by their proximity to \
+                            the centroid of the input files' embeddings. Surfaces the implicit \
+                            vocabulary — terms that are conceptually load-bearing even when \
+                            they don't appear as prominent symbol names. \
+                            Requires symbol embeddings (call lip_embedding_batch with lip:// URIs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File URIs whose symbols to rank"
+                    },
+                    "top_k": { "type": "integer", "default": 20 }
+                },
+                "required": ["uris"]
+            }
+        },
+        {
+            "name": "lip_prune_deleted",
+            "description": "Remove index entries for files that no longer exist on disk. \
+                            On repos with high churn, ghost embeddings accumulate and pollute \
+                            nearest-neighbour results. Run periodically or before any semantic \
+                            search on a stale index. Returns a count of checked and removed files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
             "name": "lip_batch_query",
             "description": "Execute multiple queries in a single round-trip — \
                             one socket connection instead of N. \
@@ -791,7 +1243,18 @@ fn tools_manifest() -> Value {
                                         "query_dead_symbols",
                                         "annotation_get",
                                         "annotation_set",
-                                        "annotation_list"
+                                        "annotation_list",
+                                        "similarity",
+                                        "export_embeddings",
+                                        "query_nearest_by_contrast",
+                                        "query_outliers",
+                                        "query_semantic_drift",
+                                        "similarity_matrix",
+                                        "find_semantic_counterpart",
+                                        "query_coverage",
+                                        "query_nearest_in_store",
+                                        "query_novelty_score",
+                                        "extract_terminology"
                                     ]
                                 }
                             },

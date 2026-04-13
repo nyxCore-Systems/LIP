@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 
 ---
 
+## [Unreleased] — v1.7 / v1.8 semantic intelligence layer
+
+### Added
+
+**v1.7 — Semantic retrieval primitives (12 new wire messages)**
+
+- **`QueryNearestByContrast { like_uri, unlike_uri, top_k }`** — contrastive nearest-neighbour search using vector arithmetic: computes `normalize(embed(like) − embed(unlike))` then finds the `top_k` files most similar to that direction. Both URIs must have cached embeddings. Returns `NearestResult`. Safe inside `BatchQuery`.
+- **`QueryOutliers { uris, top_k }`** — return the `top_k` files from `uris` that are most semantically dissimilar from the rest of the group. Uses leave-one-out mean cosine similarity: files with the lowest mean similarity to peers are returned first. Returns `OutliersResult { outliers: Vec<NearestItem> }`. Safe inside `BatchQuery`.
+- **`QuerySemanticDrift { uri_a, uri_b }`** — compute the cosine distance `1 − similarity` between two stored embeddings. Range `[0.0, 2.0]`. Returns `SemanticDriftResult { distance: Option<f32> }`. Safe inside `BatchQuery`.
+- **`SimilarityMatrix { uris }`** — compute all pairwise cosine similarities for a list of URIs in one call. URIs without cached embeddings are silently excluded. Returns `SimilarityMatrixResult { uris: Vec<String>, matrix: Vec<Vec<f32>> }`. Safe inside `BatchQuery`.
+- **`FindSemanticCounterpart { uri, candidates, top_k }`** — given a source URI and a pool of candidates, return the `top_k` candidates most semantically similar to the source. Finds test files that cover a changed implementation even when naming conventions differ. Returns `NearestResult`. Safe inside `BatchQuery`.
+- **`QueryCoverage { root }`** — report embedding coverage under a filesystem path. Shows the fraction of indexed files that have embeddings, broken down by directory. Returns `CoverageResult`. Safe inside `BatchQuery`.
+- **6 new MCP tools**: `lip_nearest_by_contrast`, `lip_outliers`, `lip_semantic_drift`, `lip_similarity_matrix`, `lip_find_counterpart`, `lip_coverage`.
+
+**v1.8 — Higher-order semantic analysis (6 new wire messages)**
+
+- **`FindBoundaries { uri, chunk_lines, threshold, model }`** — detect semantic boundaries within a file by splitting it into `chunk_lines`-line windows, embedding each in one batch HTTP call, and returning positions where the cosine distance between adjacent windows exceeds `threshold`. Defaults: 30 lines, 0.3 threshold. Returns `BoundariesResult { uri, boundaries: Vec<BoundaryRange> }`. Not permitted inside `BatchQuery` (requires HTTP).
+- **`SemanticDiff { content_a, content_b, top_k, model }`** — measure how much the meaning of a file changed between two versions. Returns `SemanticDiffResult { distance, moving_toward }`: `distance` is the cosine distance between the two content embeddings; `moving_toward` is the `top_k` nearest files to `normalize(new − old)`, naming the concepts the content moved toward. Not permitted inside `BatchQuery` (requires HTTP).
+- **`QueryNearestInStore { uri, store, top_k }`** — nearest-neighbour search against a caller-provided `HashMap<String, Vec<f32>>`. Enables cross-repo federation: export embeddings from each root via `ExportEmbeddings`, merge the maps, then search across all repos in one call. The query URI must have a cached local embedding. Returns `NearestResult`. Safe inside `BatchQuery`.
+- **`QueryNoveltyScore { uris }`** — quantify how semantically novel a set of files is relative to the existing codebase. For each URI finds its nearest neighbour outside the input set and returns `1 − similarity` as that file's novelty score. Returns `NoveltyScoreResult { score: f32, per_file: Vec<NoveltyItem> }`, sorted by descending novelty. Safe inside `BatchQuery`.
+- **`ExtractTerminology { uris, top_k }`** — extract the domain vocabulary most semantically central to a set of files. Computes the centroid of the input files' embeddings, then scores each symbol by its embedding's proximity to that centroid. Returns `TerminologyResult { terms: Vec<TermItem> }`. Requires symbol embeddings — call `EmbeddingBatch` with `lip://` URIs first. Safe inside `BatchQuery`.
+- **`PruneDeleted`** — remove index entries (including embeddings) for files that no longer exist on disk. On repos with high churn, ghost embeddings accumulate and pollute nearest-neighbour results. Fires `IndexChanged` after removal. Returns `PruneDeletedResult { checked, removed }`. Not permitted inside `BatchQuery` (requires filesystem I/O).
+- **6 new MCP tools**: `lip_find_boundaries`, `lip_semantic_diff`, `lip_nearest_in_store`, `lip_novelty_score`, `lip_extract_terminology`, `lip_prune_deleted`.
+- **New wire types**: `BoundaryRange`, `NoveltyItem`, `TermItem`, `DirectoryCoverage` (v1.7).
+- **Bumped `recursion_limit` to 512** in `lip-cli` to accommodate the expanded `json!` manifest.
+
+---
+
 ## [1.6.0] — 2026-04-13
 
 ### Added
