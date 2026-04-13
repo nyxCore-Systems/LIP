@@ -80,7 +80,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo bench --no-run --locked -p lip
+      - run: cargo bench --no-run --locked -p lip-core
 
   # ── Release ─────────────────────────────────────────────────────────────────
   release:
@@ -155,8 +155,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
       # Publish in dependency order: library first, then tools.
-      - name: Publish lip
-        run: cargo publish -p lip --locked
+      - name: Publish lip-core
+        run: cargo publish -p lip-core --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish lip-cli
