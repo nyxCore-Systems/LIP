@@ -127,6 +127,72 @@ lip query file-status file:///src/auth.rs
 
 ---
 
+## Advanced: similarity and clustering
+
+### Pairwise similarity
+
+Check how similar two specific files or symbols are:
+
+```bash
+# Two files
+lip query similarity file:///src/auth.rs file:///src/session.rs
+# score=0.9214
+
+# Two symbols (lip:// URIs)
+lip query similarity \
+  lip://local/src/auth.rs#verifyToken \
+  lip://local/src/session.rs#validateSession
+# score=0.8847
+```
+
+Returns `null` when either URI has no cached embedding.
+
+### Query expansion
+
+Turn a short query into related symbol names before running `lip query symbols`:
+
+```bash
+lip query query-expansion "token validation" --top-k 5
+# verifyToken
+# validateSession
+# checkJwt
+# parseBearer
+# refreshToken
+```
+
+This helps when you're not sure of the exact symbol name — expand first, then search.
+
+### Clustering
+
+Group a set of files by topic:
+
+```bash
+lip query cluster --radius 0.85 \
+  file:///src/auth.rs \
+  file:///src/session.rs \
+  file:///src/payments.rs \
+  file:///src/invoices.rs
+# Group 1: file:///src/auth.rs  file:///src/session.rs
+# Group 2: file:///src/payments.rs  file:///src/invoices.rs
+```
+
+`--radius` is the cosine-similarity threshold (default: `0.8`). Useful before planning a refactor: identify which files are topically related so you can batch changes.
+
+### Exporting raw vectors
+
+For external pipelines (re-ranking, custom visualization, integration with a vector DB):
+
+```bash
+lip query export-embeddings \
+  file:///src/auth.rs \
+  file:///src/session.rs \
+  --output vectors.json
+```
+
+URIs with no cached embedding are omitted from the output map.
+
+---
+
 ## MCP tools
 
 When using LIP through an AI agent, the same capabilities are available as MCP tools:
@@ -138,6 +204,11 @@ When using LIP through an AI agent, the same capabilities are available as MCP t
 | `lip_nearest_by_text` | Top-K files most similar to a free-text query |
 | `lip_index_status` | Daemon health and embedding coverage |
 | `lip_file_status` | Per-file indexing and embedding status |
+| `lip_similarity` | Pairwise cosine similarity of two stored embeddings |
+| `lip_query_expansion` | Expand a query into related symbol names |
+| `lip_cluster` | Group URIs by embedding proximity within a radius |
+| `lip_export_embeddings` | Return raw stored vectors for external pipelines |
+| `lip_reindex_files` | Force re-index of specific file URIs from disk |
 
 **Typical agent workflow:**
 
@@ -153,6 +224,12 @@ lip_nearest_by_text("payment processing and fraud detection", top_k=10)
 
 # 4. Drill in on a specific file
 lip_nearest(uri="file:///src/payments.rs", top_k=5)
+
+# 5. Expand a query to discover related symbol names
+lip_query_expansion(query="payment processing", top_k=8)
+
+# 6. Group a candidate set before planning a refactor
+lip_cluster(uris=[...candidate_uris...], radius=0.85)
 ```
 
 ---

@@ -172,6 +172,24 @@ lip slice --cargo --push --registry https://registry.lip.dev
 # Fetch / publish slices directly
 lip fetch <sha256-hash> --registry https://registry.lip.dev
 lip push  slice.json    --registry https://registry.lip.dev
+
+# Force re-index specific files from disk (v1.6)
+lip query reindex-files file:///src/auth.rs file:///src/generated/schema.rs
+
+# Pairwise cosine similarity of two stored embeddings (v1.6)
+lip query similarity file:///src/auth.rs file:///src/session.rs
+lip query similarity lip://local/src/auth.rs#verifyToken lip://local/src/session.rs#validateSession
+
+# Expand a query into related symbol names (v1.6, requires LIP_EMBEDDING_URL)
+lip query query-expansion "token validation" --top-k 5
+
+# Group files by embedding proximity (v1.6, requires LIP_EMBEDDING_URL)
+lip query cluster --radius 0.85 \
+  file:///src/auth.rs file:///src/session.rs \
+  file:///src/payments.rs file:///src/invoices.rs
+
+# Export raw embedding vectors for external pipelines (v1.6)
+lip query export-embeddings file:///src/auth.rs file:///src/session.rs --output vectors.json
 ```
 
 ---

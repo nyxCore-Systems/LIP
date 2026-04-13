@@ -152,7 +152,7 @@ The remaining gaps after v1.5:
 - **Generics / trait bounds / overload resolution for TypeScript, Python, Dart** — rust-analyzer exposes this via Tier 2 for Rust. The other three languages rely on hover text parsing; deep generic instantiation is not yet extracted as structured relationships.
 - **Language coverage** — Tier 2 covers 4 languages; SCIP indexers exist for 15+. Go, Java, Kotlin, and C# are on the v2.0 roadmap.
 
-Where LIP now **exceeds** SCIP:
+Where LIP now **exceeds** SCIP (v1.6):
 
 - **Local variable type inference (Rust)** — rust-analyzer inlay hints give LIP inferred types for local bindings inside function bodies. SCIP indexers do not index locals.
 - **Freshness** — LIP updates in &lt;1 ms per save; SCIP is a snapshot that ages between CI runs.
@@ -161,5 +161,10 @@ Where LIP now **exceeds** SCIP:
 - **Batch APIs** — `BatchQueryNearestByText`, `BatchAnnotationGet`, and `BatchQuery` collapse N round-trips into one, under a single db lock where possible. SCIP is an offline file format; there is no query API to batch against.
 - **Symbol-level semantic search** — `QueryNearestBySymbol` embeds a symbol's description on demand and searches across the per-symbol vector store. SCIP has no embedding layer.
 - **Protocol version negotiation** — `Handshake` / `HandshakeResult` lets clients detect daemon/client version drift at connect time and degrade gracefully.
+- **Pairwise similarity** — `Similarity` returns the cosine similarity between any two stored embeddings (file or symbol) in a single round-trip. SCIP has no query API.
+- **Query expansion** — `QueryExpansion` embeds a short query string and returns the nearest symbol display names. Useful before a workspace-symbol search when the exact name isn't known.
+- **Embedding clustering** — `Cluster` groups a set of file or symbol URIs by embedding proximity within a given radius, enabling topic-based navigation without any external vector DB.
+- **Raw vector export** — `ExportEmbeddings` returns stored vectors directly for external re-ranking, visualization, or integration with other tools.
+- **Targeted re-index** — `ReindexFiles` forces a re-index of specific files from disk, bypassing the directory scan. Useful after selective git checkout or CI-generated file changes.
 
 For compliance snapshots, data-flow analysis, or audit workflows, SCIP remains the right tool. Feed SCIP artifacts into LIP with `lip import --from-scip` to get a full-precision baseline (including type signatures extracted from SCIP's documentation), then let LIP maintain freshness incrementally.

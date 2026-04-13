@@ -277,6 +277,94 @@ EOF
 
 Output is a `BatchResult` with one entry per input query.
 
+### lip query reindex-files
+
+Force a targeted re-index of specific file URIs from disk, bypassing the directory scan. Useful after out-of-band changes (selective `git checkout`, generated files, etc.).
+
+```bash
+lip query reindex-files <uri> [<uri>...]
+```
+
+```bash
+lip query reindex-files file:///src/auth.rs file:///src/session.rs
+```
+
+Each URI is read from disk, its language detected from the extension, and `upsert_file` is called. Returns a `DeltaAck`.
+
+### lip query similarity
+
+Pairwise cosine similarity of two stored embeddings. Returns a score in `[0.0, 1.0]`, or `null` when either URI has no cached embedding — call `embedding-batch` first.
+
+```bash
+lip query similarity <uri-a> <uri-b>
+```
+
+```bash
+lip query similarity file:///src/auth.rs file:///src/session.rs
+# score=0.9214
+
+lip query similarity lip://local/src/auth.rs#verifyToken lip://local/src/session.rs#validateSession
+# score=0.8847
+```
+
+Both `lip://` (symbol) and `file://` (file) URIs are accepted.
+
+### lip query query-expansion
+
+Expand a short query string into related symbol names by finding the nearest symbols in the embedding store. Designed for use before `lip query symbols` to discover related terms.
+
+```bash
+lip query query-expansion <text> [--top-k <n>] [--model <model>]
+```
+
+```bash
+lip query query-expansion "token validation" --top-k 5
+# verifyToken
+# validateSession
+# checkJwt
+# parseBearer
+# refreshToken
+```
+
+Requires `LIP_EMBEDDING_URL`. The daemon embeds `text` on the fly, searches the symbol embedding store, and returns display names in descending similarity order.
+
+### lip query cluster
+
+Group a list of file or symbol URIs into clusters based on embedding proximity.
+
+```bash
+lip query cluster [--radius <float>] <uri> [<uri>...]
+```
+
+```bash
+lip query cluster --radius 0.85 \
+  file:///src/auth.rs \
+  file:///src/session.rs \
+  file:///src/payments.rs \
+  file:///src/invoices.rs
+# Group 1: file:///src/auth.rs  file:///src/session.rs
+# Group 2: file:///src/payments.rs  file:///src/invoices.rs
+```
+
+`--radius` is the cosine-similarity threshold (default: `0.8`). Two URIs land in the same group when their similarity is ≥ the radius. URIs without a cached embedding are silently excluded.
+
+### lip query export-embeddings
+
+Return the raw stored embedding vectors for a list of URIs as JSON. Useful for external pipelines (re-ranking, custom clustering, visualization).
+
+```bash
+lip query export-embeddings <uri> [<uri>...] [--output <file>]
+```
+
+```bash
+lip query export-embeddings file:///src/auth.rs file:///src/session.rs
+# {"file:///src/auth.rs":[0.021,-0.044,...],"file:///src/session.rs":[0.019,-0.051,...]}
+
+lip query export-embeddings file:///src/auth.rs --output vectors.json
+```
+
+URIs with no cached embedding are omitted from the output map.
+
 ---
 
 ## lip lsp
