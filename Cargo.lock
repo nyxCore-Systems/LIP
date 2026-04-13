@@ -1102,6 +1102,7 @@ dependencies = [
  "tree-sitter-c",
  "tree-sitter-cpp",
  "tree-sitter-dart",
+ "tree-sitter-go",
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
@@ -2440,6 +2441,16 @@ name = "tree-sitter-dart"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f1f70b80ce41343e14aafcef67b5ba2e9de89587535b4aabbabb8036f4e38a"
+dependencies = [
+ "cc",
+ "tree-sitter",
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8d702a98d3c7e70e466456e58ff2b1ac550bf1e29b97e5770676d2fdabec00d"
 dependencies = [
  "cc",
  "tree-sitter",
