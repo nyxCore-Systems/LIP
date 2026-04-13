@@ -41,7 +41,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="hero-head">
         <div class="badge">
           <span class="badge-dot"></span>
-          v1.5.0 — MIT License
+          v1.6.0 — MIT License
         </div>
         <h1 class="hero-title">
           Live code intelligence.<br />
@@ -222,7 +222,7 @@ import Layout from '../layouts/Layout.astro';
         </div>
         <div class="terminal-body">
           <p class="tline"><span class="tprompt">$</span> <span class="tcmd">lip daemon --socket /tmp/lip.sock</span></p>
-          <p class="tline tout">LIP daemon v1.5.0 — listening on /tmp/lip.sock</p>
+          <p class="tline tout">LIP daemon v1.6.0 — listening on /tmp/lip.sock</p>
           <p class="tline tout">Watching ./src  <span class="tdim">3,847 files · Tier 1 warm</span></p>
           <p class="tline tgap"><span class="tprompt">$</span> <span class="tcmd">lip query blast-radius \</span></p>
           <p class="tline"><span class="tindent"></span><span class="tcmd">"lip://local/src/auth.rs#AuthService"</span></p>
@@ -282,6 +282,7 @@ import Layout from '../layouts/Layout.astro';
             <li class="good">Always current (&lt;1 ms/save)</li>
             <li class="good">Blast radius O(Δ + depth)</li>
             <li class="good">MCP · LSP · Batch API</li>
+            <li class="good">Semantic search · clustering</li>
           </ul>
           <div class="layer-verdict good">Best for: live intelligence</div>
         </div>
@@ -524,6 +525,23 @@ import Layout from '../layouts/Layout.astro';
             language server — no plugin required.
           </p>
         </div>
+
+        <div class="feat-card reveal">
+          <div class="feat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="M21 21l-4.35-4.35"/>
+              <path d="M8 11h6"/>
+            </svg>
+          </div>
+          <h3 class="feat-title">Semantic Search</h3>
+          <p class="feat-desc">
+            Dense embeddings via any OpenAI-compatible endpoint.
+            Nearest-neighbour by file, text, or symbol.
+            Query expansion, pairwise similarity, and cluster grouping —
+            all against the live graph.
+          </p>
+        </div>
       </div>
     </div>
   </section>
@@ -620,7 +638,7 @@ import Layout from '../layouts/Layout.astro';
     <div class="container">
       <div class="section-head">
         <div class="section-label">Languages</div>
-        <h2 class="section-title">Four languages, two tiers</h2>
+        <h2 class="section-title">Nine languages, two tiers</h2>
         <p class="section-sub">
           Tier 1 tree-sitter fires immediately on file open, under 1 ms per file.
           Tier 2 language servers upgrade confidence to compiler-level in the background.
@@ -668,6 +686,55 @@ import Layout from '../layouts/Layout.astro';
           </div>
           <div class="lang-detail">Functions · classes · methods · constructors</div>
           <div class="lang-server">dart language-server</div>
+        </div>
+        <div class="lang-card reveal">
+          <div class="lang-icon go-icon">Go</div>
+          <div class="lang-name">Go</div>
+          <div class="lang-tiers">
+            <span class="ltag t1">T1</span>
+            <span class="ltag t2">T2</span>
+          </div>
+          <div class="lang-detail">Functions · structs · interfaces · methods</div>
+          <div class="lang-server">gopls</div>
+        </div>
+        <div class="lang-card reveal">
+          <div class="lang-icon js-icon">JS</div>
+          <div class="lang-name">JavaScript / JSX</div>
+          <div class="lang-tiers">
+            <span class="ltag t1">T1</span>
+          </div>
+          <div class="lang-detail">Functions · classes · arrow functions</div>
+          <div class="lang-server">Tier 1 only</div>
+        </div>
+        <div class="lang-card reveal">
+          <div class="lang-icon kt-icon">Kt</div>
+          <div class="lang-name">Kotlin</div>
+          <div class="lang-tiers">
+            <span class="ltag t1">T1</span>
+            <span class="ltag t2">T2</span>
+          </div>
+          <div class="lang-detail">Functions · classes · objects · data classes</div>
+          <div class="lang-server">kotlin-language-server</div>
+        </div>
+        <div class="lang-card reveal">
+          <div class="lang-icon sw-icon">Sw</div>
+          <div class="lang-name">Swift</div>
+          <div class="lang-tiers">
+            <span class="ltag t1">T1</span>
+            <span class="ltag t2">T2</span>
+          </div>
+          <div class="lang-detail">Functions · classes · structs · protocols</div>
+          <div class="lang-server">sourcekit-lsp</div>
+        </div>
+        <div class="lang-card reveal">
+          <div class="lang-icon c-icon">C</div>
+          <div class="lang-name">C / C++</div>
+          <div class="lang-tiers">
+            <span class="ltag t1">T1</span>
+            <span class="ltag t2">T2</span>
+          </div>
+          <div class="lang-detail">Functions · structs · enums · classes</div>
+          <div class="lang-server">clangd</div>
         </div>
       </div>
     </div>
@@ -886,7 +953,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="footer-left">
         <div class="footer-logo">LIP</div>
         <div class="footer-tagline">Linked Incremental Protocol</div>
-        <div class="footer-meta">MIT License · v1.5.0 · © 2026 Lisa Welsch</div>
+        <div class="footer-meta">MIT License · v1.6.0 · © 2026 Lisa Welsch</div>
       </div>
       <div class="footer-links">
         <a href="https://github.com/nyxCore-Systems/LIP" target="_blank" rel="noopener">GitHub</a>
@@ -1967,10 +2034,15 @@ import Layout from '../layouts/Layout.astro';
     font-weight: 700;
     margin: 0 auto 14px;
   }
-  .rust-icon { background: rgba(247, 76, 0, 0.12);  color: #f97316; border: 1px solid rgba(247,76,0,0.2); }
+  .rust-icon { background: rgba(247, 76, 0, 0.12);   color: #f97316; border: 1px solid rgba(247,76,0,0.2); }
   .ts-icon   { background: rgba(59, 130, 246, 0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); }
   .py-icon   { background: rgba(234, 179, 8, 0.12);  color: #facc15; border: 1px solid rgba(234,179,8,0.2); }
   .dart-icon { background: rgba(6, 182, 212, 0.12);  color: #22d3ee; border: 1px solid rgba(6,182,212,0.2); }
+  .go-icon   { background: rgba(0, 173, 216, 0.12);  color: #38bdf8; border: 1px solid rgba(0,173,216,0.2); }
+  .js-icon   { background: rgba(234, 179, 8, 0.10);  color: #fbbf24; border: 1px solid rgba(234,179,8,0.18); }
+  .kt-icon   { background: rgba(167, 139, 250, 0.12);color: #a78bfa; border: 1px solid rgba(167,139,250,0.2); }
+  .sw-icon   { background: rgba(251, 113, 133, 0.12);color: #fb7185; border: 1px solid rgba(251,113,133,0.2); }
+  .c-icon    { background: rgba(148, 163, 184, 0.10);color: #94a3b8; border: 1px solid rgba(148,163,184,0.18); }
   .lang-name {
     font-size: 1rem;
     font-weight: 700;
