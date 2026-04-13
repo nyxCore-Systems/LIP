@@ -8,7 +8,7 @@
 ///   - `blast_radius_for` on a multi-file workspace
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use lip::query_graph::LipDatabase;
+use lip_core::query_graph::LipDatabase;
 
 const RUST_SRC: &str = r#"
 pub struct Foo { x: i32 }

@@ -4,7 +4,7 @@
 /// across Rust, TypeScript, and Python.
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use lip::indexer::{language::Language, Tier1Indexer};
+use lip_core::indexer::{language::Language, Tier1Indexer};
 
 // ─── Source fixtures ──────────────────────────────────────────────────────────
 // Each fixture is a representative ~50-line file for its language.

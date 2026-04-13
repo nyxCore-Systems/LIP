@@ -1073,7 +1073,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "lip"
+name = "lip-cli"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lip-core",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-lsp",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
+name = "lip-core"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1110,25 +1129,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lip-cli"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "lip",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "serde",
- "serde_json",
- "tokio",
- "tower-lsp",
- "tracing",
- "tracing-subscriber",
- "walkdir",
-]
-
-[[package]]
 name = "lip-registry"
 version = "2.0.0"
 dependencies = [
@@ -1136,7 +1136,7 @@ dependencies = [
  "axum",
  "clap",
  "hex",
- "lip",
+ "lip-core",
  "serde",
  "serde_json",
  "sha2",

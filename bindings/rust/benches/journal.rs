@@ -6,8 +6,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tempfile::NamedTempFile;
 
-use lip::daemon::journal::{replay, Journal, JournalEntry};
-use lip::query_graph::LipDatabase;
+use lip_core::daemon::journal::{replay, Journal, JournalEntry};
+use lip_core::query_graph::LipDatabase;
 
 fn make_upsert_entry(i: usize) -> JournalEntry {
     JournalEntry::UpsertFile {

@@ -4,9 +4,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use lip::daemon::LipDaemon;
-use lip::query_graph::{ClientMessage, ServerMessage};
-use lip::schema::{Action, IndexingState, OwnedDocument};
+use lip_core::daemon::LipDaemon;
+use lip_core::query_graph::{ClientMessage, ServerMessage};
+use lip_core::schema::{Action, IndexingState, OwnedDocument};
 
 // ─── Framing helpers (client side) ───────────────────────────────────────────
 
