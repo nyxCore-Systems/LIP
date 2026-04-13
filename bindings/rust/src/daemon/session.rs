@@ -801,15 +801,14 @@ impl Session {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
                     };
                 };
-                let (mut vecs, _) =
-                    match client.embed_texts(&[query], model.as_deref()).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                            }
+                let (mut vecs, _) = match client.embed_texts(&[query], model.as_deref()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return ServerMessage::Error {
+                            message: format!("embedding failed: {e}"),
                         }
-                    };
+                    }
+                };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let mut db = self.db.lock().await;
                 let hits = db.nearest_symbol_by_vector(&query_vec, top_k, None);
@@ -857,12 +856,9 @@ impl Session {
                             if mv.len() != vec.len() {
                                 continue;
                             }
-                            let dot: f32 =
-                                vec.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
-                            let na: f32 =
-                                vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-                            let nb: f32 =
-                                mv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let dot: f32 = vec.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+                            let na: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let nb: f32 = mv.iter().map(|x| x * x).sum::<f32>().sqrt();
                             let sim = if na > 0.0 && nb > 0.0 {
                                 dot / (na * nb)
                             } else {
@@ -1141,7 +1137,11 @@ fn process_query_sync(
                     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
                     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if na > 0.0 && nb > 0.0 { Some(dot / (na * nb)) } else { None }
+                    if na > 0.0 && nb > 0.0 {
+                        Some(dot / (na * nb))
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };

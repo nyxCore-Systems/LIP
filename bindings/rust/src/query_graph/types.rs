@@ -257,7 +257,6 @@ pub enum ServerMessage {
     },
 
     // ── CKB v1.6 features ────────────────────────────────────────────────
-
     /// Response to [`ClientMessage::Similarity`].
     /// `None` when either URI has no cached embedding.
     SimilarityResult {
@@ -436,7 +435,6 @@ pub enum ClientMessage {
     },
 
     // ── CKB v1.6 features ────────────────────────────────────────────────
-
     /// Force a re-index of specific file URIs from disk, bypassing the directory
     /// scan. Useful when the client knows exactly which files changed out-of-band
     /// (e.g. after a selective git checkout). Returns `DeltaAck`.
