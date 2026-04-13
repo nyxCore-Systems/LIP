@@ -411,6 +411,24 @@ pub enum ServerMessage {
         /// URIs that no longer exist on disk and were removed from the index.
         removed: Vec<String>,
     },
+
+    // ── v1.9 features ────────────────────────────────────────────────────
+
+    /// Response to [`ClientMessage::GetCentroid`].
+    CentroidResult {
+        /// Mean embedding vector of the included files.  Empty when no URI had
+        /// a cached embedding.
+        vector: Vec<f32>,
+        /// Number of input URIs that contributed to the centroid.
+        included: usize,
+    },
+
+    /// Response to [`ClientMessage::QueryStaleEmbeddings`].
+    StaleEmbeddingsResult {
+        /// File URIs whose stored embedding is older than the file's current
+        /// mtime, or whose index timestamp is unknown.
+        uris: Vec<String>,
+    },
 }
 
 /// Wire envelope for client → daemon messages.
@@ -528,6 +546,13 @@ pub enum ClientMessage {
     QueryNearest {
         uri: String,
         top_k: usize,
+        /// Optional glob pattern to restrict candidates (e.g. `"internal/auth/**"` or
+        /// `"*_test.go"`). Patterns with a `/` are matched against the full path;
+        /// patterns without are matched against the filename only.
+        filter: Option<String>,
+        /// Minimum cosine similarity to include in results. Items scoring below this
+        /// threshold are discarded rather than returned as low-confidence noise.
+        min_score: Option<f32>,
     },
     /// Find the `top_k` files whose stored embedding is most similar to the given text.
     /// The daemon embeds `text` on the fly and runs cosine search.
@@ -536,6 +561,10 @@ pub enum ClientMessage {
         text: String,
         top_k: usize,
         model: Option<String>,
+        /// See [`ClientMessage::QueryNearest::filter`].
+        filter: Option<String>,
+        /// See [`ClientMessage::QueryNearest::min_score`].
+        min_score: Option<f32>,
     },
     /// Embed multiple query strings in one round-trip and return the top-k nearest
     /// files for each. Returns `BatchNearestResult`.
@@ -543,6 +572,10 @@ pub enum ClientMessage {
         queries: Vec<String>,
         top_k: usize,
         model: Option<String>,
+        /// See [`ClientMessage::QueryNearest::filter`]. Applied to all queries.
+        filter: Option<String>,
+        /// See [`ClientMessage::QueryNearest::min_score`]. Applied to all queries.
+        min_score: Option<f32>,
     },
     /// Find the `top_k` symbols whose stored embedding is most similar to the given
     /// symbol. The daemon embeds the symbol's text on the fly (using display_name +
@@ -620,6 +653,10 @@ pub enum ClientMessage {
         /// URI of the file whose embedding we want to move *away from*.
         unlike_uri: String,
         top_k: usize,
+        /// See [`ClientMessage::QueryNearest::filter`].
+        filter: Option<String>,
+        /// See [`ClientMessage::QueryNearest::min_score`].
+        min_score: Option<f32>,
     },
 
     /// Return the `top_k` files from `uris` that are most semantically dissimilar
@@ -663,6 +700,10 @@ pub enum ClientMessage {
         /// Candidate URIs to rank.
         candidates: Vec<String>,
         top_k: usize,
+        /// See [`ClientMessage::QueryNearest::filter`].
+        filter: Option<String>,
+        /// See [`ClientMessage::QueryNearest::min_score`].
+        min_score: Option<f32>,
     },
 
     /// Report how much of the index under a filesystem root has embedding coverage.
@@ -719,6 +760,10 @@ pub enum ClientMessage {
         /// External embedding store: map of URI → embedding vector.
         store: std::collections::HashMap<String, Vec<f32>>,
         top_k: usize,
+        /// See [`ClientMessage::QueryNearest::filter`].
+        filter: Option<String>,
+        /// See [`ClientMessage::QueryNearest::min_score`].
+        min_score: Option<f32>,
     },
 
     /// Compute how semantically novel a set of files is relative to the existing codebase.
@@ -748,6 +793,31 @@ pub enum ClientMessage {
     /// Iterates all tracked file URIs, checks each against the filesystem, and
     /// removes stale entries (including their embeddings). Returns `PruneDeletedResult`.
     PruneDeleted,
+
+    // ── v1.9 features ────────────────────────────────────────────────────
+
+    /// Compute and return the embedding centroid of a set of files without
+    /// shipping all raw vectors to the caller.
+    ///
+    /// The centroid is the component-wise mean of each file's stored embedding.
+    /// URIs without a cached embedding are silently excluded.  Returns `CentroidResult`.
+    GetCentroid {
+        /// File (or symbol) URIs to average.
+        uris: Vec<String>,
+    },
+
+    /// Report which files under `root` have a stale embedding.
+    ///
+    /// A file's embedding is considered stale when its filesystem mtime is
+    /// newer than the daemon's `file_indexed_at` timestamp, meaning the content
+    /// changed while the daemon was offline.  Files with no `indexed_at` record
+    /// are also reported as stale (conservative).
+    ///
+    /// Returns `StaleEmbeddingsResult`.
+    QueryStaleEmbeddings {
+        /// Filesystem path prefix to scope the scan (e.g. `"/project/src"`).
+        root: String,
+    },
 }
 
 impl ClientMessage {
@@ -768,6 +838,7 @@ impl ClientMessage {
                 | ClientMessage::FindBoundaries { .. }
                 | ClientMessage::SemanticDiff { .. }
                 | ClientMessage::PruneDeleted
+                | ClientMessage::QueryStaleEmbeddings { .. }
         )
     }
 }
@@ -792,6 +863,8 @@ mod tests {
             queries: vec!["verify token".into(), "hash password".into()],
             top_k: 5,
             model: None,
+            filter: None,
+            min_score: None,
         };
         let rt = round_trip_client(&msg);
         let ClientMessage::BatchQueryNearestByText { queries, top_k, .. } = rt else {
@@ -907,6 +980,8 @@ mod tests {
             queries: vec![],
             top_k: 1,
             model: None,
+            filter: None,
+            min_score: None,
         };
         assert!(!msg.is_batchable());
     }
@@ -1034,12 +1109,15 @@ mod tests {
             like_uri: "file:///src/new_auth.rs".into(),
             unlike_uri: "file:///src/legacy_auth.rs".into(),
             top_k: 5,
+            filter: None,
+            min_score: None,
         };
         let rt = round_trip_client(&msg);
         let ClientMessage::QueryNearestByContrast {
             like_uri,
             unlike_uri,
             top_k,
+            ..
         } = rt
         else {
             panic!("wrong variant");
@@ -1141,12 +1219,15 @@ mod tests {
                 "file:///tests/other_test.rs".into(),
             ],
             top_k: 1,
+            filter: None,
+            min_score: None,
         };
         let rt = round_trip_client(&msg);
         let ClientMessage::FindSemanticCounterpart {
             uri,
             candidates,
             top_k,
+            ..
         } = rt
         else {
             panic!("wrong variant");
@@ -1294,9 +1375,11 @@ mod tests {
             uri: "file:///src/auth.rs".into(),
             store,
             top_k: 3,
+            filter: None,
+            min_score: None,
         };
         let rt = round_trip_client(&msg);
-        let ClientMessage::QueryNearestInStore { uri, store, top_k } = rt else {
+        let ClientMessage::QueryNearestInStore { uri, store, top_k, .. } = rt else {
             panic!("wrong variant");
         };
         assert_eq!(uri, "file:///src/auth.rs");
@@ -1423,6 +1506,8 @@ mod tests {
             uri: "file:///a.rs".into(),
             store: std::collections::HashMap::new(),
             top_k: 5,
+            filter: None,
+            min_score: None,
         };
         assert!(msg.is_batchable());
     }
@@ -1440,6 +1525,93 @@ mod tests {
             top_k: 10,
         };
         assert!(msg.is_batchable());
+    }
+
+    // ── v1.9 round-trip tests ─────────────────────────────────────────────
+
+    #[test]
+    fn get_centroid_round_trips() {
+        let msg = ClientMessage::GetCentroid {
+            uris: vec!["file:///src/auth.rs".into(), "file:///src/db.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::GetCentroid { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn centroid_result_round_trips() {
+        let msg = ServerMessage::CentroidResult {
+            vector: vec![0.1, 0.2, 0.3],
+            included: 2,
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::CentroidResult { vector, included } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(vector.len(), 3);
+        assert_eq!(included, 2);
+    }
+
+    #[test]
+    fn get_centroid_is_batchable() {
+        let msg = ClientMessage::GetCentroid { uris: vec![] };
+        assert!(msg.is_batchable());
+    }
+
+    #[test]
+    fn query_stale_embeddings_round_trips() {
+        let msg = ClientMessage::QueryStaleEmbeddings {
+            root: "/project/src".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryStaleEmbeddings { root } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(root, "/project/src");
+    }
+
+    #[test]
+    fn stale_embeddings_result_round_trips() {
+        let msg = ServerMessage::StaleEmbeddingsResult {
+            uris: vec!["file:///src/auth.rs".into()],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::StaleEmbeddingsResult { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 1);
+    }
+
+    #[test]
+    fn query_stale_embeddings_not_batchable() {
+        let msg = ClientMessage::QueryStaleEmbeddings {
+            root: "/project".into(),
+        };
+        assert!(!msg.is_batchable());
+    }
+
+    #[test]
+    fn filter_and_min_score_round_trip_on_nearest() {
+        let msg = ClientMessage::QueryNearest {
+            uri: "file:///src/auth.rs".into(),
+            top_k: 5,
+            filter: Some("internal/**".into()),
+            min_score: Some(0.5),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryNearest {
+            filter,
+            min_score,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(filter.as_deref(), Some("internal/**"));
+        assert!((min_score.unwrap() - 0.5).abs() < 1e-5);
     }
 
     #[test]

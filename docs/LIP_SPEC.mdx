@@ -1,11 +1,11 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v1.8"
+subtitle: "Design Document & Specification v1.9"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
 created: "2026-04-09"
-version: "1.8.0"
+version: "1.9.0"
 repository: "https://github.com/nyxCore-Systems/LIP"
 ---
 
@@ -1121,6 +1121,14 @@ lip-protocol/
 - [x] **`PruneDeleted`** — remove index entries for files no longer on disk. Prevents ghost embeddings from polluting search results on high-churn repos.
 - [x] New response types: `BoundariesResult`, `SemanticDiffResult`, `NoveltyScoreResult`, `TerminologyResult`, `PruneDeletedResult`; new structs `BoundaryRange`, `NoveltyItem`, `TermItem`.
 - [x] 6 new MCP tools: `lip_find_boundaries`, `lip_semantic_diff`, `lip_nearest_in_store`, `lip_novelty_score`, `lip_extract_terminology`, `lip_prune_deleted`.
+
+### v1.9 — Connective tissue layer ✓
+
+- [x] **`filter: Option<String>`** on all nearest-neighbour search calls (`QueryNearest`, `QueryNearestByText`, `BatchQueryNearestByText`, `QueryNearestByContrast`, `FindSemanticCounterpart`, `QueryNearestInStore`) — glob pattern restricts the candidate set before scoring. Patterns with `/` match the full path; others match the filename only. Eliminates over-fetching and wasted `top_k` slots on irrelevant results.
+- [x] **`min_score: Option<f32>`** on the same search calls — quality gate that drops results below a cosine-similarity threshold. Lets clients distinguish "found something relevant" from "returned the least-bad result in the index."
+- [x] **`GetCentroid { uris }`** — compute and return the embedding centroid of a file set server-side, without shipping all raw vectors over the socket. Used by module-scoped architecture queries and cross-repo federation. Returns `CentroidResult { vector, included }`. Safe inside `BatchQuery`.
+- [x] **`QueryStaleEmbeddings { root }`** — report files under `root` whose stored embedding is older than their current mtime. Detects the case where LIP was offline during a batch of writes and search results are silently stale. Returns `StaleEmbeddingsResult { uris }`. Not permitted inside `BatchQuery`.
+- [x] 2 new MCP tools (`lip_get_centroid`, `lip_stale_embeddings`) + `filter`/`min_score` params on 5 existing tools.
 
 ### v1.2 — In progress
 
