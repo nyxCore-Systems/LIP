@@ -425,12 +425,12 @@ impl RustAnalyzerBackend {
             let before = &line_text[..col];
             let name = before
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .last()
+                .next_back()
                 .filter(|n| {
                     !n.is_empty()
                         && n.chars()
                             .next()
-                            .map_or(false, |c| c.is_alphabetic() || c == '_')
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
                         && *n != "let"
                         && *n != "mut"
                         && *n != "ref"

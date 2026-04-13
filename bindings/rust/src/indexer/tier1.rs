@@ -547,9 +547,8 @@ mod tests {
         let src = "void caller(void) { callee(); } void callee(void) {}";
         let es = edges(src, Language::C);
         assert!(
-            es.iter().any(|e| {
-                e.from_uri.contains("#caller") && e.to_uri.contains("#callee")
-            }),
+            es.iter()
+                .any(|e| { e.from_uri.contains("#caller") && e.to_uri.contains("#callee") }),
             "expected caller→callee edge, got: {es:?}"
         );
     }
@@ -587,9 +586,8 @@ mod tests {
         let src = "void dispatch() { handle(); } void handle() {}";
         let es = edges(src, Language::Cpp);
         assert!(
-            es.iter().any(|e| {
-                e.from_uri.contains("#dispatch") && e.to_uri.contains("#handle")
-            }),
+            es.iter()
+                .any(|e| { e.from_uri.contains("#dispatch") && e.to_uri.contains("#handle") }),
             "expected dispatch→handle edge"
         );
     }
