@@ -986,6 +986,331 @@ impl LipDatabase {
         (indexed, has_embedding, age_seconds)
     }
 
+    /// Return the `top_k` URIs from `uris` that are most semantically dissimilar from the rest.
+    ///
+    /// For each URI with a cached embedding compute its leave-one-out mean cosine similarity
+    /// to all other URIs in the set. The URIs with the **lowest** mean similarity are returned
+    /// first — they are the semantic outliers. URIs without a cached embedding are skipped.
+    pub fn outliers(
+        &self,
+        uris: &[String],
+        top_k: usize,
+    ) -> Vec<crate::query_graph::types::NearestItem> {
+        use crate::query_graph::types::NearestItem;
+
+        let pairs: Vec<(&str, &Vec<f32>)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let v = if uri.starts_with("lip://") {
+                    self.get_symbol_embedding(uri)
+                } else {
+                    self.get_file_embedding(uri)
+                };
+                v.map(|vec| (uri.as_str(), vec))
+            })
+            .collect();
+
+        if pairs.is_empty() {
+            return vec![];
+        }
+        if pairs.len() == 1 {
+            return vec![NearestItem {
+                uri: pairs[0].0.to_owned(),
+                score: 0.0,
+            }];
+        }
+
+        let norms: Vec<f32> = pairs
+            .iter()
+            .map(|(_, v)| v.iter().map(|x| x * x).sum::<f32>().sqrt())
+            .collect();
+
+        let mut scores: Vec<(String, f32)> = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (uri, vi))| {
+                if norms[i] == 0.0 {
+                    return (uri.to_string(), 0.0_f32);
+                }
+                let total_sim: f32 = pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .filter_map(|(j, (_, vj))| {
+                        if vj.len() != vi.len() || norms[j] == 0.0 {
+                            return None;
+                        }
+                        let dot: f32 = vi.iter().zip(vj.iter()).map(|(a, b)| a * b).sum();
+                        Some(dot / (norms[i] * norms[j]))
+                    })
+                    .sum();
+                let mean_sim = total_sim / (pairs.len() - 1) as f32;
+                (uri.to_string(), mean_sim)
+            })
+            .collect();
+
+        // Ascending: lowest mean similarity = most outlier-like.
+        scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores
+            .into_iter()
+            .take(top_k)
+            .map(|(uri, score)| NearestItem { uri, score })
+            .collect()
+    }
+
+    /// Compute all pairwise cosine similarities for `uris`.
+    ///
+    /// URIs without a cached embedding are excluded from the result. Returns the filtered URI
+    /// list and a row-major N×N matrix where `matrix[i][j]` = cosine similarity of `uris[i]`
+    /// and `uris[j]`. Diagonal entries are `1.0`.
+    pub fn similarity_matrix(&self, uris: &[String]) -> (Vec<String>, Vec<Vec<f32>>) {
+        let pairs: Vec<(String, &Vec<f32>)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let v = if uri.starts_with("lip://") {
+                    self.get_symbol_embedding(uri)
+                } else {
+                    self.get_file_embedding(uri)
+                };
+                v.map(|vec| (uri.clone(), vec))
+            })
+            .collect();
+
+        let n = pairs.len();
+        let norms: Vec<f32> = pairs
+            .iter()
+            .map(|(_, v)| v.iter().map(|x| x * x).sum::<f32>().sqrt())
+            .collect();
+
+        let mut matrix = vec![vec![0.0f32; n]; n];
+        for i in 0..n {
+            matrix[i][i] = 1.0;
+            for j in (i + 1)..n {
+                let (_, vi) = &pairs[i];
+                let (_, vj) = &pairs[j];
+                if vi.len() != vj.len() || norms[i] == 0.0 || norms[j] == 0.0 {
+                    continue;
+                }
+                let dot: f32 = vi.iter().zip(vj.iter()).map(|(a, b)| a * b).sum();
+                let sim = dot / (norms[i] * norms[j]);
+                matrix[i][j] = sim;
+                matrix[j][i] = sim;
+            }
+        }
+
+        let result_uris = pairs.into_iter().map(|(uri, _)| uri).collect();
+        (result_uris, matrix)
+    }
+
+    /// Report embedding coverage for files whose URI starts with `root`.
+    ///
+    /// `root` is matched as a path prefix. Both bare paths (`/project/src`) and
+    /// `file://` URIs are accepted — bare paths are normalised to `file:///path`.
+    ///
+    /// Returns `(total_files, embedded_files, per_directory_breakdown)`.
+    /// The per-directory list is sorted by directory URI.
+    pub fn coverage(
+        &self,
+        root: &str,
+    ) -> (
+        usize,
+        usize,
+        Vec<crate::query_graph::types::DirectoryCoverage>,
+    ) {
+        use crate::query_graph::types::DirectoryCoverage;
+        use std::collections::HashMap;
+
+        let prefix = if root.starts_with("file://") {
+            root.to_owned()
+        } else {
+            format!("file://{root}")
+        };
+
+        let mut by_dir: HashMap<String, (usize, usize)> = HashMap::new();
+
+        for uri in self.file_inputs.keys() {
+            if !uri.starts_with(&prefix) {
+                continue;
+            }
+            let has_embedding = self.file_embeddings.contains_key(uri.as_str());
+            let dir = uri[..uri.rfind('/').unwrap_or(uri.len())].to_owned();
+            let entry = by_dir.entry(dir).or_default();
+            entry.0 += 1;
+            if has_embedding {
+                entry.1 += 1;
+            }
+        }
+
+        let total_files: usize = by_dir.values().map(|(t, _)| t).sum();
+        let embedded_files: usize = by_dir.values().map(|(_, e)| e).sum();
+        let mut dirs: Vec<DirectoryCoverage> = by_dir
+            .into_iter()
+            .map(|(directory, (total, embedded))| DirectoryCoverage {
+                directory,
+                total_files: total,
+                embedded_files: embedded,
+            })
+            .collect();
+        dirs.sort_by(|a, b| a.directory.cmp(&b.directory));
+
+        (total_files, embedded_files, dirs)
+    }
+
+    /// Compute per-file novelty scores for `uris` relative to the rest of the indexed files.
+    ///
+    /// For each URI that has a cached embedding, finds its nearest neighbour *outside* `uris`
+    /// in the file embedding store.  The novelty score is `1 − nearest_similarity`.
+    /// Returns `(mean_score, per_file_items)` sorted by descending novelty.
+    pub fn novelty_scores(
+        &self,
+        uris: &[String],
+    ) -> (f32, Vec<crate::query_graph::types::NoveltyItem>) {
+        use crate::query_graph::types::NoveltyItem;
+        use std::collections::HashSet;
+
+        let input_set: HashSet<&str> = uris.iter().map(String::as_str).collect();
+
+        let mut items: Vec<NoveltyItem> = uris
+            .iter()
+            .filter_map(|uri| {
+                let qv = self.get_file_embedding(uri)?;
+                let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if q_norm == 0.0 {
+                    return None;
+                }
+                let best = self
+                    .file_embeddings
+                    .iter()
+                    .filter(|(u, _)| !input_set.contains(u.as_str()))
+                    .filter_map(|(u, v)| {
+                        if v.len() != qv.len() {
+                            return None;
+                        }
+                        let vn: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if vn == 0.0 {
+                            return None;
+                        }
+                        let dot: f32 = qv.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
+                        Some((u.clone(), dot / (q_norm * vn)))
+                    })
+                    .max_by(|a, b| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                Some(NoveltyItem {
+                    uri: uri.clone(),
+                    score: best.as_ref().map(|(_, s)| 1.0 - s).unwrap_or(1.0),
+                    nearest_existing: best.map(|(u, _)| u),
+                })
+            })
+            .collect();
+
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mean = if items.is_empty() {
+            0.0
+        } else {
+            items.iter().map(|i| i.score).sum::<f32>() / items.len() as f32
+        };
+
+        (mean, items)
+    }
+
+    /// Extract the domain vocabulary most semantically central to a set of files.
+    ///
+    /// Computes the centroid of the input files' embeddings, then scores each symbol
+    /// defined in those files by its symbol embedding's similarity to that centroid.
+    /// Returns the `top_k` most central terms (symbol display names), deduplicated.
+    ///
+    /// Requires symbol embeddings — call `EmbeddingBatch` with `lip://` URIs first.
+    pub fn extract_terminology(
+        &mut self,
+        uris: &[String],
+        top_k: usize,
+    ) -> Vec<crate::query_graph::types::TermItem> {
+        use crate::query_graph::types::TermItem;
+        use std::collections::HashSet;
+
+        // Collect file embeddings for input URIs.
+        let file_vecs: Vec<(String, Vec<f32>)> = uris
+            .iter()
+            .filter_map(|uri| {
+                self.get_file_embedding(uri)
+                    .cloned()
+                    .map(|v| (uri.clone(), v))
+            })
+            .collect();
+
+        if file_vecs.is_empty() {
+            return vec![];
+        }
+
+        let dim = file_vecs[0].1.len();
+
+        // Compute centroid.
+        let mut centroid = vec![0.0f32; dim];
+        let mut count = 0usize;
+        for (_, v) in &file_vecs {
+            if v.len() != dim {
+                continue;
+            }
+            for (c, x) in centroid.iter_mut().zip(v.iter()) {
+                *c += x;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return vec![];
+        }
+        for c in centroid.iter_mut() {
+            *c /= count as f32;
+        }
+        let c_norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if c_norm == 0.0 {
+            return vec![];
+        }
+
+        let mut scored: Vec<(String, f32, String)> = Vec::new(); // (term, score, source_uri)
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for uri in uris {
+            let syms = self.file_symbols(uri).to_vec();
+            for sym in &syms {
+                if seen.contains(&sym.display_name) {
+                    continue;
+                }
+                if let Some(sv) = self.symbol_embeddings.get(&sym.uri) {
+                    if sv.len() != dim {
+                        continue;
+                    }
+                    let sn: f32 = sv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if sn == 0.0 {
+                        continue;
+                    }
+                    let dot: f32 = centroid.iter().zip(sv.iter()).map(|(a, b)| a * b).sum();
+                    let sim = dot / (c_norm * sn);
+                    seen.insert(sym.display_name.clone());
+                    scored.push((sym.display_name.clone(), sim, uri.clone()));
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        scored
+            .into_iter()
+            .map(|(term, score, source_uri)| TermItem {
+                term,
+                score,
+                source_uri,
+            })
+            .collect()
+    }
+
     /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files and mounted slices.
     pub fn symbol_by_uri(&mut self, symbol_uri: &str) -> Option<OwnedSymbolInfo> {
         // Fast path: check mounted slice symbols first (O(1)).
@@ -2481,5 +2806,178 @@ impl Greeter {
         let db = LipDatabase::new();
         let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None);
         assert!(results.is_empty());
+    }
+
+    // ── outliers ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn outliers_returns_lowest_mean_similarity_first() {
+        let mut db = LipDatabase::new();
+        // Three tightly clustered files and one outlier in an orthogonal direction.
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0, 0.0]);
+        db.set_file_embedding("file:///b.rs", vec![0.9, 0.1, 0.0]);
+        db.set_file_embedding("file:///c.rs", vec![0.95, 0.05, 0.0]);
+        db.set_file_embedding("file:///outlier.rs", vec![0.0, 0.0, 1.0]);
+
+        let uris = vec![
+            "file:///a.rs".into(),
+            "file:///b.rs".into(),
+            "file:///c.rs".into(),
+            "file:///outlier.rs".into(),
+        ];
+        let results = db.outliers(&uris, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].uri, "file:///outlier.rs");
+    }
+
+    #[test]
+    fn outliers_empty_input_returns_empty() {
+        let db = LipDatabase::new();
+        let results = db.outliers(&[], 5);
+        assert!(results.is_empty());
+    }
+
+    // ── similarity_matrix ─────────────────────────────────────────────────
+
+    #[test]
+    fn similarity_matrix_diagonal_is_one() {
+        let mut db = LipDatabase::new();
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0]);
+
+        let uris = vec!["file:///a.rs".into(), "file:///b.rs".into()];
+        let (result_uris, matrix) = db.similarity_matrix(&uris);
+        assert_eq!(result_uris.len(), 2);
+        assert!((matrix[0][0] - 1.0).abs() < 1e-5);
+        assert!((matrix[1][1] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn similarity_matrix_symmetric_and_orthogonal() {
+        let mut db = LipDatabase::new();
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///b.rs", vec![0.0, 1.0]);
+
+        let uris = vec!["file:///a.rs".into(), "file:///b.rs".into()];
+        let (_, matrix) = db.similarity_matrix(&uris);
+        assert!((matrix[0][1] - 0.0).abs() < 1e-5);
+        assert!((matrix[1][0] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn similarity_matrix_excludes_uris_without_embeddings() {
+        let mut db = LipDatabase::new();
+        db.set_file_embedding("file:///a.rs", vec![1.0, 0.0]);
+        // file:///missing.rs has no embedding.
+
+        let uris = vec!["file:///a.rs".into(), "file:///missing.rs".into()];
+        let (result_uris, matrix) = db.similarity_matrix(&uris);
+        assert_eq!(result_uris.len(), 1);
+        assert_eq!(matrix.len(), 1);
+        assert_eq!(matrix[0].len(), 1);
+    }
+
+    // ── coverage ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_counts_indexed_and_embedded() {
+        let mut db = LipDatabase::new();
+        db.upsert_file(
+            "file:///project/src/a.rs".into(),
+            "fn a() {}".into(),
+            "rust".into(),
+        );
+        db.upsert_file(
+            "file:///project/src/b.rs".into(),
+            "fn b() {}".into(),
+            "rust".into(),
+        );
+        db.set_file_embedding("file:///project/src/a.rs", vec![1.0, 0.0]);
+        // b.rs is indexed but has no embedding.
+
+        let (total, embedded, dirs) = db.coverage("/project/src");
+        assert_eq!(total, 2);
+        assert_eq!(embedded, 1);
+        assert!(!dirs.is_empty());
+    }
+
+    // ── novelty_scores ────────────────────────────────────────────────────
+
+    #[test]
+    fn novelty_scores_high_for_orthogonal_file() {
+        let mut db = LipDatabase::new();
+        // Existing repo: two similar auth files.
+        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0, 0.0]);
+        db.set_file_embedding("file:///src/auth_helper.rs", vec![0.9, 0.1, 0.0]);
+        // New file: completely different direction.
+        db.set_file_embedding("file:///src/billing.rs", vec![0.0, 1.0, 0.0]);
+
+        let (mean, items) = db.novelty_scores(&["file:///src/billing.rs".to_owned()]);
+        assert_eq!(items.len(), 1);
+        // Nearest neighbour is auth_helper (closest at ~0.1 similarity), so novelty ≈ 0.9+.
+        assert!(mean > 0.8, "billing.rs should have high novelty; got {mean}");
+    }
+
+    #[test]
+    fn novelty_scores_low_for_similar_file() {
+        let mut db = LipDatabase::new();
+        db.set_file_embedding("file:///src/auth.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///src/auth2.rs", vec![0.99, 0.01]);
+
+        // auth2 is the new file; auth is the existing repo.
+        let (mean, items) =
+            db.novelty_scores(&["file:///src/auth2.rs".to_owned()]);
+        assert_eq!(items.len(), 1);
+        assert!(mean < 0.1, "auth2.rs is very similar to auth.rs; got {mean}");
+        assert_eq!(
+            items[0].nearest_existing.as_deref(),
+            Some("file:///src/auth.rs")
+        );
+    }
+
+    #[test]
+    fn novelty_scores_excludes_input_set_from_neighbour_search() {
+        let mut db = LipDatabase::new();
+        db.set_file_embedding("file:///src/a.rs", vec![1.0, 0.0]);
+        db.set_file_embedding("file:///src/b.rs", vec![1.0, 0.0]); // identical direction
+        db.set_file_embedding("file:///other/c.rs", vec![0.0, 1.0]);
+
+        // Both a.rs and b.rs are in the input set; nearest_existing should be c.rs.
+        let (_, items) = db.novelty_scores(&[
+            "file:///src/a.rs".to_owned(),
+            "file:///src/b.rs".to_owned(),
+        ]);
+        for item in &items {
+            assert_ne!(
+                item.nearest_existing.as_deref(),
+                Some("file:///src/a.rs"),
+                "should not match within input set"
+            );
+            assert_ne!(
+                item.nearest_existing.as_deref(),
+                Some("file:///src/b.rs"),
+                "should not match within input set"
+            );
+        }
+    }
+
+    // ── coverage_root_prefix_filters_correctly ────────────────────────────
+
+    #[test]
+    fn coverage_root_prefix_filters_correctly() {
+        let mut db = LipDatabase::new();
+        db.upsert_file(
+            "file:///project/src/a.rs".into(),
+            "fn a() {}".into(),
+            "rust".into(),
+        );
+        db.upsert_file(
+            "file:///other/b.rs".into(),
+            "fn b() {}".into(),
+            "rust".into(),
+        );
+
+        let (total, _, _) = db.coverage("/project/src");
+        assert_eq!(total, 1, "should only count files under /project/src");
     }
 }

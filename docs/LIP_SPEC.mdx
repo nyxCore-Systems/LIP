@@ -1,11 +1,11 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v1.5"
+subtitle: "Design Document & Specification v1.8"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
 created: "2026-04-09"
-version: "1.5.0"
+version: "1.8.0"
 repository: "https://github.com/nyxCore-Systems/LIP"
 ---
 
@@ -1099,6 +1099,28 @@ lip-protocol/
 - [x] **SCIP signature extraction** — `lip import --from-scip` splits `documentation[0]` (the rendered type signature placed by SCIP indexers) into `OwnedSymbolInfo.signature` rather than discarding it. Imported symbols now carry their type signatures.
 - [x] **`textDocument/typeDefinition` in all 4 Tier 2 backends** — each symbol now carries an `OwnedRelationship { is_type_definition: true }` pointing to the cross-file definition of its type. Enables "which symbols have type `Foo`?" queries on the blast-radius graph.
 - [x] **`textDocument/inlayHints` in rust-analyzer** — local variable bindings (inside function bodies) are now captured as additional `Variable` symbols with their compiler-inferred types. SCIP does not index locals; this is additive coverage unique to LIP.
+
+### v1.7 — Semantic retrieval primitives ✓
+
+- [x] **`QueryNearestByContrast`** — vector-arithmetic contrastive search: `normalize(like − unlike)` → nearest neighbours. Enables "similar to X but different from Y" queries.
+- [x] **`QueryOutliers`** — leave-one-out mean cosine similarity; returns the files most semantically displaced from their group. Catches conceptual misplacement that structural tools miss.
+- [x] **`QuerySemanticDrift`** — pairwise cosine distance between two stored embeddings. Scalar drift metric for change-over-time tracking.
+- [x] **`SimilarityMatrix`** — all pairwise cosine similarities for a list of URIs in one call. Enables semantic coupling graphs orthogonal to co-change frequency.
+- [x] **`FindSemanticCounterpart`** — ranked search over a candidate pool. Finds the test file that covers a changed implementation even when naming conventions differ.
+- [x] **`QueryCoverage`** — embedding coverage report under a filesystem root, broken down by directory. Makes warm-up period observable rather than silently degrading search quality.
+- [x] New response types: `OutliersResult`, `SemanticDriftResult`, `SimilarityMatrixResult`, `CoverageResult`, `DirectoryCoverage`.
+- [x] 6 new MCP tools: `lip_nearest_by_contrast`, `lip_outliers`, `lip_semantic_drift`, `lip_similarity_matrix`, `lip_find_counterpart`, `lip_coverage`.
+
+### v1.8 — Higher-order semantic analysis ✓
+
+- [x] **`FindBoundaries`** — chunk a file into line-windows, embed each, return positions where cosine distance between adjacent windows exceeds a threshold. Finds conceptual boundaries that don't align with syntax — useful for identifying natural split points during extract refactors.
+- [x] **`SemanticDiff`** — embeds two content strings, returns drift distance plus the nearest files to the direction of change (`moving_toward`). Catches semantic breaking changes that structural diffs miss.
+- [x] **`QueryNearestInStore`** — nearest-neighbour search against a caller-provided embedding store. Enables cross-repo federation without topology changes: dump each root, merge, query.
+- [x] **`QueryNoveltyScore`** — per-file `1 − nearest_external_similarity` novelty scores for a set of URIs. Surfaces PRs that introduce genuinely new semantic patterns.
+- [x] **`ExtractTerminology`** — rank symbol display names by proximity to the centroid of a file set's embeddings. Surfaces the domain vocabulary implicit in a module.
+- [x] **`PruneDeleted`** — remove index entries for files no longer on disk. Prevents ghost embeddings from polluting search results on high-churn repos.
+- [x] New response types: `BoundariesResult`, `SemanticDiffResult`, `NoveltyScoreResult`, `TerminologyResult`, `PruneDeletedResult`; new structs `BoundaryRange`, `NoveltyItem`, `TermItem`.
+- [x] 6 new MCP tools: `lip_find_boundaries`, `lip_semantic_diff`, `lip_nearest_in_store`, `lip_novelty_score`, `lip_extract_terminology`, `lip_prune_deleted`.
 
 ### v1.2 — In progress
 

@@ -734,7 +734,7 @@ impl Session {
                 }
             }
 
-            // ── CKB v1.6: ReindexFiles ────────────────────────────────────
+            // ── v1.6: ReindexFiles ────────────────────────────────────────
             ClientMessage::ReindexFiles { uris } => {
                 let mut count = 0usize;
                 for uri in &uris {
@@ -761,7 +761,7 @@ impl Session {
                 }
             }
 
-            // ── CKB v1.6: Similarity ──────────────────────────────────────
+            // ── v1.6: Similarity ──────────────────────────────────────────
             ClientMessage::Similarity { uri_a, uri_b } => {
                 let db = self.db.lock().await;
                 let va = if uri_a.starts_with("lip://") {
@@ -790,7 +790,7 @@ impl Session {
                 ServerMessage::SimilarityResult { score }
             }
 
-            // ── CKB v1.6: QueryExpansion ──────────────────────────────────
+            // ── v1.6: QueryExpansion ──────────────────────────────────────
             ClientMessage::QueryExpansion {
                 query,
                 top_k,
@@ -828,7 +828,7 @@ impl Session {
                 ServerMessage::QueryExpansionResult { terms }
             }
 
-            // ── CKB v1.6: Cluster ─────────────────────────────────────────
+            // ── v1.6: Cluster ─────────────────────────────────────────────
             ClientMessage::Cluster { uris, radius } => {
                 let db = self.db.lock().await;
                 // Collect (uri, vector) pairs, skipping any without an embedding.
@@ -880,7 +880,7 @@ impl Session {
                 ServerMessage::ClusterResult { groups }
             }
 
-            // ── CKB v1.6: ExportEmbeddings ────────────────────────────────
+            // ── v1.6: ExportEmbeddings ────────────────────────────────────
             ClientMessage::ExportEmbeddings { uris } => {
                 let db = self.db.lock().await;
                 let embeddings = uris
@@ -895,6 +895,377 @@ impl Session {
                     })
                     .collect();
                 ServerMessage::ExportEmbeddingsResult { embeddings }
+            }
+
+            // ── v1.7: QueryNearestByContrast ──────────────────────────────
+            ClientMessage::QueryNearestByContrast {
+                like_uri,
+                unlike_uri,
+                top_k,
+            } => {
+                let db = self.db.lock().await;
+                let vlike = if like_uri.starts_with("lip://") {
+                    db.get_symbol_embedding(&like_uri).cloned()
+                } else {
+                    db.get_file_embedding(&like_uri).cloned()
+                };
+                let vunlike = if unlike_uri.starts_with("lip://") {
+                    db.get_symbol_embedding(&unlike_uri).cloned()
+                } else {
+                    db.get_file_embedding(&unlike_uri).cloned()
+                };
+                match (vlike, vunlike) {
+                    (Some(vl), Some(vu)) if vl.len() == vu.len() => {
+                        let mut contrast: Vec<f32> =
+                            vl.iter().zip(vu.iter()).map(|(a, b)| a - b).collect();
+                        let norm: f32 =
+                            contrast.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if norm > 0.0 {
+                            for x in contrast.iter_mut() {
+                                *x /= norm;
+                            }
+                        }
+                        let results = db.nearest_by_vector(&contrast, top_k, None);
+                        ServerMessage::NearestResult { results }
+                    }
+                    _ => ServerMessage::Error {
+                        message: "both URIs must have cached embeddings with matching \
+                                  dimensions — call embedding_batch first"
+                            .into(),
+                    },
+                }
+            }
+
+            // ── v1.7: QueryOutliers ───────────────────────────────────────
+            ClientMessage::QueryOutliers { uris, top_k } => {
+                let db = self.db.lock().await;
+                let outliers = db.outliers(&uris, top_k);
+                ServerMessage::OutliersResult { outliers }
+            }
+
+            // ── v1.7: QuerySemanticDrift ──────────────────────────────────
+            ClientMessage::QuerySemanticDrift { uri_a, uri_b } => {
+                let db = self.db.lock().await;
+                let va = if uri_a.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri_a).cloned()
+                } else {
+                    db.get_file_embedding(&uri_a).cloned()
+                };
+                let vb = if uri_b.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri_b).cloned()
+                } else {
+                    db.get_file_embedding(&uri_b).cloned()
+                };
+                let distance = match (va, vb) {
+                    (Some(a), Some(b)) if a.len() == b.len() => {
+                        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if na > 0.0 && nb > 0.0 {
+                            Some(1.0 - dot / (na * nb))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                ServerMessage::SemanticDriftResult { distance }
+            }
+
+            // ── v1.7: SimilarityMatrix ────────────────────────────────────
+            ClientMessage::SimilarityMatrix { uris } => {
+                let db = self.db.lock().await;
+                let (result_uris, matrix) = db.similarity_matrix(&uris);
+                ServerMessage::SimilarityMatrixResult {
+                    uris: result_uris,
+                    matrix,
+                }
+            }
+
+            // ── v1.7: FindSemanticCounterpart ─────────────────────────────
+            ClientMessage::FindSemanticCounterpart {
+                uri,
+                candidates,
+                top_k,
+            } => {
+                let db = self.db.lock().await;
+                let query_vec = if uri.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri).cloned()
+                } else {
+                    db.get_file_embedding(&uri).cloned()
+                };
+                let Some(qv) = query_vec else {
+                    return ServerMessage::Error {
+                        message: format!(
+                            "{uri} has no cached embedding — call embedding_batch first"
+                        ),
+                    };
+                };
+                let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if q_norm == 0.0 {
+                    return ServerMessage::NearestResult { results: vec![] };
+                }
+                let mut scored: Vec<crate::query_graph::types::NearestItem> = candidates
+                    .iter()
+                    .filter_map(|c| {
+                        let cv = if c.starts_with("lip://") {
+                            db.get_symbol_embedding(c)
+                        } else {
+                            db.get_file_embedding(c)
+                        };
+                        let cv = cv?;
+                        if cv.len() != qv.len() {
+                            return None;
+                        }
+                        let dot: f32 = qv.iter().zip(cv.iter()).map(|(a, b)| a * b).sum();
+                        let cn: f32 = cv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if cn == 0.0 {
+                            return None;
+                        }
+                        Some(crate::query_graph::types::NearestItem {
+                            uri: c.clone(),
+                            score: dot / (q_norm * cn),
+                        })
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                scored.truncate(top_k);
+                ServerMessage::NearestResult { results: scored }
+            }
+
+            // ── v1.7: QueryCoverage ───────────────────────────────────────
+            ClientMessage::QueryCoverage { root } => {
+                let db = self.db.lock().await;
+                let (total_files, embedded_files, by_directory) = db.coverage(&root);
+                let coverage_fraction = if total_files > 0 {
+                    Some(embedded_files as f32 / total_files as f32)
+                } else {
+                    None
+                };
+                ServerMessage::CoverageResult {
+                    root,
+                    total_files,
+                    embedded_files,
+                    coverage_fraction,
+                    by_directory,
+                }
+            }
+
+            // ── v1.8: FindBoundaries ──────────────────────────────────────
+            ClientMessage::FindBoundaries {
+                uri,
+                chunk_lines,
+                threshold,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let chunk_size = chunk_lines.max(1);
+                let source = {
+                    let db = self.db.lock().await;
+                    db.file_source_text(&uri).unwrap_or_default()
+                };
+                if source.is_empty() {
+                    return ServerMessage::BoundariesResult {
+                        uri,
+                        boundaries: vec![],
+                    };
+                }
+                let lines: Vec<&str> = source.lines().collect();
+                let chunks: Vec<String> = lines
+                    .chunks(chunk_size)
+                    .map(|c| c.join("\n"))
+                    .collect();
+                if chunks.len() < 2 {
+                    return ServerMessage::BoundariesResult {
+                        uri,
+                        boundaries: vec![],
+                    };
+                }
+                let (vecs, _) = match client.embed_texts(&chunks, model.as_deref()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return ServerMessage::Error {
+                            message: format!("embedding failed: {e}"),
+                        }
+                    }
+                };
+                let mut boundaries = Vec::new();
+                for i in 0..vecs.len().saturating_sub(1) {
+                    let va = &vecs[i];
+                    let vb = &vecs[i + 1];
+                    if va.len() != vb.len() {
+                        continue;
+                    }
+                    let na: f32 = va.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let nb: f32 = vb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if na == 0.0 || nb == 0.0 {
+                        continue;
+                    }
+                    let dot: f32 = va.iter().zip(vb.iter()).map(|(a, b)| a * b).sum();
+                    let sim = dot / (na * nb);
+                    let dist = 1.0 - sim;
+                    if dist >= threshold {
+                        boundaries.push(crate::query_graph::types::BoundaryRange {
+                            start_line: (i * chunk_size) as u32,
+                            end_line: ((i + 1) * chunk_size).saturating_sub(1) as u32,
+                            shift_magnitude: dist,
+                        });
+                    }
+                }
+                ServerMessage::BoundariesResult { uri, boundaries }
+            }
+
+            // ── v1.8: SemanticDiff ────────────────────────────────────────
+            ClientMessage::SemanticDiff {
+                content_a,
+                content_b,
+                top_k,
+                model,
+            } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let (mut vecs, _) = match client
+                    .embed_texts(&[content_a, content_b], model.as_deref())
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return ServerMessage::Error {
+                            message: format!("embedding failed: {e}"),
+                        }
+                    }
+                };
+                if vecs.len() < 2 {
+                    return ServerMessage::Error {
+                        message: "embedding service returned fewer vectors than expected".into(),
+                    };
+                }
+                let vb = vecs.pop().unwrap();
+                let va = vecs.pop().unwrap();
+                // Drift magnitude.
+                let na: f32 = va.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let nb: f32 = vb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let distance = if na > 0.0 && nb > 0.0 && va.len() == vb.len() {
+                    let dot: f32 = va.iter().zip(vb.iter()).map(|(a, b)| a * b).sum();
+                    1.0 - dot / (na * nb)
+                } else {
+                    0.0
+                };
+                // Direction: normalize(new − old) → nearest files.
+                let mut contrast: Vec<f32> =
+                    vb.iter().zip(va.iter()).map(|(b, a)| b - a).collect();
+                let cn: f32 = contrast.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if cn > 0.0 {
+                    for x in contrast.iter_mut() {
+                        *x /= cn;
+                    }
+                }
+                let moving_toward = {
+                    let db = self.db.lock().await;
+                    db.nearest_by_vector(&contrast, top_k, None)
+                };
+                ServerMessage::SemanticDiffResult {
+                    distance,
+                    moving_toward,
+                }
+            }
+
+            // ── v1.8: QueryNearestInStore ─────────────────────────────────
+            ClientMessage::QueryNearestInStore { uri, store, top_k } => {
+                let db = self.db.lock().await;
+                let qv = if uri.starts_with("lip://") {
+                    db.get_symbol_embedding(&uri).cloned()
+                } else {
+                    db.get_file_embedding(&uri).cloned()
+                };
+                let Some(qv) = qv else {
+                    return ServerMessage::Error {
+                        message: format!(
+                            "{uri} has no cached embedding — call embedding_batch first"
+                        ),
+                    };
+                };
+                let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if q_norm == 0.0 {
+                    return ServerMessage::NearestResult { results: vec![] };
+                }
+                let mut scored: Vec<crate::query_graph::types::NearestItem> = store
+                    .iter()
+                    .filter_map(|(store_uri, sv)| {
+                        if sv.len() != qv.len() {
+                            return None;
+                        }
+                        let sn: f32 = sv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if sn == 0.0 {
+                            return None;
+                        }
+                        let dot: f32 = qv.iter().zip(sv.iter()).map(|(a, b)| a * b).sum();
+                        Some(crate::query_graph::types::NearestItem {
+                            uri: store_uri.clone(),
+                            score: dot / (q_norm * sn),
+                        })
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                scored.truncate(top_k);
+                ServerMessage::NearestResult { results: scored }
+            }
+
+            // ── v1.8: QueryNoveltyScore ───────────────────────────────────
+            ClientMessage::QueryNoveltyScore { uris } => {
+                let db = self.db.lock().await;
+                let (score, per_file) = db.novelty_scores(&uris);
+                ServerMessage::NoveltyScoreResult { score, per_file }
+            }
+
+            // ── v1.8: ExtractTerminology ──────────────────────────────────
+            ClientMessage::ExtractTerminology { uris, top_k } => {
+                let mut db = self.db.lock().await;
+                let terms = db.extract_terminology(&uris, top_k);
+                ServerMessage::TerminologyResult { terms }
+            }
+
+            // ── v1.8: PruneDeleted ────────────────────────────────────────
+            ClientMessage::PruneDeleted => {
+                let uris = self.db.lock().await.tracked_uris();
+                let checked = uris.len();
+                let mut removed = Vec::new();
+                for uri in &uris {
+                    if let Some(path) = uri_to_path(uri) {
+                        if tokio::fs::metadata(&path).await.is_err() {
+                            removed.push(uri.clone());
+                        }
+                    }
+                }
+                if !removed.is_empty() {
+                    let mut db = self.db.lock().await;
+                    for uri in &removed {
+                        db.remove_file(uri);
+                    }
+                    if let Some(tx) = &self.notify_tx {
+                        let indexed_files = db.file_count();
+                        let _ = tx.send(ServerMessage::IndexChanged {
+                            indexed_files,
+                            affected_uris: removed.clone(),
+                        });
+                    }
+                }
+                ServerMessage::PruneDeletedResult { checked, removed }
             }
         }
     }
@@ -1113,7 +1484,7 @@ fn process_query_sync(
             err("QueryNearestBySymbol requires async HTTP; not permitted in BatchQuery")
         }
 
-        // ── CKB v1.6 variants ─────────────────────────────────────────────
+        // ── v1.6 variants ─────────────────────────────────────────────────
 
         // ReindexFiles requires filesystem I/O — not permitted in sync batch context.
         ClientMessage::ReindexFiles { .. } => {
@@ -1170,6 +1541,214 @@ fn process_query_sync(
                 })
                 .collect();
             ok(ServerMessage::ExportEmbeddingsResult { embeddings })
+        }
+
+        // ── v1.7 variants — all pure reads, safe inside a batch ───────────
+
+        ClientMessage::QueryNearestByContrast {
+            like_uri,
+            unlike_uri,
+            top_k,
+        } => {
+            let vlike = if like_uri.starts_with("lip://") {
+                db.get_symbol_embedding(&like_uri).cloned()
+            } else {
+                db.get_file_embedding(&like_uri).cloned()
+            };
+            let vunlike = if unlike_uri.starts_with("lip://") {
+                db.get_symbol_embedding(&unlike_uri).cloned()
+            } else {
+                db.get_file_embedding(&unlike_uri).cloned()
+            };
+            match (vlike, vunlike) {
+                (Some(vl), Some(vu)) if vl.len() == vu.len() => {
+                    let mut contrast: Vec<f32> =
+                        vl.iter().zip(vu.iter()).map(|(a, b)| a - b).collect();
+                    let norm: f32 = contrast.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for x in contrast.iter_mut() {
+                            *x /= norm;
+                        }
+                    }
+                    let results = db.nearest_by_vector(&contrast, top_k, None);
+                    ok(ServerMessage::NearestResult { results })
+                }
+                _ => err(
+                    "both URIs must have cached embeddings with matching dimensions",
+                ),
+            }
+        }
+
+        ClientMessage::QueryOutliers { uris, top_k } => {
+            let outliers = db.outliers(&uris, top_k);
+            ok(ServerMessage::OutliersResult { outliers })
+        }
+
+        ClientMessage::QuerySemanticDrift { uri_a, uri_b } => {
+            let va = if uri_a.starts_with("lip://") {
+                db.get_symbol_embedding(&uri_a).cloned()
+            } else {
+                db.get_file_embedding(&uri_a).cloned()
+            };
+            let vb = if uri_b.starts_with("lip://") {
+                db.get_symbol_embedding(&uri_b).cloned()
+            } else {
+                db.get_file_embedding(&uri_b).cloned()
+            };
+            let distance = match (va, vb) {
+                (Some(a), Some(b)) if a.len() == b.len() => {
+                    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if na > 0.0 && nb > 0.0 {
+                        Some(1.0 - dot / (na * nb))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            ok(ServerMessage::SemanticDriftResult { distance })
+        }
+
+        ClientMessage::SimilarityMatrix { uris } => {
+            let (result_uris, matrix) = db.similarity_matrix(&uris);
+            ok(ServerMessage::SimilarityMatrixResult {
+                uris: result_uris,
+                matrix,
+            })
+        }
+
+        ClientMessage::FindSemanticCounterpart {
+            uri,
+            candidates,
+            top_k,
+        } => {
+            let query_vec = if uri.starts_with("lip://") {
+                db.get_symbol_embedding(&uri).cloned()
+            } else {
+                db.get_file_embedding(&uri).cloned()
+            };
+            let Some(qv) = query_vec else {
+                return err(&format!(
+                    "{uri} has no cached embedding — call embedding_batch first"
+                ));
+            };
+            let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if q_norm == 0.0 {
+                return ok(ServerMessage::NearestResult { results: vec![] });
+            }
+            let mut scored: Vec<crate::query_graph::types::NearestItem> = candidates
+                .iter()
+                .filter_map(|c| {
+                    let cv = if c.starts_with("lip://") {
+                        db.get_symbol_embedding(c)
+                    } else {
+                        db.get_file_embedding(c)
+                    };
+                    let cv = cv?;
+                    if cv.len() != qv.len() {
+                        return None;
+                    }
+                    let dot: f32 = qv.iter().zip(cv.iter()).map(|(a, b)| a * b).sum();
+                    let cn: f32 = cv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if cn == 0.0 {
+                        return None;
+                    }
+                    Some(crate::query_graph::types::NearestItem {
+                        uri: c.clone(),
+                        score: dot / (q_norm * cn),
+                    })
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(top_k);
+            ok(ServerMessage::NearestResult { results: scored })
+        }
+
+        ClientMessage::QueryCoverage { root } => {
+            let (total_files, embedded_files, by_directory) = db.coverage(&root);
+            let coverage_fraction = if total_files > 0 {
+                Some(embedded_files as f32 / total_files as f32)
+            } else {
+                None
+            };
+            ok(ServerMessage::CoverageResult {
+                root,
+                total_files,
+                embedded_files,
+                coverage_fraction,
+                by_directory,
+            })
+        }
+
+        // ── v1.8 variants ──────────────────────────────────────────────────
+
+        // These require async HTTP or filesystem I/O — not permitted in sync batch context.
+        ClientMessage::FindBoundaries { .. } => {
+            err("FindBoundaries requires async HTTP; not permitted in BatchQuery")
+        }
+        ClientMessage::SemanticDiff { .. } => {
+            err("SemanticDiff requires async HTTP; not permitted in BatchQuery")
+        }
+        ClientMessage::PruneDeleted => {
+            err("PruneDeleted requires filesystem I/O; not permitted in BatchQuery")
+        }
+
+        // Pure reads — safe inside a batch.
+        ClientMessage::QueryNearestInStore { uri, store, top_k } => {
+            let qv = if uri.starts_with("lip://") {
+                db.get_symbol_embedding(&uri).cloned()
+            } else {
+                db.get_file_embedding(&uri).cloned()
+            };
+            let Some(qv) = qv else {
+                return err(&format!(
+                    "{uri} has no cached embedding — call embedding_batch first"
+                ));
+            };
+            let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if q_norm == 0.0 {
+                return ok(ServerMessage::NearestResult { results: vec![] });
+            }
+            let mut scored: Vec<crate::query_graph::types::NearestItem> = store
+                .iter()
+                .filter_map(|(su, sv)| {
+                    if sv.len() != qv.len() {
+                        return None;
+                    }
+                    let sn: f32 = sv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if sn == 0.0 {
+                        return None;
+                    }
+                    let dot: f32 = qv.iter().zip(sv.iter()).map(|(a, b)| a * b).sum();
+                    Some(crate::query_graph::types::NearestItem {
+                        uri: su.clone(),
+                        score: dot / (q_norm * sn),
+                    })
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(top_k);
+            ok(ServerMessage::NearestResult { results: scored })
+        }
+
+        ClientMessage::QueryNoveltyScore { uris } => {
+            let (score, per_file) = db.novelty_scores(&uris);
+            ok(ServerMessage::NoveltyScoreResult { score, per_file })
+        }
+
+        ClientMessage::ExtractTerminology { uris, top_k } => {
+            let terms = db.extract_terminology(&uris, top_k);
+            ok(ServerMessage::TerminologyResult { terms })
         }
     }
 }
