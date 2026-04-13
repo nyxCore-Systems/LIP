@@ -17,6 +17,8 @@ tree-sitter-rust       = "0.21"
 tree-sitter-python     = "0.21"
 tree-sitter-typescript = "0.21"
 tree-sitter-dart       = "0.0.4"
+tree-sitter-c          = "0.21"
+tree-sitter-cpp        = "0.21"
 # LSP bridge — use tower-lsp's bundled lsp-types to avoid version conflicts
 tower-lsp  = "0.20"
 # Async
