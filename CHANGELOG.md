@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.0.1] — 2026-04-13
+
+### Changed
+
+- Library crate renamed from `lip` to `lip-core` on crates.io (name was taken)
+- All three crates now published: `lip-core`, `lip-cli`, `lip-registry`
+- Crates metadata: homepage → `https://lip-sigma.vercel.app`, docs linked, `rust-version = "1.78"`, READMEs added
+- Author email updated to `lisa@nyxcore.cloud`
+
+---
+
 ## [2.0.0] — 2026-04-13
 
 ### Added
