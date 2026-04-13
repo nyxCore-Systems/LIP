@@ -671,4 +671,131 @@ mod tests {
     fn empty_source_returns_empty_go() {
         assert!(sym("", Language::Go).is_empty());
     }
+
+    // ── JavaScript / JSX ─────────────────────────────────────────────────────
+
+    #[test]
+    fn js_function_declaration_extracted() {
+        let syms = sym("function greet(name) { return name; }", Language::JavaScript);
+        let s = find(&syms, "greet");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.confidence_score, 30);
+    }
+
+    #[test]
+    fn js_class_extracted() {
+        let syms = sym("class EventEmitter {}", Language::JavaScript);
+        assert_eq!(find(&syms, "EventEmitter").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn jsx_component_extracted() {
+        let syms = sym("function Button(props) { return null; }", Language::JavaScriptReact);
+        assert_eq!(find(&syms, "Button").kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn js_cpg_call_edge() {
+        let src = "function caller() { callee(); } function callee() {}";
+        let es = edges(src, Language::JavaScript);
+        assert!(
+            es.iter()
+                .any(|e| e.from_uri.contains("#caller") && e.to_uri.contains("#callee")),
+            "expected caller→callee edge, got: {es:?}"
+        );
+    }
+
+    #[test]
+    fn empty_source_returns_empty_js() {
+        assert!(sym("", Language::JavaScript).is_empty());
+        assert!(sym("", Language::JavaScriptReact).is_empty());
+    }
+
+    // ── Kotlin ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn kotlin_function_extracted() {
+        let syms = sym("fun doThing(x: Int): String = \"\"", Language::Kotlin);
+        let s = find(&syms, "doThing");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.confidence_score, 30);
+    }
+
+    #[test]
+    fn kotlin_class_extracted() {
+        let syms = sym("class MyService {}", Language::Kotlin);
+        assert_eq!(find(&syms, "MyService").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn kotlin_interface_extracted() {
+        let syms = sym("interface Runnable { fun run() }", Language::Kotlin);
+        assert_eq!(find(&syms, "Runnable").kind, SymbolKind::Interface);
+    }
+
+    #[test]
+    fn kotlin_cpg_call_edge() {
+        let src = "fun caller() { callee() }\nfun callee() {}";
+        let es = edges(src, Language::Kotlin);
+        assert!(
+            es.iter()
+                .any(|e| e.from_uri.contains("#caller") && e.to_uri.contains("#callee")),
+            "expected caller→callee edge, got: {es:?}"
+        );
+    }
+
+    #[test]
+    fn empty_source_returns_empty_kotlin() {
+        assert!(sym("", Language::Kotlin).is_empty());
+    }
+
+    // ── Swift ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn swift_function_extracted() {
+        let syms = sym("func greet(name: String) -> String { name }", Language::Swift);
+        let s = find(&syms, "greet");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.confidence_score, 30);
+    }
+
+    #[test]
+    fn swift_class_extracted() {
+        let syms = sym("class ViewController {}", Language::Swift);
+        assert_eq!(find(&syms, "ViewController").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn swift_struct_extracted() {
+        let syms = sym("struct Point { var x: Int; var y: Int }", Language::Swift);
+        assert_eq!(find(&syms, "Point").kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn swift_protocol_extracted() {
+        let syms = sym("protocol Drawable { func draw() }", Language::Swift);
+        assert_eq!(find(&syms, "Drawable").kind, SymbolKind::Interface);
+    }
+
+    #[test]
+    fn swift_enum_extracted() {
+        let syms = sym("enum Direction { case north, south }", Language::Swift);
+        assert_eq!(find(&syms, "Direction").kind, SymbolKind::Enum);
+    }
+
+    #[test]
+    fn swift_cpg_call_edge() {
+        let src = "func caller() { callee() }\nfunc callee() {}";
+        let es = edges(src, Language::Swift);
+        assert!(
+            es.iter()
+                .any(|e| e.from_uri.contains("#caller") && e.to_uri.contains("#callee")),
+            "expected caller→callee edge, got: {es:?}"
+        );
+    }
+
+    #[test]
+    fn empty_source_returns_empty_swift() {
+        assert!(sym("", Language::Swift).is_empty());
+    }
 }

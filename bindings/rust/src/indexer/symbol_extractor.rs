@@ -54,6 +54,11 @@ impl<'a> SymbolExtractor<'a> {
             Language::C => self.c_calls(node, caller, edges),
             Language::Cpp => self.cpp_calls(node, caller, edges),
             Language::Go => self.go_calls(node, caller, edges),
+            Language::JavaScript | Language::JavaScriptReact => {
+                self.ts_calls(node, caller, edges)
+            }
+            Language::Kotlin => self.kotlin_calls(node, caller, edges),
+            Language::Swift => self.swift_calls(node, caller, edges),
             Language::Unknown => {}
         }
     }
@@ -93,6 +98,9 @@ impl<'a> SymbolExtractor<'a> {
             Language::C => self.c_symbols(node, out),
             Language::Cpp => self.cpp_symbols(node, out),
             Language::Go => self.go_symbols(node, out),
+            Language::JavaScript | Language::JavaScriptReact => self.ts_symbols(node, out),
+            Language::Kotlin => self.kotlin_symbols(node, out),
+            Language::Swift => self.swift_symbols(node, out),
             Language::Unknown => {}
         }
     }
@@ -106,6 +114,11 @@ impl<'a> SymbolExtractor<'a> {
             Language::C => self.c_occurrences(node, out),
             Language::Cpp => self.cpp_occurrences(node, out),
             Language::Go => self.go_occurrences(node, out),
+            Language::JavaScript | Language::JavaScriptReact => {
+                self.ts_occurrences(node, out)
+            }
+            Language::Kotlin => self.kotlin_occurrences(node, out),
+            Language::Swift => self.swift_occurrences(node, out),
             Language::Unknown => {}
         }
     }
@@ -1281,4 +1294,340 @@ impl<'a> SymbolExtractor<'a> {
 /// is an uppercase Unicode letter.
 fn go_is_exported(name: &str) -> bool {
     name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kotlin and Swift implementations are in the `impl SymbolExtractor` block below
+// (appended here to avoid splitting the struct).
+//
+// They are plain functions outside the impl block so we don't have to re-open
+// it — instead they are free helpers called from the methods.
+// Actually: the methods belong on the impl, so we re-open it:
+
+impl<'a> SymbolExtractor<'a> {
+    // ─── Kotlin ───────────────────────────────────────────────────────────────
+
+    fn kotlin_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        let (kind, recurse) = match node.kind() {
+            "function_declaration" => (Some(SymbolKind::Function), true),
+            "class_declaration" => {
+                // Distinguish class vs interface: interfaces have an anonymous
+                // "interface" keyword child (direct child, before the name).
+                // Only scan direct children to avoid false positives inside the body.
+                let is_interface = (0..node.child_count()).any(|i| {
+                    node.child(i)
+                        .map(|c| c.kind() == "interface")
+                        .unwrap_or(false)
+                });
+                (
+                    Some(if is_interface {
+                        SymbolKind::Interface
+                    } else {
+                        SymbolKind::Class
+                    }),
+                    true,
+                )
+            }
+            "object_declaration" => (Some(SymbolKind::Class), true),
+            _ => (None, true),
+        };
+
+        if let Some(k) = kind {
+            if let Some(name_node) = kotlin_first_name_child(node) {
+                let name = self.node_text(&name_node).to_owned();
+                if !name.is_empty() {
+                    let is_exported = kotlin_is_exported(node);
+                    out.push(OwnedSymbolInfo {
+                        uri: self.lip_uri(&name),
+                        display_name: name,
+                        kind: k,
+                        confidence_score: 30,
+                        is_exported,
+                        ..OwnedSymbolInfo::new("", "")
+                    });
+                }
+            }
+        }
+
+        if recurse {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    self.kotlin_symbols(child, out);
+                }
+            }
+        }
+    }
+
+    fn kotlin_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if matches!(node.kind(), "simple_identifier" | "type_identifier") {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_def = matches!(
+                        parent.kind(),
+                        "function_declaration"
+                            | "class_declaration"
+                            | "object_declaration"
+                            | "property_declaration"
+                    ) && kotlin_first_name_child(parent)
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_def { Role::Definition } else { Role::Reference }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc: None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.kotlin_occurrences(child, out);
+            }
+        }
+    }
+
+    fn kotlin_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller = match node.kind() {
+            "function_declaration" => {
+                kotlin_first_name_child(node).map(|n| self.node_text(&n).to_owned())
+            }
+            _ => None,
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child(0) {
+                let callee: &str = match func_node.kind() {
+                    "simple_identifier" => self.node_text(&func_node),
+                    "navigation_expression" => func_node
+                        .child_by_field_name("name")
+                        .or_else(|| {
+                            // last simple_identifier child
+                            (0..func_node.named_child_count())
+                                .rev()
+                                .find_map(|i| func_node.named_child(i))
+                                .filter(|n| n.kind() == "simple_identifier")
+                        })
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.kotlin_calls(child, effective.clone(), edges);
+            }
+        }
+    }
+
+    // ─── Swift ────────────────────────────────────────────────────────────────
+
+    fn swift_symbols(&self, node: Node, out: &mut Vec<OwnedSymbolInfo>) {
+        let kind: Option<SymbolKind> = match node.kind() {
+            "function_declaration" => Some(SymbolKind::Function),
+            "class_declaration" => {
+                // declaration_kind field: "class" | "struct" | "actor" | "enum" | "extension"
+                let dk = node
+                    .child_by_field_name("declaration_kind")
+                    .map(|n| self.node_text(&n).to_owned())
+                    .unwrap_or_default();
+                match dk.as_str() {
+                    "enum" => Some(SymbolKind::Enum),
+                    "extension" => Some(SymbolKind::Namespace),
+                    _ => Some(SymbolKind::Class), // class | struct | actor
+                }
+            }
+            "protocol_declaration" => Some(SymbolKind::Interface),
+            "typealias_declaration" => Some(SymbolKind::TypeAlias),
+            _ => None,
+        };
+
+        if let Some(k) = kind {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = self.node_text(&name_node).to_owned();
+                if !name.is_empty() {
+                    let is_exported = swift_is_exported(node);
+                    out.push(OwnedSymbolInfo {
+                        uri: self.lip_uri(&name),
+                        display_name: name,
+                        kind: k,
+                        confidence_score: 30,
+                        is_exported,
+                        ..OwnedSymbolInfo::new("", "")
+                    });
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.swift_symbols(child, out);
+            }
+        }
+    }
+
+    fn swift_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
+        if matches!(node.kind(), "simple_identifier" | "type_identifier") {
+            let name = self.node_text(&node);
+            if !name.is_empty() {
+                let role = node.parent().map_or(Role::Reference, |parent| {
+                    let is_def = matches!(
+                        parent.kind(),
+                        "function_declaration"
+                            | "class_declaration"
+                            | "protocol_declaration"
+                            | "typealias_declaration"
+                    ) && parent
+                        .child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false);
+                    if is_def { Role::Definition } else { Role::Reference }
+                });
+                out.push(OwnedOccurrence {
+                    symbol_uri: self.lip_uri(name),
+                    range: Self::node_range(&node),
+                    confidence_score: 20,
+                    role,
+                    override_doc: None,
+                });
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.swift_occurrences(child, out);
+            }
+        }
+    }
+
+    fn swift_calls(&self, node: Node, caller: Option<String>, edges: &mut Vec<OwnedGraphEdge>) {
+        let new_caller = match node.kind() {
+            "function_declaration" => node
+                .child_by_field_name("name")
+                .map(|n| self.node_text(&n).to_owned()),
+            _ => None,
+        };
+        let effective = new_caller.or_else(|| caller.clone());
+
+        if node.kind() == "call_expression" {
+            // Swift: call_expression → function field contains the callee
+            let callee_node = node
+                .child_by_field_name("function")
+                .or_else(|| node.child(0));
+            if let Some(func_node) = callee_node {
+                let callee: &str = match func_node.kind() {
+                    "simple_identifier" => self.node_text(&func_node),
+                    "navigation_expression" => func_node
+                        .child_by_field_name("name")
+                        .or_else(|| {
+                            (0..func_node.named_child_count())
+                                .rev()
+                                .find_map(|i| func_node.named_child(i))
+                                .filter(|n| n.kind() == "simple_identifier")
+                        })
+                        .map(|n| self.node_text(&n))
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                if !callee.is_empty() {
+                    if let Some(ref c) = effective {
+                        if !c.is_empty() {
+                            edges.push(OwnedGraphEdge {
+                                from_uri: self.lip_uri(c),
+                                to_uri: self.lip_uri(callee),
+                                kind: EdgeKind::Calls,
+                                at_range: Self::node_range(&node),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.swift_calls(child, effective.clone(), edges);
+            }
+        }
+    }
+}
+
+// ─── Kotlin helpers ───────────────────────────────────────────────────────────
+
+/// Return the first `simple_identifier` or `type_identifier` named child —
+/// Kotlin's grammar does not use named `field()` wrappers for declaration names.
+fn kotlin_first_name_child(node: Node) -> Option<Node> {
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if matches!(child.kind(), "simple_identifier" | "type_identifier") {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if any node in the subtree has a kind matching one of the given keywords.
+///
+/// Tree-sitter anonymous nodes (keywords) use their source text as their kind, so
+/// checking `node.kind() == "private"` is reliable without needing source bytes.
+fn subtree_has_keyword(node: Node, keywords: &[&str]) -> bool {
+    if keywords.contains(&node.kind()) {
+        return true;
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if subtree_has_keyword(child, keywords) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A Kotlin declaration is exported unless it explicitly carries a `private`
+/// or `protected` visibility modifier.
+fn kotlin_is_exported(node: Node) -> bool {
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if child.kind() == "modifiers"
+                && subtree_has_keyword(child, &["private", "protected"])
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A Swift declaration is exported unless it has a `private` or `fileprivate`
+/// access modifier.
+fn swift_is_exported(node: Node) -> bool {
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if matches!(child.kind(), "modifiers" | "modifier")
+                && subtree_has_keyword(child, &["private", "fileprivate"])
+            {
+                return false;
+            }
+        }
+    }
+    true
 }

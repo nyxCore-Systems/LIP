@@ -16,10 +16,12 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::indexer::tier2::clangd::ClangdBackend;
-use crate::indexer::tier2::gopls::GoplsBackend;
 use crate::indexer::tier2::dart_ls::DartBackend;
+use crate::indexer::tier2::gopls::GoplsBackend;
+use crate::indexer::tier2::kotlin::KotlinBackend;
 use crate::indexer::tier2::py_ls::PythonBackend;
 use crate::indexer::tier2::rust_analyzer::RustAnalyzerBackend;
+use crate::indexer::tier2::swift_ls::SwiftBackend;
 use crate::indexer::tier2::ts_server::TypeScriptBackend;
 use crate::query_graph::{LipDatabase, ServerMessage};
 
@@ -66,6 +68,12 @@ struct Tier2Backends {
 
     gopls: Option<GoplsBackend>,
     gopls_disabled: bool,
+
+    kotlin: Option<KotlinBackend>,
+    kotlin_disabled: bool,
+
+    swift: Option<SwiftBackend>,
+    swift_disabled: bool,
 }
 
 impl Tier2Backends {
@@ -84,6 +92,10 @@ impl Tier2Backends {
             clangd_disabled: false,
             gopls: None,
             gopls_disabled: false,
+            kotlin: None,
+            kotlin_disabled: false,
+            swift: None,
+            swift_disabled: false,
         }
     }
 }
@@ -125,7 +137,13 @@ impl Tier2Manager {
     async fn handle(&mut self, job: VerificationJob) {
         if job.uri.ends_with(".rs") {
             self.handle_rust(job).await;
-        } else if job.uri.ends_with(".ts") || job.uri.ends_with(".tsx") {
+        } else if job.uri.ends_with(".ts")
+            || job.uri.ends_with(".tsx")
+            || job.uri.ends_with(".js")
+            || job.uri.ends_with(".jsx")
+            || job.uri.ends_with(".mjs")
+            || job.uri.ends_with(".cjs")
+        {
             self.handle_typescript(job).await;
         } else if job.uri.ends_with(".py") {
             self.handle_python(job).await;
@@ -142,6 +160,10 @@ impl Tier2Manager {
             self.handle_clangd(job).await;
         } else if job.uri.ends_with(".go") {
             self.handle_gopls(job).await;
+        } else if job.uri.ends_with(".kt") || job.uri.ends_with(".kts") {
+            self.handle_kotlin(job).await;
+        } else if job.uri.ends_with(".swift") {
+            self.handle_swift(job).await;
         }
         // Unknown extension — nothing to do; Tier 1 results remain.
     }
@@ -444,6 +466,102 @@ impl Tier2Manager {
             Err(e) => {
                 error!("tier2: gopls verification failed for {}: {e}", job.uri);
                 self.backends.gopls = None;
+            }
+        }
+    }
+
+    // ── Kotlin ────────────────────────────────────────────────────────────────
+
+    async fn ensure_kotlin_backend(&mut self, workspace_root: Option<PathBuf>) {
+        if self.backends.kotlin.is_some() || self.backends.kotlin_disabled {
+            return;
+        }
+
+        match KotlinBackend::new(workspace_root).await {
+            Ok(b) => {
+                info!("tier2: kotlin-language-server backend ready");
+                self.backends.kotlin = Some(b);
+            }
+            Err(e) => {
+                warn!("tier2: kotlin-language-server unavailable, disabling: {e}");
+                self.backends.kotlin_disabled = true;
+            }
+        }
+    }
+
+    async fn handle_kotlin(&mut self, job: VerificationJob) {
+        if self.backends.kotlin_disabled {
+            return;
+        }
+
+        self.ensure_kotlin_backend(job.workspace_root.clone()).await;
+        if self.backends.kotlin_disabled {
+            return;
+        }
+
+        let backend = self.backends.kotlin.as_mut().unwrap();
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
+            Ok(result) => {
+                let upgraded = result.symbols.len();
+                let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
+                db.upgrade_file_symbols(&result.uri, &result.symbols);
+                debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
+            }
+            Err(e) => {
+                error!("tier2: kotlin verification failed for {}: {e}", job.uri);
+                self.backends.kotlin = None;
+            }
+        }
+    }
+
+    // ── Swift ─────────────────────────────────────────────────────────────────
+
+    async fn ensure_swift_backend(&mut self, workspace_root: Option<PathBuf>) {
+        if self.backends.swift.is_some() || self.backends.swift_disabled {
+            return;
+        }
+
+        match SwiftBackend::new(workspace_root).await {
+            Ok(b) => {
+                info!("tier2: sourcekit-lsp backend ready");
+                self.backends.swift = Some(b);
+            }
+            Err(e) => {
+                warn!("tier2: sourcekit-lsp unavailable, disabling: {e}");
+                self.backends.swift_disabled = true;
+            }
+        }
+    }
+
+    async fn handle_swift(&mut self, job: VerificationJob) {
+        if self.backends.swift_disabled {
+            return;
+        }
+
+        self.ensure_swift_backend(job.workspace_root.clone()).await;
+        if self.backends.swift_disabled {
+            return;
+        }
+
+        let backend = self.backends.swift.as_mut().unwrap();
+        match backend
+            .verify_file(&job.uri, &job.source, job.version)
+            .await
+        {
+            Ok(result) => {
+                let upgraded = result.symbols.len();
+                let mut db = self.db.lock().await;
+                self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
+                db.upgrade_file_symbols(&result.uri, &result.symbols);
+                debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
+            }
+            Err(e) => {
+                error!("tier2: swift verification failed for {}: {e}", job.uri);
+                self.backends.swift = None;
             }
         }
     }
