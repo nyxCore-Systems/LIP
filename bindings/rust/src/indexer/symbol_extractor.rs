@@ -54,9 +54,7 @@ impl<'a> SymbolExtractor<'a> {
             Language::C => self.c_calls(node, caller, edges),
             Language::Cpp => self.cpp_calls(node, caller, edges),
             Language::Go => self.go_calls(node, caller, edges),
-            Language::JavaScript | Language::JavaScriptReact => {
-                self.ts_calls(node, caller, edges)
-            }
+            Language::JavaScript | Language::JavaScriptReact => self.ts_calls(node, caller, edges),
             Language::Kotlin => self.kotlin_calls(node, caller, edges),
             Language::Swift => self.swift_calls(node, caller, edges),
             Language::Unknown => {}
@@ -114,9 +112,7 @@ impl<'a> SymbolExtractor<'a> {
             Language::C => self.c_occurrences(node, out),
             Language::Cpp => self.cpp_occurrences(node, out),
             Language::Go => self.go_occurrences(node, out),
-            Language::JavaScript | Language::JavaScriptReact => {
-                self.ts_occurrences(node, out)
-            }
+            Language::JavaScript | Language::JavaScriptReact => self.ts_occurrences(node, out),
             Language::Kotlin => self.kotlin_occurrences(node, out),
             Language::Swift => self.swift_occurrences(node, out),
             Language::Unknown => {}
@@ -1212,7 +1208,10 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn go_occurrences(&self, node: Node, out: &mut Vec<OwnedOccurrence>) {
-        if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+        if matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) {
             let name = self.node_text(&node);
             if !name.is_empty() {
                 let role = node.parent().map_or(Role::Reference, |parent| {
@@ -1293,7 +1292,10 @@ impl<'a> SymbolExtractor<'a> {
 /// Go exports by capitalization: an identifier is exported if its first character
 /// is an uppercase Unicode letter.
 fn go_is_exported(name: &str) -> bool {
-    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    name.chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1372,7 +1374,11 @@ impl<'a> SymbolExtractor<'a> {
                     ) && kotlin_first_name_child(parent)
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_def { Role::Definition } else { Role::Reference }
+                    if is_def {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
                     symbol_uri: self.lip_uri(name),
@@ -1499,7 +1505,11 @@ impl<'a> SymbolExtractor<'a> {
                         .child_by_field_name("name")
                         .map(|n| n.id() == node.id())
                         .unwrap_or(false);
-                    if is_def { Role::Definition } else { Role::Reference }
+                    if is_def {
+                        Role::Definition
+                    } else {
+                        Role::Reference
+                    }
                 });
                 out.push(OwnedOccurrence {
                     symbol_uri: self.lip_uri(name),
@@ -1607,8 +1617,7 @@ fn subtree_has_keyword(node: Node, keywords: &[&str]) -> bool {
 fn kotlin_is_exported(node: Node) -> bool {
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            if child.kind() == "modifiers"
-                && subtree_has_keyword(child, &["private", "protected"])
+            if child.kind() == "modifiers" && subtree_has_keyword(child, &["private", "protected"])
             {
                 return false;
             }

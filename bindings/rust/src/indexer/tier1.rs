@@ -676,7 +676,10 @@ mod tests {
 
     #[test]
     fn js_function_declaration_extracted() {
-        let syms = sym("function greet(name) { return name; }", Language::JavaScript);
+        let syms = sym(
+            "function greet(name) { return name; }",
+            Language::JavaScript,
+        );
         let s = find(&syms, "greet");
         assert_eq!(s.kind, SymbolKind::Function);
         assert_eq!(s.confidence_score, 30);
@@ -690,7 +693,10 @@ mod tests {
 
     #[test]
     fn jsx_component_extracted() {
-        let syms = sym("function Button(props) { return null; }", Language::JavaScriptReact);
+        let syms = sym(
+            "function Button(props) { return null; }",
+            Language::JavaScriptReact,
+        );
         assert_eq!(find(&syms, "Button").kind, SymbolKind::Function);
     }
 
@@ -753,7 +759,10 @@ mod tests {
 
     #[test]
     fn swift_function_extracted() {
-        let syms = sym("func greet(name: String) -> String { name }", Language::Swift);
+        let syms = sym(
+            "func greet(name: String) -> String { name }",
+            Language::Swift,
+        );
         let s = find(&syms, "greet");
         assert_eq!(s.kind, SymbolKind::Function);
         assert_eq!(s.confidence_score, 30);

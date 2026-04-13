@@ -291,7 +291,12 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        out.push(RawSymbol { name, kind, line, col });
+        out.push(RawSymbol {
+            name,
+            kind,
+            line,
+            col,
+        });
 
         if let Some(Value::Array(children)) = item.get("children") {
             collect_symbols(children, out);
@@ -324,7 +329,7 @@ fn extract_kotlin_signature(md: &str) -> Option<String> {
 /// Map LSP `SymbolKind` integer values to LIP `SymbolKind`.
 fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
     match kind {
-        3 => SymbolKind::Namespace,   // Package
+        3 => SymbolKind::Namespace, // Package
         4 => SymbolKind::Namespace,
         5 => SymbolKind::Class,
         6 => SymbolKind::Method,
@@ -333,10 +338,10 @@ fn lsp_kind_to_lip(kind: u64) -> SymbolKind {
         9 => SymbolKind::Enum,
         10 => SymbolKind::Interface,
         11 => SymbolKind::Function,
-        12 => SymbolKind::Variable,   // Constant
+        12 => SymbolKind::Variable, // Constant
         13 => SymbolKind::Variable,
         22 => SymbolKind::EnumMember,
-        25 => SymbolKind::TypeAlias,  // TypeParameter
+        25 => SymbolKind::TypeAlias, // TypeParameter
         _ => SymbolKind::Unknown,
     }
 }
