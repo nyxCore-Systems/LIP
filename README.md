@@ -1,6 +1,7 @@
 # LIP — Linked Incremental Protocol
 
-[![Website](https://img.shields.io/badge/website-lip.dev-8b5cf6?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyek0xMSA3djZsNS4yNSAzLjE1LS44NSAxLjQyTDEwIDE0VjdoMXoiLz48L3N2Zz4=)](https://lip.dev)
+[![Website](https://img.shields.io/badge/website-lip--sigma.vercel.app-8b5cf6?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyek0xMSA3djZsNS4yNSAzLjE1LS44NSAxLjQyTDEwIDE0VjdoMXoiLz48L3N2Zz4=)](https://lip-sigma.vercel.app)
+[![Docs](https://img.shields.io/badge/docs-lip--sigma.vercel.app%2Fdocs-06b6d4?style=flat-square)](https://lip-sigma.vercel.app/docs)
 [![Crates.io](https://img.shields.io/crates/v/lip-cli?style=flat-square&color=8b5cf6)](https://crates.io/crates/lip-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-06b6d4?style=flat-square)](LICENSE)
 [![Rust 1.78+](https://img.shields.io/badge/rust-1.78+-06b6d4?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -47,7 +48,7 @@ All of them have built custom, proprietary, incompatible code graph layers to an
 
 **LIP is not a replacement for LSP either.** It ships an LSP bridge (`lip lsp`) so any editor sees it as a standard language server. The difference is that LIP's answers come from a persistent live graph rather than an in-memory server that restarts cold.
 
-See [docs/user/comparisons.md](docs/user/comparisons.md) for the full breakdown, including when to use all three together.
+See [LSP, SCIP & LIP](https://lip-sigma.vercel.app/docs/comparisons) for the full breakdown, including when to use all three together.
 
 ---
 
@@ -167,11 +168,11 @@ lip slice --cargo                                        # index ./Cargo.toml de
 lip slice --npm                                          # index ./package.json deps
 lip slice --pub                                          # index ./pubspec.yaml deps
 lip slice --pip                                          # index pip-installed packages
-lip slice --cargo --push --registry https://registry.lip.dev
+lip slice --cargo --push --registry https://your-registry.internal
 
-# Fetch / publish slices directly
-lip fetch <sha256-hash> --registry https://registry.lip.dev
-lip push  slice.json    --registry https://registry.lip.dev
+# Fetch / publish slices
+lip fetch <sha256-hash> --registry https://your-registry.internal
+lip push  slice.json    --registry https://your-registry.internal
 
 # Force re-index specific files from disk (v1.6)
 lip query reindex-files file:///src/auth.rs file:///src/generated/schema.rs
@@ -245,7 +246,7 @@ lip query export-embeddings file:///src/auth.rs file:///src/session.rs --output 
 4. Make changes
 5. `lip_annotation_set` — release locks, leave notes
 
-See [docs/user/mcp-integration.md](docs/user/mcp-integration.md) for full tool reference.
+See [MCP Integration docs](https://lip-sigma.vercel.app/docs/mcp) for full tool reference.
 
 ---
 
