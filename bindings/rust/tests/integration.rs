@@ -44,7 +44,7 @@ async fn recv(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
 fn make_doc(uri: &str, source: &str) -> OwnedDocument {
     OwnedDocument {
         uri: uri.to_owned(),
-        content_hash: lip::schema::sha256_hex(source.as_bytes()),
+        content_hash: lip_core::schema::sha256_hex(source.as_bytes()),
         language: "rust".to_owned(),
         occurrences: vec![],
         symbols: vec![],
@@ -80,7 +80,7 @@ async fn daemon_full_pipeline() {
     // ── 1. Handshake ──────────────────────────────────────────────────────────
     send(
         &mut client,
-        &ClientMessage::Manifest(lip::daemon::ManifestRequest {
+        &ClientMessage::Manifest(lip_core::daemon::ManifestRequest {
             repo_root: "/tmp/test-repo".to_owned(),
             merkle_root: "abc123".to_owned(),
             dep_tree_hash: "def456".to_owned(),
@@ -273,7 +273,7 @@ async fn daemon_restart_restores_journal() {
         // Also set a merkle root so we can verify lifecycle state on restart.
         send(
             &mut client,
-            &ClientMessage::Manifest(lip::daemon::ManifestRequest {
+            &ClientMessage::Manifest(lip_core::daemon::ManifestRequest {
                 repo_root: "/tmp/persist-repo".into(),
                 merkle_root: "persist-hash".into(),
                 dep_tree_hash: String::new(),
@@ -330,7 +330,7 @@ async fn daemon_restart_restores_journal() {
         // was fully restored from the journal.
         send(
             &mut client,
-            &ClientMessage::Manifest(lip::daemon::ManifestRequest {
+            &ClientMessage::Manifest(lip_core::daemon::ManifestRequest {
                 repo_root: "/tmp/persist-repo".into(),
                 merkle_root: "persist-hash".into(),
                 dep_tree_hash: String::new(),
