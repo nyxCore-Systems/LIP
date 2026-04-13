@@ -9,7 +9,7 @@ import Badge from '../../components/Badge.astro'
 
 # LIP — Linked Incremental Protocol
 
-**Design Document & Specification v0.1** · Draft · Apache 2.0
+**Design Document & Specification v1.5** · MIT License
 
 ---
 
@@ -117,7 +117,7 @@ LIP is designed around three axioms:
 
 ## 2. Comparison Matrix
 
-| Property | LSP 3.17 | SCIP | **LIP v0.1** |
+| Property | LSP 3.17 | SCIP | **LIP v1.5** |
 |---|---|---|---|
 | Wire format | JSON-RPC 2.0 | Protobuf 3 | **FlatBuffers (zero-copy)** |
 | Framing | HTTP Content-Length | n/a (file) | **4-byte length prefix** |
@@ -298,8 +298,8 @@ rationale over Protobuf/SCIP's choice.
 
 ```flatbuffers
 // lip.fbs — LIP FlatBuffers Schema
-// Version: 0.1.0
-// License: Apache 2.0
+// Version: 1.5.0
+// License: MIT
 
 namespace lip;
 
@@ -1014,7 +1014,7 @@ the declared offset and length are within the region bounds before reading.
 
 Taint labels (`taint_labels` on `SymbolInfo`) are advisory. They are propagated by
 the daemon but never enforced. Integration with security tooling (SAST) is out of
-scope for v0.1 but is a planned extension.
+scope for the current architecture but is a planned extension.
 
 ---
 
@@ -1022,7 +1022,7 @@ scope for v0.1 but is a planned extension.
 
 ```
 lip-protocol/
-├── LICENSE                        # Apache 2.0
+├── LICENSE                        # MIT
 ├── README.md
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
@@ -1217,5 +1217,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v0.1 · April 2026 · Apache 2.0*
-*Drafted by Lisa Küpper, TasteHub GmbH, Vienna*
+*LIP Specification v1.5 · April 2026 · MIT License*
+*Lisa Welsch*
