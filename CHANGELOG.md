@@ -8,29 +8,19 @@ All notable changes to this project are documented here.
 
 ### Added
 
-**v2.1 — Structured error codes on all `Error` responses**
-
-- **`ServerMessage::Error { message, code }`** — `code: ErrorCode` is a stable, machine-readable category. Clients branch on this instead of string-matching `message`. Added `#[serde(default)]`; older daemons predating this field deserialize as `ErrorCode::Internal`, so forward-compatible clients should treat `Internal` as "no classification available."
-- **`ErrorCode`** enum with a deliberately small, stable set: `unknown_message_type`, `unknown_model`, `cursor_out_of_range`, `index_locked`, `internal` (default). Adding a code is non-breaking; renaming or removing one is breaking.
-- **Daemon classification so far**: all 10 "embedding not configured / no cached embedding for URI" errors now carry `code: unknown_model`; everything else is `code: internal`. Specific codes will be wired in as each call-site picks one.
-
-**v2.1 — Capability discovery + graceful unknown-variant handling**
-
-- **`HandshakeResult.supported_messages: Vec<String>`** — handshake response now lists every `ClientMessage` `type` tag this daemon understands. Lets clients probe for an individual message (e.g. `stream_context`, `embed_text`) without writing "handshake then pray" code or comparing `protocol_version` integers. Field is `#[serde(default)]`; older daemons predating this field yield an empty vector, which clients should treat as "fall back to `protocol_version`."
-- **`ServerMessage::UnknownMessage { message_type, supported }`** — when a client sends a well-formed JSON envelope whose `type` tag is unknown, the daemon now replies with `UnknownMessage` (carrying the tag plus the same supported list as handshake) *and keeps the socket open*, instead of closing after a generic parse `Error`. Lets forward-compatible clients downgrade gracefully to a supported call instead of reconnecting.
-
-**v2.1 — `embed_text`: unary text-to-vector embedding**
-
-- **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (embeds internally but discards the vector). Callers re-ranking with their own scoring (centroid arithmetic, federated nearest-neighbour, lexical-then-semantic re-rank) get the embedding directly instead of building a centroid out of nearest-neighbour seeds. Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery` (requires async HTTP).
-
-**v2.1 — `stream_context`: token-budgeted RAG context streaming**
-
 - **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — new streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo { symbol_info, relevance_score, token_cost }` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`. Replaces the broken "fetch top-k, locally truncate to prompt budget" pattern with stream-until-full. Spec §9.2.
-- **Relevance ordering** (spec §2.3): direct symbol at cursor → callers (from blast-radius CPG walk) → callees / references → related types.
-- **Token-cost estimate**: conservative `ceil((len(signature) + len(documentation)) / 4) + 8` per symbol.
-- **Back-pressure**: daemon does not buffer ahead of the socket. `BrokenPipe` from a closing client aborts the ranking walk cleanly. `StreamContext` is rejected from `Batch` / `BatchQuery`.
+- **Relevance ordering** (spec §2.3): direct symbol at cursor → callers (from blast-radius CPG walk) → callees / references → related types. Conservative token-cost estimate `ceil((len(signature) + len(documentation)) / 4) + 8` per symbol. Daemon does not buffer ahead of the socket; `BrokenPipe` from a closing client aborts the ranking walk cleanly. `StreamContext` is rejected from `Batch` / `BatchQuery`.
 - **`protocol_version` bumped from `1` → `2`** in `HandshakeResult`. Clients can detect streaming support via handshake.
 - **`lip stream-context <file_uri> <line:col> --max-tokens N [--model M]`** — new CLI subcommand prints frames as JSON for manual testing.
+- **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (embeds internally but discards the vector). Callers re-ranking with their own scoring (centroid arithmetic, federated nearest-neighbour, lexical-then-semantic re-rank) get the embedding directly instead of building a centroid out of nearest-neighbour seeds. Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery` (requires async HTTP).
+- **`HandshakeResult.supported_messages: Vec<String>`** — handshake response now lists every `ClientMessage` `type` tag this daemon understands. Lets clients probe for an individual message (e.g. `stream_context`, `embed_text`) without writing "handshake then pray" code or comparing `protocol_version` integers. Field is `#[serde(default)]`; older daemons yield an empty vector, which clients should treat as "fall back to `protocol_version`."
+- **`ServerMessage::UnknownMessage { message_type, supported }`** — when a client sends a well-formed JSON envelope whose `type` tag is unknown, the daemon now replies with `UnknownMessage` (carrying the tag plus the same supported list as handshake) *and keeps the socket open*, instead of closing after a generic parse `Error`. Lets forward-compatible clients downgrade gracefully to a supported call instead of reconnecting.
+- **`ServerMessage::Error { message, code }`** — `code: ErrorCode` is a stable, machine-readable category. Clients branch on this instead of string-matching `message`. `#[serde(default)]`; older daemons deserialize as `ErrorCode::Internal`.
+- **`ErrorCode`** enum — small, stable set: `unknown_message_type`, `unknown_model`, `cursor_out_of_range`, `index_locked`, `internal` (default). Adding a code is non-breaking; renaming or removing one is breaking. All 10 "embedding not configured / no cached embedding for URI" errors carry `code: unknown_model`; everything else currently defaults to `internal`.
+
+### Fixed
+
+- **`QueryExpansion` now honors the caller's model pin.** Previously the handler embedded the query with the requested model but then ranked candidates across *all* stored symbol embeddings regardless of which model produced them — cross-model cosine scores are not meaningful, so the returned "expansion terms" were effectively noise whenever the index held mixed-model vectors. Handler now captures the actual model returned by `embed_texts` and passes it through a new `model_filter: Option<&str>` parameter on `LipDatabase::nearest_symbol_by_vector`, restricting candidates to symbols embedded with the same model. `SimilarSymbols` (which resolves from a URI's own cached embedding) keeps the old unfiltered behavior by passing `None`.
 
 ---
 
