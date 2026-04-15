@@ -314,16 +314,25 @@ mod tests {
             write!(f, "fn updated() {{}}").unwrap();
         }
 
-        // Wait for the watcher to pick up the change.
-        // FSEvents on macOS batches events; allow up to 3 seconds.
-        tokio::time::sleep(Duration::from_millis(3000)).await;
-
-        // The db should now contain the new text.
-        let db_guard = db.lock().await;
-        assert_eq!(
-            db_guard.file_text(&uri),
-            Some("fn updated() {}"),
-            "watcher should have updated db with new file content"
-        );
+        // Poll for the watcher to pick up the change.
+        // FSEvents on macOS batches events and latency varies widely
+        // under load — poll up to 15s rather than a fixed sleep to
+        // avoid flaking CI on slow runners.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if db.lock().await.file_text(&uri).map(str::to_owned)
+                == Some("fn updated() {}".to_owned())
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let last = db.lock().await.file_text(&uri).map(str::to_owned);
+                panic!(
+                    "watcher should have updated db with new file content within 15s; \
+                     last observed text was {last:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
