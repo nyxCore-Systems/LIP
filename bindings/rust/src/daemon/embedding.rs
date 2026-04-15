@@ -173,10 +173,9 @@ impl EmbeddingClient {
             return Err(classify_http_error(status, &text));
         }
 
-        let parsed: EmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| EmbedError::Protocol(format!("failed to parse embedding response: {e}")))?;
+        let parsed: EmbedResponse = resp.json().await.map_err(|e| {
+            EmbedError::Protocol(format!("failed to parse embedding response: {e}"))
+        })?;
 
         // Re-order by index field to match the input order.
         let mut data = parsed.data;
@@ -209,7 +208,8 @@ mod tests {
     #[test]
     fn classify_openai_model_not_found_code() {
         // OpenAI API shape.
-        let body = r#"{"error":{"code":"model_not_found","message":"The model 'foo' does not exist"}}"#;
+        let body =
+            r#"{"error":{"code":"model_not_found","message":"The model 'foo' does not exist"}}"#;
         let e = classify_http_error(StatusCode::BAD_REQUEST, body);
         assert!(matches!(e, EmbedError::UnknownModel(_)));
     }

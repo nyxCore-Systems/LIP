@@ -1425,9 +1425,7 @@ mod tests {
                 query: String::new(),
                 limit: None,
             },
-            ClientMessage::QueryDocumentSymbols {
-                uri: String::new(),
-            },
+            ClientMessage::QueryDocumentSymbols { uri: String::new() },
             ClientMessage::QueryDeadSymbols { limit: None },
             ClientMessage::AnnotationSet {
                 symbol_uri: String::new(),

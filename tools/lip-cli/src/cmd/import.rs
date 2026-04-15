@@ -134,7 +134,9 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         if let Some(source) = tier3_source {
             let reg_msg = ClientMessage::RegisterTier3Source { source };
             let reg_body = serde_json::to_vec(&reg_msg)?;
-            stream.write_all(&(reg_body.len() as u32).to_be_bytes()).await?;
+            stream
+                .write_all(&(reg_body.len() as u32).to_be_bytes())
+                .await?;
             stream.write_all(&reg_body).await?;
             let mut reg_len = [0u8; 4];
             stream.read_exact(&mut reg_len).await?;

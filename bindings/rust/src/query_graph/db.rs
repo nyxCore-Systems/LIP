@@ -208,10 +208,7 @@ impl LipDatabase {
     /// Record (or refresh) provenance for a Tier 3 ingestion batch.
     /// Re-registering the same `source_id` overwrites the prior entry,
     /// which is how clients refresh `imported_at_ms` after a re-import.
-    pub fn register_tier3_source(
-        &mut self,
-        source: crate::query_graph::types::Tier3Source,
-    ) {
+    pub fn register_tier3_source(&mut self, source: crate::query_graph::types::Tier3Source) {
         self.tier3_sources.insert(source.source_id.clone(), source);
     }
 
@@ -977,7 +974,7 @@ impl LipDatabase {
                 // When `model_filter` is set, skip any symbol whose stored
                 // embedding was produced by a different model — cross-model
                 // cosine scores are not meaningful.
-                model_filter.is_none_or(|want| {
+                model_filter.map_or(true, |want| {
                     self.symbol_embedding_models
                         .get(uri.as_str())
                         .map(|m| m == want)
@@ -3063,11 +3060,7 @@ impl Greeter {
             "fn matching_model() {}\nfn cross_model_vector() {}".into(),
             "rust".into(),
         );
-        db.set_symbol_embedding(
-            "lip://local/f.rs#matching_model",
-            vec![1.0, 0.0],
-            "model-a",
-        );
+        db.set_symbol_embedding("lip://local/f.rs#matching_model", vec![1.0, 0.0], "model-a");
         db.set_symbol_embedding(
             "lip://local/f.rs#cross_model_vector",
             vec![1.0, 0.0],

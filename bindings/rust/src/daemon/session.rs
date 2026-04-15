@@ -549,9 +549,7 @@ impl Session {
                 } else {
                     match client.embed_texts(&miss_texts, model.as_deref()).await {
                         Ok(r) => r,
-                        Err(e) => {
-                            return embed_error_response(e)
-                        }
+                        Err(e) => return embed_error_response(e),
                     }
                 };
 
@@ -685,9 +683,7 @@ impl Session {
                 let texts = vec![text];
                 let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
                     Ok(r) => r,
-                    Err(e) => {
-                        return embed_error_response(e)
-                    }
+                    Err(e) => return embed_error_response(e),
                 };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let db = self.db.lock().await;
@@ -713,9 +709,7 @@ impl Session {
                 // Embed all queries in one HTTP batch call; no lock held during await.
                 let (vecs, _) = match client.embed_texts(&queries, model.as_deref()).await {
                     Ok(r) => r,
-                    Err(e) => {
-                        return embed_error_response(e)
-                    }
+                    Err(e) => return embed_error_response(e),
                 };
                 let db = self.db.lock().await;
                 let results = vecs
@@ -772,9 +766,7 @@ impl Session {
                     let (mut vecs, sym_model) =
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok(r) => r,
-                            Err(e) => {
-                                return embed_error_response(e)
-                            }
+                            Err(e) => return embed_error_response(e),
                         };
                     let v = vecs.pop().unwrap_or_default();
                     // Cache the computed vector for future calls.
@@ -785,12 +777,8 @@ impl Session {
                     v
                 };
                 let db = self.db.lock().await;
-                let results = db.nearest_symbol_by_vector(
-                    &query_vec,
-                    top_k,
-                    Some(symbol_uri.as_str()),
-                    None,
-                );
+                let results =
+                    db.nearest_symbol_by_vector(&query_vec, top_k, Some(symbol_uri.as_str()), None);
                 ServerMessage::NearestResult { results }
             }
 
@@ -892,9 +880,7 @@ impl Session {
                 let (mut vecs, actual_model) =
                     match client.embed_texts(&[query], model.as_deref()).await {
                         Ok(r) => r,
-                        Err(e) => {
-                            return embed_error_response(e)
-                        }
+                        Err(e) => return embed_error_response(e),
                     };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let mut db = self.db.lock().await;
@@ -1192,9 +1178,7 @@ impl Session {
                 }
                 let (vecs, _) = match client.embed_texts(&chunks, model.as_deref()).await {
                     Ok(r) => r,
-                    Err(e) => {
-                        return embed_error_response(e)
-                    }
+                    Err(e) => return embed_error_response(e),
                 };
                 let mut boundaries = Vec::new();
                 for i in 0..vecs.len().saturating_sub(1) {
@@ -1240,9 +1224,7 @@ impl Session {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => {
-                        return embed_error_response(e)
-                    }
+                    Err(e) => return embed_error_response(e),
                 };
                 if vecs.len() < 2 {
                     return ServerMessage::Error {
@@ -1451,9 +1433,7 @@ impl Session {
                         let texts = vec![query];
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok((mut vecs, m)) => (vecs.pop().unwrap_or_default(), m),
-                            Err(e) => {
-                                return embed_error_response(e)
-                            }
+                            Err(e) => return embed_error_response(e),
                         }
                     }
                 };
@@ -1502,9 +1482,7 @@ impl Session {
                 let (chunk_vecs, chunk_model) =
                     match client.embed_texts(&chunk_texts, model.as_deref()).await {
                         Ok(r) => r,
-                        Err(e) => {
-                            return embed_error_response(e)
-                        }
+                        Err(e) => return embed_error_response(e),
                     };
                 let _ = chunk_model; // we report query_model, not per-chunk model
 
