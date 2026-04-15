@@ -1517,6 +1517,25 @@ impl Session {
                 }
             }
 
+            // ── v2.1: EmbedText ─────────────────────────────────────────
+            ClientMessage::EmbedText { text, model } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                    };
+                };
+                let texts = vec![text];
+                match client.embed_texts(&texts, model.as_deref()).await {
+                    Ok((mut vecs, used_model)) => ServerMessage::EmbedTextResult {
+                        vector: vecs.pop().unwrap_or_default(),
+                        embedding_model: used_model,
+                    },
+                    Err(e) => ServerMessage::Error {
+                        message: format!("embedding failed: {e}"),
+                    },
+                }
+            }
+
             // Streaming variant — caught earlier in `run`. Reached only if a
             // client embedded one inside a Batch / BatchQuery, which is not
             // supported.
@@ -2271,6 +2290,10 @@ fn process_query_sync(
 
         ClientMessage::StreamContext { .. } => {
             err("StreamContext is a streaming request; not permitted in BatchQuery")
+        }
+
+        ClientMessage::EmbedText { .. } => {
+            err("EmbedText requires async HTTP; not permitted in BatchQuery")
         }
     }
 }
