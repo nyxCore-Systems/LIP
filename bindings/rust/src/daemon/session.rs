@@ -17,7 +17,7 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 
 /// Monotonic protocol version. Bumped only on breaking wire-format changes.
 /// Clients can detect drift by comparing against this value in `HandshakeResult`.
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 
 /// Per-connection session state.
 pub struct Session {
@@ -95,6 +95,25 @@ impl Session {
                     continue;
                 }
             };
+
+            // Streaming requests bypass the unary handle/response cycle:
+            // they write N frames + an end_stream terminator directly.
+            if let ClientMessage::StreamContext {
+                file_uri,
+                cursor_position,
+                max_tokens,
+                model: _,
+            } = msg
+            {
+                if let Err(e) = self
+                    .handle_stream_context(&mut stream, file_uri, cursor_position, max_tokens)
+                    .await
+                {
+                    error!("stream_context write error: {e}");
+                    break;
+                }
+                continue;
+            }
 
             let response = self.handle(msg).await;
             if let Err(e) = write_message(&mut stream, &response).await {
@@ -1497,8 +1516,213 @@ impl Session {
                     query_model,
                 }
             }
+
+            // Streaming variant — caught earlier in `run`. Reached only if a
+            // client embedded one inside a Batch / BatchQuery, which is not
+            // supported.
+            ClientMessage::StreamContext { .. } => ServerMessage::Error {
+                message: "stream_context is a streaming request and cannot be \
+                          batched or nested"
+                    .into(),
+            },
         }
     }
+
+    /// Handle a [`ClientMessage::StreamContext`] by streaming `symbol_info`
+    /// frames followed by exactly one `end_stream` terminator.
+    ///
+    /// Frames are written one at a time with no internal buffering — the
+    /// daemon's `write_message` blocks on socket back-pressure, which throttles
+    /// ranking work when the client stops reading. A closed socket surfaces
+    /// as `BrokenPipe` and aborts the loop cleanly.
+    async fn handle_stream_context(
+        &self,
+        stream: &mut UnixStream,
+        file_uri: String,
+        cursor_position: OwnedRange,
+        max_tokens: u32,
+    ) -> anyhow::Result<()> {
+        use crate::query_graph::types::EndStreamReason;
+
+        // Validate cursor position. "Outside the file" = not tracked, or line
+        // beyond the file's line count.
+        let line_count_opt = {
+            let db = self.db.lock().await;
+            db.file_source_text(&file_uri)
+                .map(|t| t.lines().count() as i32)
+        };
+        let Some(line_count) = line_count_opt else {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::Error,
+                emitted: 0,
+                total_candidates: 0,
+                error: Some("cursor_out_of_range".into()),
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        };
+        if cursor_position.start_line < 0 || cursor_position.start_line >= line_count {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::Error,
+                emitted: 0,
+                total_candidates: 0,
+                error: Some("cursor_out_of_range".into()),
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        }
+
+        // Rank candidates relative to the cursor.
+        let candidates = {
+            let mut db = self.db.lock().await;
+            rank_context_candidates(
+                &mut db,
+                &file_uri,
+                cursor_position.start_line,
+                cursor_position.start_char,
+            )
+        };
+        let total_candidates = candidates.len() as u32;
+
+        // Empty-budget short-circuit: emit terminator immediately. Per spec
+        // this counts as `budget_reached` (acceptance criterion 2).
+        if max_tokens == 0 {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::BudgetReached,
+                emitted: 0,
+                total_candidates,
+                error: None,
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        }
+
+        let mut emitted: u32 = 0;
+        let mut spent: u64 = 0;
+        let mut reason = EndStreamReason::Exhausted;
+
+        for (sym, score) in candidates {
+            let cost = estimate_token_cost(&sym);
+            if spent + cost as u64 > max_tokens as u64 {
+                reason = EndStreamReason::BudgetReached;
+                break;
+            }
+            let frame = ServerMessage::SymbolInfo {
+                symbol_info: sym,
+                relevance_score: score,
+                token_cost: cost,
+            };
+            // BrokenPipe / EBADF aborts the walk — client closed early.
+            write_message(stream, &frame).await?;
+            spent += cost as u64;
+            emitted += 1;
+        }
+
+        let term = ServerMessage::EndStream {
+            reason,
+            emitted,
+            total_candidates,
+            error: None,
+        };
+        write_message(stream, &term).await?;
+        Ok(())
+    }
+}
+
+/// Conservative chars÷4 + 8 token estimate per spec §2.4.
+fn estimate_token_cost(sym: &crate::schema::OwnedSymbolInfo) -> u32 {
+    let sig_len = sym.signature.as_deref().map(str::len).unwrap_or(0);
+    let doc_len = sym.documentation.as_deref().map(str::len).unwrap_or(0);
+    ((sig_len + doc_len) as u32).div_ceil(4) + 8
+}
+
+/// Rank symbols by relevance to a cursor inside `file_uri` (spec §2.3 ordering):
+/// 1. The symbol the cursor is on (definition).
+/// 2. Callers — symbols whose blast-radius walk reaches the target.
+/// 3. Callees / references — outgoing relationships of the target.
+/// 4. Related types — relationships flagged `is_type_definition`.
+///
+/// Within a tier, frames are ordered by descending heuristic score.
+fn rank_context_candidates(
+    db: &mut crate::query_graph::LipDatabase,
+    file_uri: &str,
+    line: i32,
+    col: i32,
+) -> Vec<(crate::schema::OwnedSymbolInfo, f32)> {
+    use std::collections::HashSet;
+
+    let mut out: Vec<(crate::schema::OwnedSymbolInfo, f32)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let target_uri_opt = db.symbol_at_position(file_uri, line, col);
+
+    // Tier 1 — direct definition.
+    if let Some(ref target_uri) = target_uri_opt {
+        if let Some(sym) = db.symbol_by_uri(target_uri) {
+            seen.insert(sym.uri.clone());
+            out.push((sym, 1.0));
+        }
+    }
+
+    // Tier 2 — callers from the blast-radius CPG walk.
+    if let Some(ref target_uri) = target_uri_opt {
+        let blast = db.blast_radius_for(target_uri);
+        let mut callers: Vec<_> = blast
+            .direct_items
+            .iter()
+            .chain(blast.transitive_items.iter())
+            .filter(|item| !item.symbol_uri.is_empty())
+            .cloned()
+            .collect();
+        callers.sort_by_key(|item| item.distance);
+        for item in callers {
+            if !seen.insert(item.symbol_uri.clone()) {
+                continue;
+            }
+            if let Some(sym) = db.symbol_by_uri(&item.symbol_uri) {
+                let score = (0.9 - 0.1 * item.distance as f32).max(0.1);
+                out.push((sym, score));
+            }
+        }
+    }
+
+    // Tier 3 + 4 — outgoing relationships (callees, then types).
+    if let Some(ref target_uri) = target_uri_opt {
+        if let Some(target) = db.symbol_by_uri(target_uri) {
+            // Callees and plain references first.
+            for rel in target
+                .relationships
+                .iter()
+                .filter(|r| !r.is_type_definition)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if !seen.insert(rel.target_uri.clone()) {
+                    continue;
+                }
+                if let Some(sym) = db.symbol_by_uri(&rel.target_uri) {
+                    out.push((sym, 0.5));
+                }
+            }
+            // Related types last.
+            for rel in target
+                .relationships
+                .iter()
+                .filter(|r| r.is_type_definition)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if !seen.insert(rel.target_uri.clone()) {
+                    continue;
+                }
+                if let Some(sym) = db.symbol_by_uri(&rel.target_uri) {
+                    out.push((sym, 0.4));
+                }
+            }
+        }
+    }
+
+    out
 }
 
 // ── Batch query helper ────────────────────────────────────────────────────────
@@ -2043,6 +2267,10 @@ fn process_query_sync(
 
         ClientMessage::ExplainMatch { .. } => {
             err("ExplainMatch requires async HTTP; not permitted in BatchQuery")
+        }
+
+        ClientMessage::StreamContext { .. } => {
+            err("StreamContext is a streaming request; not permitted in BatchQuery")
         }
     }
 }

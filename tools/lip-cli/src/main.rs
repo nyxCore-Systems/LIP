@@ -45,6 +45,8 @@ enum Commands {
     Mcp(cmd::mcp::McpArgs),
     /// Build pre-computed dependency slices for Cargo, npm, or pub packages.
     Slice(cmd::slice::SliceArgs),
+    /// Stream token-budgeted RAG context frames for a cursor position.
+    StreamContext(cmd::stream_context::StreamContextArgs),
 }
 
 #[tokio::main]
@@ -68,5 +70,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Annotate(args) => cmd::annotate::run(args).await,
         Commands::Mcp(args) => cmd::mcp::run(args).await,
         Commands::Slice(args) => cmd::slice::run(args).await,
+        Commands::StreamContext(args) => cmd::stream_context::run(args).await,
     }
 }

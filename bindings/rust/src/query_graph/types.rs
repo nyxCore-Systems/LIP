@@ -444,6 +444,47 @@ pub enum ServerMessage {
         /// The embedding model used to score the chunks.
         query_model: String,
     },
+
+    // ── v2.1 features ────────────────────────────────────────────────────
+    /// One frame of a [`ClientMessage::StreamContext`] response: a single
+    /// ranked symbol with its estimated prompt token cost.
+    ///
+    /// Wire tag is `"symbol_info"`. Multiple frames precede the
+    /// [`ServerMessage::EndStream`] terminator.
+    SymbolInfo {
+        symbol_info: crate::schema::OwnedSymbolInfo,
+        /// Heuristic score in `[0.0, 1.0]`; higher = more relevant to the cursor.
+        relevance_score: f32,
+        /// Estimated prompt-token cost of this symbol's serialised context.
+        token_cost: u32,
+    },
+
+    /// Terminator frame for a [`ClientMessage::StreamContext`] response.
+    ///
+    /// Wire tag is `"end_stream"`. Exactly one terminator follows N
+    /// [`ServerMessage::SymbolInfo`] frames.
+    EndStream {
+        reason: EndStreamReason,
+        /// Number of `SymbolInfo` frames emitted before this terminator.
+        emitted: u32,
+        /// Total candidate symbols the daemon considered.
+        total_candidates: u32,
+        /// Set only when `reason == EndStreamReason::Error`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// Why a [`ServerMessage::EndStream`] terminated a context stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndStreamReason {
+    /// Daemon emitted enough symbols to reach `max_tokens`.
+    BudgetReached,
+    /// No more relevant candidates exist.
+    Exhausted,
+    /// An error terminated the stream; see [`ServerMessage::EndStream::error`].
+    Error,
 }
 
 /// A contiguous region of a file that contributes to a semantic match.
@@ -870,6 +911,22 @@ pub enum ClientMessage {
         /// Override the embedding model for this request.
         model: Option<String>,
     },
+
+    // ── v2.1 features ────────────────────────────────────────────────────
+    /// Stream symbols ordered by relevance to `cursor_position` in `file_uri`,
+    /// stopping when the caller closes the connection or when the daemon has
+    /// emitted enough symbols to reach `max_tokens` estimated prompt cost.
+    ///
+    /// Response is N [`ServerMessage::SymbolInfo`] frames followed by exactly
+    /// one [`ServerMessage::EndStream`] terminator.
+    StreamContext {
+        file_uri: String,
+        cursor_position: OwnedRange,
+        max_tokens: u32,
+        /// Optional: restrict to a specific embedding model.
+        #[serde(default)]
+        model: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -975,7 +1032,7 @@ mod tests {
     fn handshake_result_round_trips() {
         let msg = ServerMessage::HandshakeResult {
             daemon_version: "1.5.0".into(),
-            protocol_version: 1,
+            protocol_version: 2,
         };
         let rt = round_trip_server(&msg);
         let ServerMessage::HandshakeResult {
@@ -986,7 +1043,66 @@ mod tests {
             panic!("wrong variant");
         };
         assert_eq!(daemon_version, "1.5.0");
-        assert_eq!(protocol_version, 1);
+        assert_eq!(protocol_version, 2);
+    }
+
+    #[test]
+    fn stream_context_request_round_trips() {
+        let msg = ClientMessage::StreamContext {
+            file_uri: "file:///src/main.rs".into(),
+            cursor_position: OwnedRange {
+                start_line: 10,
+                start_char: 4,
+                end_line: 10,
+                end_char: 4,
+            },
+            max_tokens: 4096,
+            model: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "stream_context");
+        assert_eq!(json["max_tokens"], 4096);
+        let rt = round_trip_client(&msg);
+        let ClientMessage::StreamContext {
+            file_uri,
+            max_tokens,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(file_uri, "file:///src/main.rs");
+        assert_eq!(max_tokens, 4096);
+    }
+
+    #[test]
+    fn end_stream_frame_round_trips() {
+        let msg = ServerMessage::EndStream {
+            reason: EndStreamReason::BudgetReached,
+            emitted: 3,
+            total_candidates: 12,
+            error: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "end_stream");
+        assert_eq!(json["reason"], "budget_reached");
+        // Optional `error` field omitted when None.
+        assert!(json.get("error").is_none());
+
+        let rt = round_trip_server(&msg);
+        let ServerMessage::EndStream {
+            reason,
+            emitted,
+            total_candidates,
+            error,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(reason, EndStreamReason::BudgetReached);
+        assert_eq!(emitted, 3);
+        assert_eq!(total_candidates, 12);
+        assert!(error.is_none());
     }
 
     #[test]

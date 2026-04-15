@@ -9,3 +9,4 @@ pub mod mcp;
 pub mod push;
 pub mod query;
 pub mod slice;
+pub mod stream_context;
