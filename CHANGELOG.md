@@ -8,6 +8,10 @@ All notable changes to this project are documented here.
 
 ### Added
 
+**v2.1 — `embed_text`: unary text-to-vector embedding**
+
+- **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (embeds internally but discards the vector). Callers re-ranking with their own scoring (centroid arithmetic, federated nearest-neighbour, lexical-then-semantic re-rank) get the embedding directly instead of building a centroid out of nearest-neighbour seeds. Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery` (requires async HTTP).
+
 **v2.1 — `stream_context`: token-budgeted RAG context streaming**
 
 - **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — new streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo { symbol_info, relevance_score, token_cost }` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`. Replaces the broken "fetch top-k, locally truncate to prompt budget" pattern with stream-until-full. Spec §9.2.

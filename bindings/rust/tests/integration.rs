@@ -665,6 +665,46 @@ async fn stream_context_cursor_out_of_range_errors() {
 }
 
 #[tokio::test]
+async fn embed_text_without_endpoint_returns_error() {
+    // No `LIP_EMBEDDING_URL` set in the test process → embedding client is None
+    // → daemon returns the documented configuration error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_embed_text.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::EmbedText {
+            text: "verify token expiry".into(),
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::Error { message } => {
+            assert!(
+                message.contains("LIP_EMBEDDING_URL"),
+                "expected configuration error, got {message:?}"
+            );
+        }
+        ServerMessage::EmbedTextResult { vector, .. } => {
+            // If a real embedding endpoint is configured in CI, fall through.
+            assert!(!vector.is_empty(), "vector should be non-empty");
+        }
+        other => panic!("expected Error or EmbedTextResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn stream_context_handshake_advertises_v2() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("lip_stream_hs.sock");

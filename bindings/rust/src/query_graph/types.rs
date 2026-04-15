@@ -446,6 +446,14 @@ pub enum ServerMessage {
     },
 
     // ── v2.1 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::EmbedText`].
+    EmbedTextResult {
+        /// Raw embedding vector. Empty when the endpoint returned no data.
+        vector: Vec<f32>,
+        /// Model that produced the vector (after any client-side override).
+        embedding_model: String,
+    },
+
     /// One frame of a [`ClientMessage::StreamContext`] response: a single
     /// ranked symbol with its estimated prompt token cost.
     ///
@@ -913,6 +921,19 @@ pub enum ClientMessage {
     },
 
     // ── v2.1 features ────────────────────────────────────────────────────
+    /// Embed an arbitrary text string and return the raw vector.
+    ///
+    /// Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText`
+    /// (embeds internally but discards the vector). Callers that want to feed
+    /// the embedding into their own scoring (re-ranking, centroid arithmetic,
+    /// federated nearest-neighbour) need the vector itself.
+    EmbedText {
+        text: String,
+        /// Optional model override. `None` uses the daemon's default.
+        #[serde(default)]
+        model: Option<String>,
+    },
+
     /// Stream symbols ordered by relevance to `cursor_position` in `file_uri`,
     /// stopping when the caller closes the connection or when the daemon has
     /// emitted enough symbols to reach `max_tokens` estimated prompt cost.
@@ -1044,6 +1065,47 @@ mod tests {
         };
         assert_eq!(daemon_version, "1.5.0");
         assert_eq!(protocol_version, 2);
+    }
+
+    #[test]
+    fn embed_text_request_round_trips() {
+        let msg = ClientMessage::EmbedText {
+            text: "verify token expiry".into(),
+            model: Some("text-embedding-3-small".into()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "embed_text");
+        assert_eq!(json["text"], "verify token expiry");
+        assert_eq!(json["model"], "text-embedding-3-small");
+
+        let rt = round_trip_client(&msg);
+        let ClientMessage::EmbedText { text, model } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(text, "verify token expiry");
+        assert_eq!(model.as_deref(), Some("text-embedding-3-small"));
+    }
+
+    #[test]
+    fn embed_text_result_round_trips() {
+        let msg = ServerMessage::EmbedTextResult {
+            vector: vec![0.1, 0.2, -0.3],
+            embedding_model: "text-embedding-3-small".into(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "embed_text_result");
+        assert_eq!(json["embedding_model"], "text-embedding-3-small");
+
+        let rt = round_trip_server(&msg);
+        let ServerMessage::EmbedTextResult {
+            vector,
+            embedding_model,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(vector, vec![0.1, 0.2, -0.3]);
+        assert_eq!(embedding_model, "text-embedding-3-small");
     }
 
     #[test]
