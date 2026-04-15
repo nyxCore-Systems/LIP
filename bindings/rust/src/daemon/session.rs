@@ -6,7 +6,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-use crate::query_graph::{BatchQueryResult, ClientMessage, LipDatabase, ServerMessage};
+use crate::query_graph::{BatchQueryResult, ClientMessage, ErrorCode, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
 use super::embedding::EmbeddingClient;
@@ -105,7 +105,10 @@ impl Session {
                             supported: ClientMessage::supported_messages(),
                         }
                     } else {
-                        ServerMessage::Error { message: err_text }
+                        ServerMessage::Error {
+                            message: err_text,
+                            code: ErrorCode::Internal,
+                        }
                     };
                     let _ = write_message(&mut stream, &response).await;
                     continue;
@@ -439,6 +442,7 @@ impl Session {
                     let _ = bad; // already matched by is_batchable
                     return ServerMessage::Error {
                         message: "nested Batch not allowed".into(),
+                        code: ErrorCode::Internal,
                     };
                 }
                 let mut results = Vec::with_capacity(requests.len());
@@ -489,6 +493,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 // Separate URIs that already have a cached embedding from those
@@ -531,6 +536,7 @@ impl Session {
                         Err(e) => {
                             return ServerMessage::Error {
                                 message: format!("embedding failed: {e}"),
+                                code: ErrorCode::Internal,
                             }
                         }
                     }
@@ -635,6 +641,7 @@ impl Session {
                 let Some(query_vec) = db.get_file_embedding(&uri).cloned() else {
                     return ServerMessage::Error {
                         message: format!("no embedding for {uri} — call EmbeddingBatch first"),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let results = db.nearest_by_vector(
@@ -657,6 +664,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let texts = vec![text];
@@ -665,6 +673,7 @@ impl Session {
                     Err(e) => {
                         return ServerMessage::Error {
                             message: format!("embedding failed: {e}"),
+                            code: ErrorCode::Internal,
                         }
                     }
                 };
@@ -686,6 +695,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 // Embed all queries in one HTTP batch call; no lock held during await.
@@ -694,6 +704,7 @@ impl Session {
                     Err(e) => {
                         return ServerMessage::Error {
                             message: format!("embedding failed: {e}"),
+                            code: ErrorCode::Internal,
                         }
                     }
                 };
@@ -714,6 +725,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 // Check cache — avoid re-embedding the same symbol repeatedly.
@@ -741,6 +753,7 @@ impl Session {
                             None => {
                                 return ServerMessage::Error {
                                     message: format!("symbol not found: {symbol_uri}"),
+                                    code: ErrorCode::Internal,
                                 }
                             }
                         }
@@ -753,6 +766,7 @@ impl Session {
                             Err(e) => {
                                 return ServerMessage::Error {
                                     message: format!("embedding failed: {e}"),
+                                    code: ErrorCode::Internal,
                                 }
                             }
                         };
@@ -862,6 +876,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let (mut vecs, _) = match client.embed_texts(&[query], model.as_deref()).await {
@@ -869,6 +884,7 @@ impl Session {
                     Err(e) => {
                         return ServerMessage::Error {
                             message: format!("embedding failed: {e}"),
+                            code: ErrorCode::Internal,
                         }
                     }
                 };
@@ -1002,6 +1018,7 @@ impl Session {
                         message: "both URIs must have cached embeddings with matching \
                                   dimensions — call embedding_batch first"
                             .into(),
+                        code: ErrorCode::Internal,
                     },
                 }
             }
@@ -1071,6 +1088,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
+                        code: ErrorCode::Internal,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1155,6 +1173,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let chunk_size = chunk_lines.max(1);
@@ -1181,6 +1200,7 @@ impl Session {
                     Err(e) => {
                         return ServerMessage::Error {
                             message: format!("embedding failed: {e}"),
+                            code: ErrorCode::Internal,
                         }
                     }
                 };
@@ -1220,6 +1240,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let (mut vecs, _) = match client
@@ -1230,12 +1251,14 @@ impl Session {
                     Err(e) => {
                         return ServerMessage::Error {
                             message: format!("embedding failed: {e}"),
+                            code: ErrorCode::Internal,
                         }
                     }
                 };
                 if vecs.len() < 2 {
                     return ServerMessage::Error {
                         message: "embedding service returned fewer vectors than expected".into(),
+                        code: ErrorCode::Internal,
                     };
                 }
                 let vb = vecs.pop().unwrap();
@@ -1286,6 +1309,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
+                        code: ErrorCode::Internal,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1417,6 +1441,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let effective_top_k = if top_k == 0 { 5 } else { top_k };
@@ -1440,6 +1465,7 @@ impl Session {
                             Err(e) => {
                                 return ServerMessage::Error {
                                     message: format!("embedding failed: {e}"),
+                                    code: ErrorCode::Internal,
                                 }
                             }
                         }
@@ -1449,6 +1475,7 @@ impl Session {
                 if query_vec.is_empty() {
                     return ServerMessage::Error {
                         message: "could not obtain query embedding".into(),
+                        code: ErrorCode::Internal,
                     };
                 }
 
@@ -1492,6 +1519,7 @@ impl Session {
                         Err(e) => {
                             return ServerMessage::Error {
                                 message: format!("embedding failed: {e}"),
+                                code: ErrorCode::Internal,
                             }
                         }
                     };
@@ -1539,6 +1567,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::UnknownModel,
                     };
                 };
                 let texts = vec![text];
@@ -1549,6 +1578,7 @@ impl Session {
                     },
                     Err(e) => ServerMessage::Error {
                         message: format!("embedding failed: {e}"),
+                        code: ErrorCode::Internal,
                     },
                 }
             }
@@ -1560,6 +1590,7 @@ impl Session {
                 message: "stream_context is a streaming request and cannot be \
                           batched or nested"
                     .into(),
+                code: ErrorCode::Internal,
             },
         }
     }
@@ -2366,6 +2397,7 @@ mod tests {
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let msg = ServerMessage::Error {
             message: "hello framing".to_owned(),
+            code: ErrorCode::Internal,
         };
 
         // Writer task.
@@ -2382,7 +2414,7 @@ mod tests {
 
         let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
         match decoded {
-            ServerMessage::Error { message } => assert_eq!(message, "hello framing"),
+            ServerMessage::Error { message, .. } => assert_eq!(message, "hello framing"),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -2392,6 +2424,7 @@ mod tests {
         let payload = "x".repeat(65_536);
         let msg = ServerMessage::Error {
             message: payload.clone(),
+            code: ErrorCode::Internal,
         };
 
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
@@ -2406,7 +2439,7 @@ mod tests {
 
         let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
         match decoded {
-            ServerMessage::Error { message } => assert_eq!(message, payload),
+            ServerMessage::Error { message, .. } => assert_eq!(message, payload),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -2420,6 +2453,7 @@ mod tests {
             for i in 0u32..5 {
                 let msg = ServerMessage::Error {
                     message: i.to_string(),
+                    code: ErrorCode::Internal,
                 };
                 write_message(&mut a, &msg).await.unwrap();
             }
@@ -2430,7 +2464,7 @@ mod tests {
             let bytes = read_message(&mut b).await.unwrap();
             let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
             match decoded {
-                ServerMessage::Error { message } => assert_eq!(message, i.to_string()),
+                ServerMessage::Error { message, .. } => assert_eq!(message, i.to_string()),
                 other => panic!("unexpected variant: {other:?}"),
             }
         }
