@@ -306,6 +306,16 @@ pub enum ServerMessage {
         daemon_version: String,
         /// Monotonic integer bumped only on breaking wire-format changes.
         protocol_version: u32,
+        /// Snake-case names of every `ClientMessage` `type` tag this daemon
+        /// understands. Lets clients probe support for an individual message
+        /// without writing "handshake then pray" code — a forward-compatible
+        /// alternative to comparing `protocol_version` integers.
+        ///
+        /// Older daemons predating this field omit it; serde defaults to an
+        /// empty vector on the client side, which clients should treat as
+        /// "unknown — fall back to `protocol_version`."
+        #[serde(default)]
+        supported_messages: Vec<String>,
     },
 
     // ── v1.6 features ────────────────────────────────────────────────────
@@ -446,6 +456,18 @@ pub enum ServerMessage {
     },
 
     // ── v2.1 features ────────────────────────────────────────────────────
+    /// Sent in place of [`ServerMessage::Error`] when the client sent a
+    /// well-formed JSON object whose `"type"` tag is not recognised by this
+    /// daemon. The connection stays open so the client can fall back to a
+    /// supported message instead of disconnecting.
+    UnknownMessage {
+        /// The unrecognised `type` tag, when extractable from the request.
+        message_type: Option<String>,
+        /// Snake-case names of every `ClientMessage` `type` tag this daemon
+        /// understands — same list as `HandshakeResult.supported_messages`.
+        supported: Vec<String>,
+    },
+
     /// Response to [`ClientMessage::EmbedText`].
     EmbedTextResult {
         /// Raw embedding vector. Empty when the endpoint returned no data.
@@ -951,6 +973,69 @@ pub enum ClientMessage {
 }
 
 impl ClientMessage {
+    /// Snake-case `type` tags of every variant this daemon understands.
+    ///
+    /// Returned by `Handshake` and `UnknownMessage` so clients can probe
+    /// support for individual messages without parsing protocol-version
+    /// integers. Order is stable; callers that compare lists should sort
+    /// or hash first.
+    pub fn supported_messages() -> Vec<String> {
+        [
+            "manifest",
+            "delta",
+            "query_definition",
+            "query_references",
+            "query_hover",
+            "query_blast_radius",
+            "query_workspace_symbols",
+            "query_document_symbols",
+            "query_dead_symbols",
+            "annotation_set",
+            "annotation_get",
+            "annotation_list",
+            "annotation_workspace_list",
+            "batch_query",
+            "batch",
+            "similar_symbols",
+            "query_stale_files",
+            "load_slice",
+            "embedding_batch",
+            "query_index_status",
+            "query_file_status",
+            "query_nearest",
+            "query_nearest_by_text",
+            "batch_query_nearest_by_text",
+            "query_nearest_by_symbol",
+            "batch_annotation_get",
+            "handshake",
+            "reindex_files",
+            "similarity",
+            "query_expansion",
+            "cluster",
+            "export_embeddings",
+            "query_nearest_by_contrast",
+            "query_outliers",
+            "query_semantic_drift",
+            "similarity_matrix",
+            "find_semantic_counterpart",
+            "query_coverage",
+            "find_boundaries",
+            "semantic_diff",
+            "query_nearest_in_store",
+            "query_novelty_score",
+            "extract_terminology",
+            "prune_deleted",
+            "get_centroid",
+            "query_stale_embeddings",
+            "explain_match",
+            "embed_text",
+            "stream_context",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
     /// Returns `true` for any message that may appear inside a [`ClientMessage::Batch`].
     /// A `Batch` itself is excluded to prevent nesting. `LoadSlice` is also excluded
     /// because it requires mutable database access outside the read-only batch lock.
@@ -1054,17 +1139,21 @@ mod tests {
         let msg = ServerMessage::HandshakeResult {
             daemon_version: "1.5.0".into(),
             protocol_version: 2,
+            supported_messages: ClientMessage::supported_messages(),
         };
         let rt = round_trip_server(&msg);
         let ServerMessage::HandshakeResult {
             daemon_version,
             protocol_version,
+            supported_messages,
         } = rt
         else {
             panic!("wrong variant");
         };
         assert_eq!(daemon_version, "1.5.0");
         assert_eq!(protocol_version, 2);
+        assert!(supported_messages.contains(&"handshake".to_string()));
+        assert!(supported_messages.contains(&"stream_context".to_string()));
     }
 
     #[test]

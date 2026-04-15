@@ -8,6 +8,11 @@ All notable changes to this project are documented here.
 
 ### Added
 
+**v2.1 — Capability discovery + graceful unknown-variant handling**
+
+- **`HandshakeResult.supported_messages: Vec<String>`** — handshake response now lists every `ClientMessage` `type` tag this daemon understands. Lets clients probe for an individual message (e.g. `stream_context`, `embed_text`) without writing "handshake then pray" code or comparing `protocol_version` integers. Field is `#[serde(default)]`; older daemons predating this field yield an empty vector, which clients should treat as "fall back to `protocol_version`."
+- **`ServerMessage::UnknownMessage { message_type, supported }`** — when a client sends a well-formed JSON envelope whose `type` tag is unknown, the daemon now replies with `UnknownMessage` (carrying the tag plus the same supported list as handshake) *and keeps the socket open*, instead of closing after a generic parse `Error`. Lets forward-compatible clients downgrade gracefully to a supported call instead of reconnecting.
+
 **v2.1 — `embed_text`: unary text-to-vector embedding**
 
 - **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (embeds internally but discards the vector). Callers re-ranking with their own scoring (centroid arithmetic, federated nearest-neighbour, lexical-then-semantic re-rank) get the embedding directly instead of building a centroid out of nearest-neighbour seeds. Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery` (requires async HTTP).

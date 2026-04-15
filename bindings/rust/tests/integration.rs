@@ -732,3 +732,92 @@ async fn stream_context_handshake_advertises_v2() {
     task.abort();
     let _ = task.await;
 }
+
+#[tokio::test]
+async fn handshake_advertises_supported_messages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_caps.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::HandshakeResult {
+            supported_messages, ..
+        } => {
+            assert!(supported_messages.contains(&"handshake".to_string()));
+            assert!(supported_messages.contains(&"stream_context".to_string()));
+            assert!(supported_messages.contains(&"embed_text".to_string()));
+            assert!(!supported_messages.contains(&"nonexistent_message".to_string()));
+        }
+        other => panic!("expected HandshakeResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn unknown_variant_returns_unknown_message_and_keeps_connection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_unknown.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    // Hand-craft an envelope with an unknown `type` tag — the daemon should
+    // recognise this as recoverable and reply with `UnknownMessage` rather
+    // than closing the socket.
+    let bogus = serde_json::json!({
+        "type": "summon_kraken",
+        "payload": {"when": "at_dawn"},
+    });
+    let body = serde_json::to_vec(&bogus).unwrap();
+    client
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    client.write_all(&body).await.unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::UnknownMessage {
+            message_type,
+            supported,
+        } => {
+            assert_eq!(message_type.as_deref(), Some("summon_kraken"));
+            assert!(supported.contains(&"handshake".to_string()));
+        }
+        other => panic!("expected UnknownMessage, got {other:?}"),
+    }
+
+    // Connection must still be usable: send a Handshake after the error.
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::HandshakeResult { .. } => {}
+        other => panic!("expected HandshakeResult after recovery, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}

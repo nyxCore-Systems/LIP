@@ -88,10 +88,26 @@ impl Session {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("parse error: {e}");
-                    let err = ServerMessage::Error {
-                        message: e.to_string(),
+                    let err_text = e.to_string();
+                    // Unknown-variant parses are recoverable: the JSON was
+                    // well-formed but carried a `type` tag this daemon
+                    // doesn't know. Surface it as `UnknownMessage` with the
+                    // supported list so the client can fall back gracefully
+                    // instead of dropping the connection.
+                    let response = if err_text.contains("unknown variant") {
+                        let message_type = serde_json::from_slice::<serde_json::Value>(&msg_bytes)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("type").and_then(|t| t.as_str()).map(str::to_owned)
+                            });
+                        ServerMessage::UnknownMessage {
+                            message_type,
+                            supported: ClientMessage::supported_messages(),
+                        }
+                    } else {
+                        ServerMessage::Error { message: err_text }
                     };
-                    let _ = write_message(&mut stream, &err).await;
+                    let _ = write_message(&mut stream, &response).await;
                     continue;
                 }
             };
@@ -777,6 +793,7 @@ impl Session {
                 ServerMessage::HandshakeResult {
                     daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
                     protocol_version: PROTOCOL_VERSION,
+                    supported_messages: ClientMessage::supported_messages(),
                 }
             }
 
@@ -1939,6 +1956,7 @@ fn process_query_sync(
         ClientMessage::Handshake { .. } => ok(ServerMessage::HandshakeResult {
             daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: PROTOCOL_VERSION,
+            supported_messages: ClientMessage::supported_messages(),
         }),
 
         // BatchAnnotationGet is a pure read — safe inside a batch.
