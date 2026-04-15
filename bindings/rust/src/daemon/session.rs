@@ -607,6 +607,7 @@ impl Session {
                     .map(|c| c.default_model().to_owned());
                 let models_in_index = db.file_embedding_model_names();
                 let mixed_models = models_in_index.len() > 1;
+                let tier3_sources = db.tier3_sources();
                 ServerMessage::IndexStatusResult {
                     indexed_files,
                     pending_embedding_files: pending,
@@ -614,6 +615,7 @@ impl Session {
                     embedding_model,
                     mixed_models,
                     models_in_index,
+                    tier3_sources,
                 }
             }
 
@@ -1602,6 +1604,17 @@ impl Session {
                     .into(),
                 code: ErrorCode::InvalidRequest,
             },
+
+            // ── v2.1: Tier 3 provenance registration ──────────────────────
+            ClientMessage::RegisterTier3Source { source } => {
+                let mut db = self.db.lock().await;
+                db.register_tier3_source(source);
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
+            }
         }
     }
 
@@ -1961,6 +1974,7 @@ fn process_query_sync(
             let (indexed_files, pending, last_ms) = db.index_status();
             let models_in_index = db.file_embedding_model_names();
             let mixed_models = models_in_index.len() > 1;
+            let tier3_sources = db.tier3_sources();
             ok(ServerMessage::IndexStatusResult {
                 indexed_files,
                 pending_embedding_files: pending,
@@ -1968,6 +1982,7 @@ fn process_query_sync(
                 embedding_model: None, // no client reference available in sync context
                 mixed_models,
                 models_in_index,
+                tier3_sources,
             })
         }
 
@@ -2353,6 +2368,10 @@ fn process_query_sync(
 
         ClientMessage::EmbedText { .. } => {
             err("EmbedText requires async HTTP; not permitted in BatchQuery")
+        }
+
+        ClientMessage::RegisterTier3Source { .. } => {
+            err("RegisterTier3Source is a mutation; not permitted in BatchQuery")
         }
     }
 }
