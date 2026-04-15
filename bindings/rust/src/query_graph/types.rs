@@ -527,14 +527,30 @@ pub enum ErrorCode {
     /// Preferred reply is [`ServerMessage::UnknownMessage`]; this code
     /// exists for legacy paths that still emit `Error`.
     UnknownMessageType,
-    /// The embedding model name is not configured on this daemon.
+    /// The caller asked for an embedding model this daemon does not
+    /// recognize. Retrying is pointless until the model is configured.
     UnknownModel,
+    /// The daemon has no embedding service configured at all
+    /// (`LIP_EMBEDDING_URL` unset). Distinct from [`UnknownModel`]:
+    /// this is a daemon-side configuration gap, not a caller problem.
+    EmbeddingNotConfigured,
+    /// The requested URI has no cached embedding yet. The remedy is to
+    /// call `EmbeddingBatch` first; the model itself is fine. Clients
+    /// can distinguish this from [`UnknownModel`] / [`EmbeddingNotConfigured`]
+    /// to drive "index-then-retry" flows instead of giving up.
+    NoEmbedding,
     /// A cursor position (line/col or byte offset) fell outside the
     /// target file. Emitted e.g. by `StreamContext`.
     CursorOutOfRange,
     /// A writer or exclusive index operation is in progress; the
     /// request cannot proceed right now. Retry is safe.
     IndexLocked,
+    /// The request was well-formed on the wire but used incorrectly —
+    /// e.g. a nested `Batch`, or a `StreamContext` submitted inside a
+    /// `Batch`. Callers should not blindly retry; the request must be
+    /// changed. Distinct from [`Internal`], which indicates a
+    /// daemon-side failure.
+    InvalidRequest,
     /// Anything not captured by a more specific code. Default.
     #[default]
     Internal,
@@ -1071,6 +1087,71 @@ impl ClientMessage {
         .collect()
     }
 
+    /// Snake-case `type` tag for a specific variant.
+    ///
+    /// Exists primarily as a drift guard: the exhaustive match below
+    /// fails to compile when a new [`ClientMessage`] variant is added
+    /// without acknowledgement, and the paired
+    /// `supported_messages_covers_all_variants` test then enforces
+    /// that the new tag also appears in
+    /// [`ClientMessage::supported_messages`].
+    ///
+    /// Update [`ClientMessage::supported_messages`] in lockstep with
+    /// the arms here.
+    pub fn variant_tag(&self) -> &'static str {
+        match self {
+            ClientMessage::Manifest(_) => "manifest",
+            ClientMessage::Delta { .. } => "delta",
+            ClientMessage::QueryDefinition { .. } => "query_definition",
+            ClientMessage::QueryReferences { .. } => "query_references",
+            ClientMessage::QueryHover { .. } => "query_hover",
+            ClientMessage::QueryBlastRadius { .. } => "query_blast_radius",
+            ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
+            ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
+            ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
+            ClientMessage::AnnotationSet { .. } => "annotation_set",
+            ClientMessage::AnnotationGet { .. } => "annotation_get",
+            ClientMessage::AnnotationList { .. } => "annotation_list",
+            ClientMessage::AnnotationWorkspaceList { .. } => "annotation_workspace_list",
+            ClientMessage::BatchQuery { .. } => "batch_query",
+            ClientMessage::Batch { .. } => "batch",
+            ClientMessage::SimilarSymbols { .. } => "similar_symbols",
+            ClientMessage::QueryStaleFiles { .. } => "query_stale_files",
+            ClientMessage::LoadSlice { .. } => "load_slice",
+            ClientMessage::EmbeddingBatch { .. } => "embedding_batch",
+            ClientMessage::QueryIndexStatus => "query_index_status",
+            ClientMessage::QueryFileStatus { .. } => "query_file_status",
+            ClientMessage::QueryNearest { .. } => "query_nearest",
+            ClientMessage::QueryNearestByText { .. } => "query_nearest_by_text",
+            ClientMessage::BatchQueryNearestByText { .. } => "batch_query_nearest_by_text",
+            ClientMessage::QueryNearestBySymbol { .. } => "query_nearest_by_symbol",
+            ClientMessage::BatchAnnotationGet { .. } => "batch_annotation_get",
+            ClientMessage::Handshake { .. } => "handshake",
+            ClientMessage::ReindexFiles { .. } => "reindex_files",
+            ClientMessage::Similarity { .. } => "similarity",
+            ClientMessage::QueryExpansion { .. } => "query_expansion",
+            ClientMessage::Cluster { .. } => "cluster",
+            ClientMessage::ExportEmbeddings { .. } => "export_embeddings",
+            ClientMessage::QueryNearestByContrast { .. } => "query_nearest_by_contrast",
+            ClientMessage::QueryOutliers { .. } => "query_outliers",
+            ClientMessage::QuerySemanticDrift { .. } => "query_semantic_drift",
+            ClientMessage::SimilarityMatrix { .. } => "similarity_matrix",
+            ClientMessage::FindSemanticCounterpart { .. } => "find_semantic_counterpart",
+            ClientMessage::QueryCoverage { .. } => "query_coverage",
+            ClientMessage::FindBoundaries { .. } => "find_boundaries",
+            ClientMessage::SemanticDiff { .. } => "semantic_diff",
+            ClientMessage::QueryNearestInStore { .. } => "query_nearest_in_store",
+            ClientMessage::QueryNoveltyScore { .. } => "query_novelty_score",
+            ClientMessage::ExtractTerminology { .. } => "extract_terminology",
+            ClientMessage::PruneDeleted => "prune_deleted",
+            ClientMessage::GetCentroid { .. } => "get_centroid",
+            ClientMessage::QueryStaleEmbeddings { .. } => "query_stale_embeddings",
+            ClientMessage::ExplainMatch { .. } => "explain_match",
+            ClientMessage::EmbedText { .. } => "embed_text",
+            ClientMessage::StreamContext { .. } => "stream_context",
+        }
+    }
+
     /// Returns `true` for any message that may appear inside a [`ClientMessage::Batch`].
     /// A `Batch` itself is excluded to prevent nesting. `LoadSlice` is also excluded
     /// because it requires mutable database access outside the read-only batch lock.
@@ -1189,6 +1270,240 @@ mod tests {
         assert_eq!(protocol_version, 2);
         assert!(supported_messages.contains(&"handshake".to_string()));
         assert!(supported_messages.contains(&"stream_context".to_string()));
+    }
+
+    /// Drift guard: every tag produced by [`ClientMessage::variant_tag`]
+    /// must also appear in [`ClientMessage::supported_messages`], and
+    /// the two lists must be the same size. Combined with the
+    /// compile-time exhaustiveness of `variant_tag`'s match, this
+    /// prevents a new [`ClientMessage`] variant from being added
+    /// without being advertised in the handshake capability list.
+    #[test]
+    fn supported_messages_covers_all_variants() {
+        // One representative instance per variant. Payloads are the
+        // cheapest legal construction — we only exercise `variant_tag`,
+        // not behavior.
+        let samples: Vec<ClientMessage> = vec![
+            ClientMessage::Manifest(crate::daemon::manifest::ManifestRequest {
+                repo_root: String::new(),
+                merkle_root: String::new(),
+                dep_tree_hash: String::new(),
+                lip_version: String::new(),
+            }),
+            ClientMessage::Delta {
+                seq: 0,
+                action: crate::schema::Action::Upsert,
+                document: crate::schema::OwnedDocument {
+                    uri: String::new(),
+                    content_hash: String::new(),
+                    language: String::new(),
+                    occurrences: vec![],
+                    symbols: vec![],
+                    merkle_path: String::new(),
+                    edges: vec![],
+                    source_text: None,
+                },
+            },
+            ClientMessage::QueryDefinition {
+                uri: String::new(),
+                line: 0,
+                col: 0,
+            },
+            ClientMessage::QueryReferences {
+                symbol_uri: String::new(),
+                limit: None,
+            },
+            ClientMessage::QueryHover {
+                uri: String::new(),
+                line: 0,
+                col: 0,
+            },
+            ClientMessage::QueryBlastRadius {
+                symbol_uri: String::new(),
+            },
+            ClientMessage::QueryWorkspaceSymbols {
+                query: String::new(),
+                limit: None,
+            },
+            ClientMessage::QueryDocumentSymbols {
+                uri: String::new(),
+            },
+            ClientMessage::QueryDeadSymbols { limit: None },
+            ClientMessage::AnnotationSet {
+                symbol_uri: String::new(),
+                key: String::new(),
+                value: String::new(),
+                author_id: String::new(),
+            },
+            ClientMessage::AnnotationGet {
+                symbol_uri: String::new(),
+                key: String::new(),
+            },
+            ClientMessage::AnnotationList {
+                symbol_uri: String::new(),
+            },
+            ClientMessage::AnnotationWorkspaceList {
+                key_prefix: String::new(),
+            },
+            ClientMessage::BatchQuery { queries: vec![] },
+            ClientMessage::Batch { requests: vec![] },
+            ClientMessage::SimilarSymbols {
+                query: String::new(),
+                limit: 0,
+            },
+            ClientMessage::QueryStaleFiles { files: vec![] },
+            ClientMessage::LoadSlice {
+                slice: crate::schema::OwnedDependencySlice {
+                    manager: String::new(),
+                    package_name: String::new(),
+                    version: String::new(),
+                    package_hash: String::new(),
+                    content_hash: String::new(),
+                    symbols: vec![],
+                    slice_url: String::new(),
+                    built_at_ms: 0,
+                },
+            },
+            ClientMessage::EmbeddingBatch {
+                uris: vec![],
+                model: None,
+            },
+            ClientMessage::QueryIndexStatus,
+            ClientMessage::QueryFileStatus { uri: String::new() },
+            ClientMessage::QueryNearest {
+                uri: String::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNearestByText {
+                text: String::new(),
+                top_k: 0,
+                model: None,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::BatchQueryNearestByText {
+                queries: vec![],
+                top_k: 0,
+                model: None,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNearestBySymbol {
+                symbol_uri: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::BatchAnnotationGet {
+                uris: vec![],
+                key: String::new(),
+            },
+            ClientMessage::Handshake {
+                client_version: None,
+            },
+            ClientMessage::ReindexFiles { uris: vec![] },
+            ClientMessage::Similarity {
+                uri_a: String::new(),
+                uri_b: String::new(),
+            },
+            ClientMessage::QueryExpansion {
+                query: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::Cluster {
+                uris: vec![],
+                radius: 0.0,
+            },
+            ClientMessage::ExportEmbeddings { uris: vec![] },
+            ClientMessage::QueryNearestByContrast {
+                like_uri: String::new(),
+                unlike_uri: String::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryOutliers {
+                uris: vec![],
+                top_k: 0,
+            },
+            ClientMessage::QuerySemanticDrift {
+                uri_a: String::new(),
+                uri_b: String::new(),
+            },
+            ClientMessage::SimilarityMatrix { uris: vec![] },
+            ClientMessage::FindSemanticCounterpart {
+                uri: String::new(),
+                candidates: vec![],
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryCoverage {
+                root: String::new(),
+            },
+            ClientMessage::FindBoundaries {
+                uri: String::new(),
+                chunk_lines: 0,
+                threshold: 0.0,
+                model: None,
+            },
+            ClientMessage::SemanticDiff {
+                content_a: String::new(),
+                content_b: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::QueryNearestInStore {
+                uri: String::new(),
+                store: std::collections::HashMap::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNoveltyScore { uris: vec![] },
+            ClientMessage::ExtractTerminology {
+                uris: vec![],
+                top_k: 0,
+            },
+            ClientMessage::PruneDeleted,
+            ClientMessage::GetCentroid { uris: vec![] },
+            ClientMessage::QueryStaleEmbeddings {
+                root: String::new(),
+            },
+            ClientMessage::ExplainMatch {
+                query: String::new(),
+                result_uri: String::new(),
+                top_k: 0,
+                chunk_lines: 0,
+                model: None,
+            },
+            ClientMessage::EmbedText {
+                text: String::new(),
+                model: None,
+            },
+            ClientMessage::StreamContext {
+                file_uri: String::new(),
+                cursor_position: crate::schema::OwnedRange::default(),
+                max_tokens: 0,
+                model: None,
+            },
+        ];
+
+        let supported = ClientMessage::supported_messages();
+        for m in &samples {
+            let tag = m.variant_tag();
+            assert!(
+                supported.iter().any(|s| s == tag),
+                "variant tag {tag:?} missing from supported_messages()"
+            );
+        }
+        assert_eq!(
+            samples.len(),
+            supported.len(),
+            "variant count drifted from supported_messages() length"
+        );
     }
 
     #[test]
