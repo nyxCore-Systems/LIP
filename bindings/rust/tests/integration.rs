@@ -541,3 +541,154 @@ async fn daemon_annotations_survive_restart() {
         let _ = task.await;
     }
 }
+
+// ─── stream_context (LIP 2.1.0) ──────────────────────────────────────────────
+
+async fn recv_stream_frame(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
+    // Filter push notifications (`IndexChanged`, `SymbolUpgraded`) that may
+    // have been queued from earlier upserts.
+    recv(stream).await
+}
+
+#[tokio::test]
+async fn stream_context_zero_budget_terminates_immediately() {
+    use lip::query_graph::types::EndStreamReason;
+    use lip::schema::OwnedRange;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_zero.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    let uri = "lip://local/test@0.1/budget.rs";
+    let source = "pub fn foo() {}\n";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::StreamContext {
+            file_uri: uri.into(),
+            cursor_position: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 0,
+            },
+            max_tokens: 0,
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frame = recv_stream_frame(&mut client).await.unwrap();
+    match frame {
+        ServerMessage::EndStream {
+            reason, emitted, ..
+        } => {
+            assert_eq!(reason, EndStreamReason::BudgetReached);
+            assert_eq!(emitted, 0);
+        }
+        other => panic!("expected EndStream first frame, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn stream_context_cursor_out_of_range_errors() {
+    use lip::query_graph::types::EndStreamReason;
+    use lip::schema::OwnedRange;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_oob.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    let uri = "lip://local/test@0.1/oob.rs";
+    let source = "pub fn foo() {}\n"; // 1 line
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::StreamContext {
+            file_uri: uri.into(),
+            cursor_position: OwnedRange {
+                start_line: 9999,
+                start_char: 0,
+                end_line: 9999,
+                end_char: 0,
+            },
+            max_tokens: 4096,
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frame = recv_stream_frame(&mut client).await.unwrap();
+    match frame {
+        ServerMessage::EndStream { reason, error, .. } => {
+            assert_eq!(reason, EndStreamReason::Error);
+            assert_eq!(error.as_deref(), Some("cursor_out_of_range"));
+        }
+        other => panic!("expected EndStream(error), got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn stream_context_handshake_advertises_v2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_hs.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::HandshakeResult {
+            protocol_version, ..
+        } => assert_eq!(protocol_version, 2),
+        other => panic!("expected HandshakeResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}

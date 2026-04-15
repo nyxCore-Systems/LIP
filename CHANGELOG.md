@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.1.0] — 2026-04-15
+
+### Added
+
+**v2.1 — `stream_context`: token-budgeted RAG context streaming**
+
+- **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — new streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo { symbol_info, relevance_score, token_cost }` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`. Replaces the broken "fetch top-k, locally truncate to prompt budget" pattern with stream-until-full. Spec §9.2.
+- **Relevance ordering** (spec §2.3): direct symbol at cursor → callers (from blast-radius CPG walk) → callees / references → related types.
+- **Token-cost estimate**: conservative `ceil((len(signature) + len(documentation)) / 4) + 8` per symbol.
+- **Back-pressure**: daemon does not buffer ahead of the socket. `BrokenPipe` from a closing client aborts the ranking walk cleanly. `StreamContext` is rejected from `Batch` / `BatchQuery`.
+- **`protocol_version` bumped from `1` → `2`** in `HandshakeResult`. Clients can detect streaming support via handshake.
+- **`lip stream-context <file_uri> <line:col> --max-tokens N [--model M]`** — new CLI subcommand prints frames as JSON for manual testing.
+
+---
+
 ## [2.0.0] — 2026-04-13
 
 ### Added
