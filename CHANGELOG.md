@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`EndStreamReason::CursorOutOfRange`** and **`EndStreamReason::FileNotIndexed`** — split the previously-conflated `Error + "cursor_out_of_range"` emission into two typed reasons. Before, a cursor past EOF and a URI the daemon had never indexed both surfaced as `reason: error, error: "cursor_out_of_range"`; clients could not distinguish "user gave bad coordinates" from "daemon has nothing for this path." Now:
+  - `CursorOutOfRange` — the file is indexed but the cursor line is outside its range. Error message reports the actual line count.
+  - `FileNotIndexed` — the daemon has no record of the URI. Error message names the URI. Callers should upsert or reindex, then retry.
+  - `Error` remains for any other stream-terminating failure. Clients should branch on specific reasons first and fall through to `Error` for the rest.
+
+  Non-breaking for the happy path (`BudgetReached`, `Exhausted`) and for the free-form `error` string. Clients that strictly matched `reason == Error` on both failure modes now need one extra arm — all v2.1.x CKB builds ship in lockstep so this lands as a coordinated change.
+
+---
+
 ## [2.1.0] — 2026-04-15
 
 ### Added
