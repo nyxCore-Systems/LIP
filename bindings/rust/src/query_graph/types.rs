@@ -595,6 +595,13 @@ pub enum ErrorCode {
 }
 
 /// Why a [`ServerMessage::EndStream`] terminated a context stream.
+///
+/// `CursorOutOfRange` and `FileNotIndexed` were previously both
+/// reported as `Error` with `"cursor_out_of_range"` in the free-form
+/// error string; CKB and other clients could not distinguish "user
+/// gave bad coordinates" from "daemon has nothing for this path."
+/// The split reasons let clients show the correct message without
+/// string-matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndStreamReason {
@@ -602,7 +609,18 @@ pub enum EndStreamReason {
     BudgetReached,
     /// No more relevant candidates exist.
     Exhausted,
-    /// An error terminated the stream; see [`ServerMessage::EndStream::error`].
+    /// The cursor position is outside the file's line count. The file
+    /// itself is indexed — the caller's coordinates are bad.
+    CursorOutOfRange,
+    /// The daemon has no record of `file_uri` in its index. Distinct
+    /// from [`CursorOutOfRange`]: the cursor coordinates are irrelevant
+    /// because the file hasn't been indexed at all. Callers should
+    /// upsert the file (or trigger a workspace reindex) and retry.
+    FileNotIndexed,
+    /// An error terminated the stream that is not captured by a more
+    /// specific reason. See [`ServerMessage::EndStream::error`] for
+    /// the free-form description. Clients should branch on specific
+    /// reasons first and fall through to `Error` for the rest.
     Error,
 }
 

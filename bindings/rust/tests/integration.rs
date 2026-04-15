@@ -654,10 +654,70 @@ async fn stream_context_cursor_out_of_range_errors() {
     let frame = recv_stream_frame(&mut client).await.unwrap();
     match frame {
         ServerMessage::EndStream { reason, error, .. } => {
-            assert_eq!(reason, EndStreamReason::Error);
-            assert_eq!(error.as_deref(), Some("cursor_out_of_range"));
+            assert_eq!(reason, EndStreamReason::CursorOutOfRange);
+            // Message carries the actual line count so callers can
+            // surface a useful error without parsing the reason string.
+            let msg = error.as_deref().unwrap_or("");
+            assert!(
+                msg.contains("cursor line 9999") && msg.contains("1 lines"),
+                "unexpected error message: {msg:?}"
+            );
         }
-        other => panic!("expected EndStream(error), got {other:?}"),
+        other => panic!("expected EndStream(CursorOutOfRange), got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// A cursor against a URI the daemon has never seen must terminate with
+/// `FileNotIndexed`, not `CursorOutOfRange`. The two were collapsed
+/// onto `Error` + a free-form string before; splitting lets CKB show
+/// "upsert the file first" vs. "your coordinates are bad."
+#[tokio::test]
+async fn stream_context_unknown_uri_reports_file_not_indexed() {
+    use lip_core::query_graph::types::EndStreamReason;
+    use lip_core::schema::OwnedRange;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_unknown.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    // Do NOT upsert anything. The daemon has no record of this URI.
+    send(
+        &mut client,
+        &ClientMessage::StreamContext {
+            file_uri: "lip://local/never/indexed.rs".into(),
+            cursor_position: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 0,
+            },
+            max_tokens: 4096,
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frame = recv_stream_frame(&mut client).await.unwrap();
+    match frame {
+        ServerMessage::EndStream { reason, error, .. } => {
+            assert_eq!(reason, EndStreamReason::FileNotIndexed);
+            assert!(
+                error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("not in the daemon index"),
+                "expected daemon-index error message, got {error:?}"
+            );
+        }
+        other => panic!("expected EndStream(FileNotIndexed), got {other:?}"),
     }
 
     task.abort();

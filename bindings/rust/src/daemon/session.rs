@@ -1588,21 +1588,29 @@ impl Session {
                 .map(|t| t.lines().count() as i32)
         };
         let Some(line_count) = line_count_opt else {
+            // File URI is not in the daemon's index at all — distinct
+            // from a cursor past EOF. CKB-side surfaces a different
+            // message ("file not indexed, run a delta first") vs. the
+            // cursor-coord error, so we split the reason codes here
+            // instead of overloading `Error` with a magic string.
             let term = ServerMessage::EndStream {
-                reason: EndStreamReason::Error,
+                reason: EndStreamReason::FileNotIndexed,
                 emitted: 0,
                 total_candidates: 0,
-                error: Some("cursor_out_of_range".into()),
+                error: Some(format!("{file_uri} is not in the daemon index")),
             };
             write_message(stream, &term).await?;
             return Ok(());
         };
         if cursor_position.start_line < 0 || cursor_position.start_line >= line_count {
             let term = ServerMessage::EndStream {
-                reason: EndStreamReason::Error,
+                reason: EndStreamReason::CursorOutOfRange,
                 emitted: 0,
                 total_candidates: 0,
-                error: Some("cursor_out_of_range".into()),
+                error: Some(format!(
+                    "cursor line {} is outside {file_uri} ({} lines)",
+                    cursor_position.start_line, line_count
+                )),
             };
             write_message(stream, &term).await?;
             return Ok(());
