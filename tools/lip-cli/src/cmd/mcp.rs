@@ -477,7 +477,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             .iter()
             .enumerate()
             .map(|(i, msg)| match msg {
-                ServerMessage::Error { message } => format!("[{i}] error: {message}"),
+                ServerMessage::Error { message, .. } => format!("[{i}] error: {message}"),
                 other => format!("[{i}]\n{}", format_response(tool, other)),
             })
             .collect::<Vec<_>>()
@@ -760,7 +760,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             }
             out.trim_end().to_owned()
         }
-        ServerMessage::Error { message } => format!("LIP error: {message}"),
+        ServerMessage::Error { message, .. } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }

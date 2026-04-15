@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use lip::daemon::LipDaemon;
-use lip::query_graph::{ClientMessage, ServerMessage};
+use lip::query_graph::{ClientMessage, ErrorCode, ServerMessage};
 use lip::schema::{Action, IndexingState, OwnedDocument};
 
 // ─── Framing helpers (client side) ───────────────────────────────────────────
@@ -687,10 +687,15 @@ async fn embed_text_without_endpoint_returns_error() {
 
     let resp = recv(&mut client).await.unwrap();
     match resp {
-        ServerMessage::Error { message } => {
+        ServerMessage::Error { message, code } => {
             assert!(
                 message.contains("LIP_EMBEDDING_URL"),
                 "expected configuration error, got {message:?}"
+            );
+            assert_eq!(
+                code,
+                ErrorCode::UnknownModel,
+                "expected UnknownModel code, got {code:?}"
             );
         }
         ServerMessage::EmbedTextResult { vector, .. } => {

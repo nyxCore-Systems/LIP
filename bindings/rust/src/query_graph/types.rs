@@ -237,7 +237,13 @@ pub enum ServerMessage {
         stale_uris: Vec<String>,
     },
     Error {
+        /// Human-readable error string. Still free-form.
         message: String,
+        /// Machine-readable code. Clients branch on this instead of
+        /// string-matching `message`. Defaults to
+        /// [`ErrorCode::Internal`] on older daemons that predate this field.
+        #[serde(default)]
+        code: ErrorCode,
     },
     /// Response to [`ClientMessage::EmbeddingBatch`].
     ///
@@ -503,6 +509,35 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// Stable, machine-readable category for [`ServerMessage::Error`].
+///
+/// Clients branch on this field instead of string-matching the free-form
+/// `message`. Older daemons predating this field deserialize as
+/// [`ErrorCode::Internal`] via `#[serde(default)]`, so forward-compatible
+/// clients should treat `Internal` as "no classification available."
+///
+/// The set is intentionally small and stable. New codes are additive —
+/// adding one is non-breaking; renaming or removing one is breaking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request used a `type` tag this daemon does not understand.
+    /// Preferred reply is [`ServerMessage::UnknownMessage`]; this code
+    /// exists for legacy paths that still emit `Error`.
+    UnknownMessageType,
+    /// The embedding model name is not configured on this daemon.
+    UnknownModel,
+    /// A cursor position (line/col or byte offset) fell outside the
+    /// target file. Emitted e.g. by `StreamContext`.
+    CursorOutOfRange,
+    /// A writer or exclusive index operation is in progress; the
+    /// request cannot proceed right now. Retry is safe.
+    IndexLocked,
+    /// Anything not captured by a more specific code. Default.
+    #[default]
+    Internal,
 }
 
 /// Why a [`ServerMessage::EndStream`] terminated a context stream.

@@ -8,6 +8,12 @@ All notable changes to this project are documented here.
 
 ### Added
 
+**v2.1 — Structured error codes on all `Error` responses**
+
+- **`ServerMessage::Error { message, code }`** — `code: ErrorCode` is a stable, machine-readable category. Clients branch on this instead of string-matching `message`. Added `#[serde(default)]`; older daemons predating this field deserialize as `ErrorCode::Internal`, so forward-compatible clients should treat `Internal` as "no classification available."
+- **`ErrorCode`** enum with a deliberately small, stable set: `unknown_message_type`, `unknown_model`, `cursor_out_of_range`, `index_locked`, `internal` (default). Adding a code is non-breaking; renaming or removing one is breaking.
+- **Daemon classification so far**: all 10 "embedding not configured / no cached embedding for URI" errors now carry `code: unknown_model`; everything else is `code: internal`. Specific codes will be wired in as each call-site picks one.
+
 **v2.1 — Capability discovery + graceful unknown-variant handling**
 
 - **`HandshakeResult.supported_messages: Vec<String>`** — handshake response now lists every `ClientMessage` `type` tag this daemon understands. Lets clients probe for an individual message (e.g. `stream_context`, `embed_text`) without writing "handshake then pray" code or comparing `protocol_version` integers. Field is `#[serde(default)]`; older daemons predating this field yield an empty vector, which clients should treat as "fall back to `protocol_version`."
