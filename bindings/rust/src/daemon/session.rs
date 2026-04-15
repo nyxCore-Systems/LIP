@@ -442,7 +442,7 @@ impl Session {
                     let _ = bad; // already matched by is_batchable
                     return ServerMessage::Error {
                         message: "nested Batch not allowed".into(),
-                        code: ErrorCode::Internal,
+                        code: ErrorCode::InvalidRequest,
                     };
                 }
                 let mut results = Vec::with_capacity(requests.len());
@@ -493,7 +493,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Separate URIs that already have a cached embedding from those
@@ -641,7 +641,7 @@ impl Session {
                 let Some(query_vec) = db.get_file_embedding(&uri).cloned() else {
                     return ServerMessage::Error {
                         message: format!("no embedding for {uri} — call EmbeddingBatch first"),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let results = db.nearest_by_vector(
@@ -664,7 +664,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let texts = vec![text];
@@ -695,7 +695,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Embed all queries in one HTTP batch call; no lock held during await.
@@ -725,7 +725,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Check cache — avoid re-embedding the same symbol repeatedly.
@@ -880,7 +880,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let (mut vecs, actual_model) =
@@ -1028,7 +1028,7 @@ impl Session {
                         message: "both URIs must have cached embeddings with matching \
                                   dimensions — call embedding_batch first"
                             .into(),
-                        code: ErrorCode::Internal,
+                        code: ErrorCode::NoEmbedding,
                     },
                 }
             }
@@ -1098,7 +1098,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
-                        code: ErrorCode::Internal,
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1183,7 +1183,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let chunk_size = chunk_lines.max(1);
@@ -1250,7 +1250,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let (mut vecs, _) = match client
@@ -1319,7 +1319,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
-                        code: ErrorCode::Internal,
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1451,7 +1451,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let effective_top_k = if top_k == 0 { 5 } else { top_k };
@@ -1577,7 +1577,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
-                        code: ErrorCode::UnknownModel,
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let texts = vec![text];
@@ -1600,7 +1600,7 @@ impl Session {
                 message: "stream_context is a streaming request and cannot be \
                           batched or nested"
                     .into(),
-                code: ErrorCode::Internal,
+                code: ErrorCode::InvalidRequest,
             },
         }
     }
