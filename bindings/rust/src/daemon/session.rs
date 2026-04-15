@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::query_graph::{BatchQueryResult, ClientMessage, ErrorCode, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
-use super::embedding::EmbeddingClient;
+use super::embedding::{EmbedError, EmbeddingClient};
 use super::journal::{Journal, JournalEntry};
 use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
@@ -18,6 +18,22 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 /// Monotonic protocol version. Bumped only on breaking wire-format changes.
 /// Clients can detect drift by comparing against this value in `HandshakeResult`.
 const PROTOCOL_VERSION: u32 = 2;
+
+/// Convert a classified [`EmbedError`] into the appropriate wire-level
+/// error response. Centralises the mapping so every embedding call site
+/// reports the same [`ErrorCode`] category for the same failure mode.
+fn embed_error_response(e: EmbedError) -> ServerMessage {
+    let code = match e {
+        EmbedError::UnknownModel(_) => ErrorCode::UnknownModel,
+        EmbedError::Transport(_) | EmbedError::Protocol(_) | EmbedError::Http(_) => {
+            ErrorCode::Internal
+        }
+    };
+    ServerMessage::Error {
+        message: format!("embedding failed: {e}"),
+        code,
+    }
+}
 
 /// Per-connection session state.
 pub struct Session {
@@ -534,10 +550,7 @@ impl Session {
                     match client.embed_texts(&miss_texts, model.as_deref()).await {
                         Ok(r) => r,
                         Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                                code: ErrorCode::Internal,
-                            }
+                            return embed_error_response(e)
                         }
                     }
                 };
@@ -673,10 +686,7 @@ impl Session {
                 let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                            code: ErrorCode::Internal,
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let query_vec = vecs.pop().unwrap_or_default();
@@ -704,10 +714,7 @@ impl Session {
                 let (vecs, _) = match client.embed_texts(&queries, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                            code: ErrorCode::Internal,
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let db = self.db.lock().await;
@@ -766,10 +773,7 @@ impl Session {
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok(r) => r,
                             Err(e) => {
-                                return ServerMessage::Error {
-                                    message: format!("embedding failed: {e}"),
-                                    code: ErrorCode::Internal,
-                                }
+                                return embed_error_response(e)
                             }
                         };
                     let v = vecs.pop().unwrap_or_default();
@@ -889,33 +893,12 @@ impl Session {
                     match client.embed_texts(&[query], model.as_deref()).await {
                         Ok(r) => r,
                         Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                                code: ErrorCode::Internal,
-                            }
+                            return embed_error_response(e)
                         }
                     };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let mut db = self.db.lock().await;
-                // Pin the search to symbols embedded with the same model that
-                // produced `query_vec`. Cross-model cosine scores are
-                // meaningless, so silently mixing them gives the caller noisy
-                // "expansion terms" that rank random symbols highest.
-                let hits =
-                    db.nearest_symbol_by_vector(&query_vec, top_k, None, Some(&actual_model));
-                // Resolve display names; fall back to URI fragment.
-                let mut terms = Vec::with_capacity(hits.len());
-                for item in hits {
-                    let name = match db.symbol_by_uri(&item.uri) {
-                        Some(s) => s.display_name.clone(),
-                        None => item
-                            .uri
-                            .rfind('#')
-                            .map(|i| item.uri[i + 1..].to_owned())
-                            .unwrap_or(item.uri.clone()),
-                    };
-                    terms.push(name);
-                }
+                let terms = db.query_expansion_terms(&query_vec, &actual_model, top_k);
                 ServerMessage::QueryExpansionResult { terms }
             }
 
@@ -1210,10 +1193,7 @@ impl Session {
                 let (vecs, _) = match client.embed_texts(&chunks, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                            code: ErrorCode::Internal,
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let mut boundaries = Vec::new();
@@ -1261,10 +1241,7 @@ impl Session {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                            code: ErrorCode::Internal,
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 if vecs.len() < 2 {
@@ -1475,10 +1452,7 @@ impl Session {
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok((mut vecs, m)) => (vecs.pop().unwrap_or_default(), m),
                             Err(e) => {
-                                return ServerMessage::Error {
-                                    message: format!("embedding failed: {e}"),
-                                    code: ErrorCode::Internal,
-                                }
+                                return embed_error_response(e)
                             }
                         }
                     }
@@ -1529,10 +1503,7 @@ impl Session {
                     match client.embed_texts(&chunk_texts, model.as_deref()).await {
                         Ok(r) => r,
                         Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                                code: ErrorCode::Internal,
-                            }
+                            return embed_error_response(e)
                         }
                     };
                 let _ = chunk_model; // we report query_model, not per-chunk model
@@ -1588,10 +1559,7 @@ impl Session {
                         vector: vecs.pop().unwrap_or_default(),
                         embedding_model: used_model,
                     },
-                    Err(e) => ServerMessage::Error {
-                        message: format!("embedding failed: {e}"),
-                        code: ErrorCode::Internal,
-                    },
+                    Err(e) => embed_error_response(e),
                 }
             }
 

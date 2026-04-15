@@ -926,6 +926,35 @@ impl LipDatabase {
         names
     }
 
+    /// Rank symbols semantically related to `query_vec` (produced by
+    /// `actual_model`) and return their display names as query-expansion
+    /// terms.
+    ///
+    /// Encapsulates the post-embedding work of the `QueryExpansion`
+    /// handler so the daemon-side wiring (filter results to symbols
+    /// embedded with `actual_model`, then resolve display names) is
+    /// pinned by a db-level test and cannot silently regress in the
+    /// session handler. Cross-model cosine scores are meaningless —
+    /// mixing them would rank random symbols highest.
+    pub fn query_expansion_terms(
+        &mut self,
+        query_vec: &[f32],
+        actual_model: &str,
+        top_k: usize,
+    ) -> Vec<String> {
+        let hits = self.nearest_symbol_by_vector(query_vec, top_k, None, Some(actual_model));
+        let uris: Vec<String> = hits.into_iter().map(|item| item.uri).collect();
+        uris.into_iter()
+            .map(|uri| match self.symbol_by_uri(&uri) {
+                Some(s) => s.display_name,
+                None => uri
+                    .rfind('#')
+                    .map(|i| uri[i + 1..].to_owned())
+                    .unwrap_or(uri),
+            })
+            .collect()
+    }
+
     /// Find the `top_k` symbols whose embedding is most similar (cosine) to `query_vec`.
     ///
     /// Mirrors `nearest_by_vector` but operates over `symbol_embeddings`.
@@ -3010,6 +3039,56 @@ impl Greeter {
         let pinned = db.nearest_symbol_by_vector(&query, 5, None, Some("model-a"));
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].uri, "lip://local/f.rs#alpha");
+    }
+
+    /// Pins the `QueryExpansion` handler contract: when the embedding
+    /// service returns model X for the query, the subsequent ranking
+    /// must be restricted to symbols embedded with model X.
+    ///
+    /// This test mirrors the exact call the session handler makes
+    /// (see `session.rs::ClientMessage::QueryExpansion`). A regression
+    /// that passes `None` for the model filter — which would silently
+    /// re-introduce cross-model cosine scoring — would cause
+    /// `cross-model-vector` to appear in the expansion terms and fail
+    /// this assertion.
+    #[test]
+    fn query_expansion_terms_rejects_cross_model_scoring() {
+        let mut db = LipDatabase::new();
+
+        // Two symbols in different models, both aligned with the query
+        // vector. Naive (unfiltered) cosine would rank both highly.
+        let f_uri = "file:///src/f.rs".to_owned();
+        db.upsert_file(
+            f_uri.clone(),
+            "fn matching_model() {}\nfn cross_model_vector() {}".into(),
+            "rust".into(),
+        );
+        db.set_symbol_embedding(
+            "lip://local/f.rs#matching_model",
+            vec![1.0, 0.0],
+            "model-a",
+        );
+        db.set_symbol_embedding(
+            "lip://local/f.rs#cross_model_vector",
+            vec![1.0, 0.0],
+            "model-b",
+        );
+
+        let query_vec = vec![1.0_f32, 0.0];
+
+        // The embedding service would have returned "model-a" for the
+        // query. Handler passes that through.
+        let terms = db.query_expansion_terms(&query_vec, "model-a", 5);
+
+        assert!(
+            terms.iter().any(|t| t.contains("matching_model")),
+            "same-model term must appear: got {terms:?}"
+        );
+        assert!(
+            !terms.iter().any(|t| t.contains("cross_model_vector")),
+            "cross-model term must NOT appear — indicates the filter was \
+             bypassed: got {terms:?}"
+        );
     }
 
     // ── outliers ──────────────────────────────────────────────────────────
