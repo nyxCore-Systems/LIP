@@ -31,7 +31,7 @@ All notable changes to this project are documented here.
 - **`ErrorCode`** enum — small, stable set: `unknown_message_type`, `unknown_model`, `embedding_not_configured`, `no_embedding`, `cursor_out_of_range`, `index_locked`, `invalid_request`, `internal` (default). Adding a code is non-breaking; renaming or removing one is breaking.
   - `embedding_not_configured` — daemon has no embedding service (`LIP_EMBEDDING_URL` unset).
   - `no_embedding` — URI has no cached embedding yet; call `EmbeddingBatch` first.
-  - `unknown_model` — caller asked for a model the daemon does not recognize.
+  - `unknown_model` — the embedding endpoint rejected the requested model. Emitted by the daemon when the HTTP backend returns 404 or a 4xx body matching `model_not_found` / `"unknown model"` / `"model … not found/invalid/unsupported"`. Transport, rate-limit, and auth errors stay on `internal` — retrying with the same model only makes sense after a real config change. Classification lives in `daemon/embedding.rs::classify_http_error`.
   - `invalid_request` — request was well-formed on the wire but used incorrectly (e.g. nested `Batch`, or `StreamContext` inside a `Batch`). Distinct from `internal` so clients can avoid retry loops on caller-side mistakes.
 
 **Drift guard**
@@ -40,6 +40,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **`QueryExpansion` handler contract pinned by a db-level test.** The post-embedding ranking is now encapsulated in `LipDatabase::query_expansion_terms(query_vec, actual_model, top_k)`, which the handler calls in one line. A regression that drops the model filter would cause `query_expansion_terms_rejects_cross_model_scoring` (db.rs) to fail, closing the earlier gap where the fix shipped without a paired assertion.
 - **`QueryExpansion` now honors the caller's model pin.** Previously the handler embedded the query with the requested model but then ranked candidates across *all* stored symbol embeddings regardless of which model produced them — cross-model cosine scores are not meaningful, so the returned "expansion terms" were effectively noise whenever the index held mixed-model vectors. Handler now captures the actual model returned by `embed_texts` and passes it through a new `model_filter: Option<&str>` parameter on `LipDatabase::nearest_symbol_by_vector`, restricting candidates to symbols embedded with the same model. `SimilarSymbols` (which resolves from a URI's own cached embedding) keeps the old unfiltered behavior by passing `None`.
 
 ---
