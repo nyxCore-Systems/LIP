@@ -779,8 +779,12 @@ impl Session {
                     v
                 };
                 let db = self.db.lock().await;
-                let results =
-                    db.nearest_symbol_by_vector(&query_vec, top_k, Some(symbol_uri.as_str()));
+                let results = db.nearest_symbol_by_vector(
+                    &query_vec,
+                    top_k,
+                    Some(symbol_uri.as_str()),
+                    None,
+                );
                 ServerMessage::NearestResult { results }
             }
 
@@ -879,18 +883,24 @@ impl Session {
                         code: ErrorCode::UnknownModel,
                     };
                 };
-                let (mut vecs, _) = match client.embed_texts(&[query], model.as_deref()).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                            code: ErrorCode::Internal,
+                let (mut vecs, actual_model) =
+                    match client.embed_texts(&[query], model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ServerMessage::Error {
+                                message: format!("embedding failed: {e}"),
+                                code: ErrorCode::Internal,
+                            }
                         }
-                    }
-                };
+                    };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let mut db = self.db.lock().await;
-                let hits = db.nearest_symbol_by_vector(&query_vec, top_k, None);
+                // Pin the search to symbols embedded with the same model that
+                // produced `query_vec`. Cross-model cosine scores are
+                // meaningless, so silently mixing them gives the caller noisy
+                // "expansion terms" that rank random symbols highest.
+                let hits =
+                    db.nearest_symbol_by_vector(&query_vec, top_k, None, Some(&actual_model));
                 // Resolve display names; fall back to URI fragment.
                 let mut terms = Vec::with_capacity(hits.len());
                 for item in hits {

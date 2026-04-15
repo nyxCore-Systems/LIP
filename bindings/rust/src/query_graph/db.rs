@@ -910,6 +910,7 @@ impl LipDatabase {
         query_vec: &[f32],
         top_k: usize,
         exclude_uri: Option<&str>,
+        model_filter: Option<&str>,
     ) -> Vec<crate::query_graph::types::NearestItem> {
         let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if q_norm == 0.0 || top_k == 0 {
@@ -919,6 +920,17 @@ impl LipDatabase {
             .symbol_embeddings
             .iter()
             .filter(|(uri, _)| exclude_uri.map(|e| e != uri.as_str()).unwrap_or(true))
+            .filter(|(uri, _)| {
+                // When `model_filter` is set, skip any symbol whose stored
+                // embedding was produced by a different model — cross-model
+                // cosine scores are not meaningful.
+                model_filter.is_none_or(|want| {
+                    self.symbol_embedding_models
+                        .get(uri.as_str())
+                        .map(|m| m == want)
+                        .unwrap_or(false)
+                })
+            })
             .filter_map(|(uri, vec)| {
                 if vec.len() != query_vec.len() {
                     return None;
@@ -2872,7 +2884,7 @@ impl Greeter {
         db.set_symbol_embedding("lip://local/f.rs#baz", vec![0.0, 0.0, 1.0], "test-model");
 
         let query = vec![1.0_f32, 0.0, 0.0];
-        let results = db.nearest_symbol_by_vector(&query, 3, None);
+        let results = db.nearest_symbol_by_vector(&query, 3, None, None);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].uri, "lip://local/f.rs#foo");
         assert!(
@@ -2889,7 +2901,7 @@ impl Greeter {
         db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.9, 0.1], "test-model");
 
         let query = vec![1.0_f32, 0.0];
-        let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"));
+        let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"), None);
         assert!(
             !results.iter().any(|r| r.uri == "lip://local/f.rs#foo"),
             "excluded URI must not appear in results"
@@ -2900,8 +2912,27 @@ impl Greeter {
     #[test]
     fn nearest_symbol_by_vector_empty_store_returns_empty() {
         let db = LipDatabase::new();
-        let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None);
+        let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None, None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn nearest_symbol_by_vector_filters_by_model() {
+        let mut db = LipDatabase::new();
+        // Two symbols with near-identical vectors but different embedding
+        // models. A query pinned to model-a must not match the model-b symbol
+        // even though the raw cosine score would be high.
+        db.set_symbol_embedding("lip://local/f.rs#alpha", vec![1.0, 0.0], "model-a");
+        db.set_symbol_embedding("lip://local/f.rs#beta", vec![1.0, 0.0], "model-b");
+
+        let query = vec![1.0_f32, 0.0];
+
+        let all = db.nearest_symbol_by_vector(&query, 5, None, None);
+        assert_eq!(all.len(), 2, "without filter both symbols rank");
+
+        let pinned = db.nearest_symbol_by_vector(&query, 5, None, Some("model-a"));
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].uri, "lip://local/f.rs#alpha");
     }
 
     // ── outliers ──────────────────────────────────────────────────────────
