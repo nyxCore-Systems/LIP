@@ -44,6 +44,17 @@ pub struct ImportArgs {
     /// Default: 90 (compiler-verified, not locally re-checked).
     #[arg(long, default_value_t = 90)]
     pub confidence: u8,
+
+    /// Skip Tier 3 provenance registration on the daemon.
+    ///
+    /// By default `--push-to-daemon` sends a `RegisterTier3Source`
+    /// message before streaming deltas so `QueryIndexStatus` reports
+    /// who produced the imported symbols and when. Use this flag for
+    /// ephemeral or test imports whose provenance should not pollute
+    /// a long-lived daemon's status output. No effect on the default
+    /// EventStream-JSON output path.
+    #[arg(long)]
+    pub no_provenance: bool,
 }
 
 pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
@@ -65,7 +76,15 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     // `project_root` is a file:// URL identifying the source tree the
     // producer indexed; clients can later resolve it to a working tree
     // to compare HEAD against `imported_at_ms` for staleness.
-    let tier3_source = build_tier3_source(&index, &args.scip_file);
+    //
+    // Skipped when `--no-provenance` is set — ephemeral/test imports
+    // opt out of registering so they do not pollute a long-lived
+    // daemon's `tier3_sources` list.
+    let tier3_source = if args.no_provenance {
+        None
+    } else {
+        Some(build_tier3_source(&index, &args.scip_file))
+    };
 
     let confidence = args.confidence;
     let mut deltas: Vec<OwnedDelta> = index
@@ -112,26 +131,31 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         // Older daemons that predate `register_tier3_source` will reply
         // with `UnknownMessage`; we tolerate that and proceed — the deltas
         // still land, the provenance is just unavailable.
-        let reg_msg = ClientMessage::RegisterTier3Source {
-            source: tier3_source,
-        };
-        let reg_body = serde_json::to_vec(&reg_msg)?;
-        stream.write_all(&(reg_body.len() as u32).to_be_bytes()).await?;
-        stream.write_all(&reg_body).await?;
-        let mut reg_len = [0u8; 4];
-        stream.read_exact(&mut reg_len).await?;
-        let reg_resp_len = u32::from_be_bytes(reg_len) as usize;
-        let mut reg_resp_bytes = vec![0u8; reg_resp_len];
-        stream.read_exact(&mut reg_resp_bytes).await?;
-        // We do not fail on UnknownMessage — that only means the daemon
-        // is pre-v2.1. We do surface a genuine DeltaAck rejection.
-        if let Ok(ServerMessage::DeltaAck { accepted: false, error, .. }) =
-            serde_json::from_slice::<ServerMessage>(&reg_resp_bytes)
-        {
-            eprintln!(
-                "warning: daemon rejected tier3 provenance registration: {}",
-                error.as_deref().unwrap_or("?")
-            );
+        if let Some(source) = tier3_source {
+            let reg_msg = ClientMessage::RegisterTier3Source { source };
+            let reg_body = serde_json::to_vec(&reg_msg)?;
+            stream.write_all(&(reg_body.len() as u32).to_be_bytes()).await?;
+            stream.write_all(&reg_body).await?;
+            let mut reg_len = [0u8; 4];
+            stream.read_exact(&mut reg_len).await?;
+            let reg_resp_len = u32::from_be_bytes(reg_len) as usize;
+            let mut reg_resp_bytes = vec![0u8; reg_resp_len];
+            stream.read_exact(&mut reg_resp_bytes).await?;
+            // We do not fail on UnknownMessage — that only means the daemon
+            // is pre-v2.1. We do surface a genuine DeltaAck rejection.
+            if let Ok(ServerMessage::DeltaAck {
+                accepted: false,
+                error,
+                ..
+            }) = serde_json::from_slice::<ServerMessage>(&reg_resp_bytes)
+            {
+                eprintln!(
+                    "warning: daemon rejected tier3 provenance registration: {}",
+                    error.as_deref().unwrap_or("?")
+                );
+            }
+        } else {
+            eprintln!("provenance registration skipped (--no-provenance)");
         }
 
         let total = deltas.len();
