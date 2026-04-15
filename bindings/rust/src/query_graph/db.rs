@@ -170,6 +170,11 @@ pub struct LipDatabase {
     symbol_embedding_models: HashMap<String, String>,
     /// Unix timestamps (ms) recording when each URI was last upserted.
     file_indexed_at: HashMap<String, i64>,
+    /// Provenance for Tier 3 ingestion batches (typically SCIP imports),
+    /// keyed by caller-supplied `source_id`. Surfaced through
+    /// `QueryIndexStatus` so clients can implement their own staleness
+    /// policy; the daemon never reasons about freshness itself.
+    tier3_sources: HashMap<String, crate::query_graph::types::Tier3Source>,
 }
 
 impl LipDatabase {
@@ -196,7 +201,26 @@ impl LipDatabase {
             symbol_embeddings: HashMap::new(),
             symbol_embedding_models: HashMap::new(),
             file_indexed_at: HashMap::new(),
+            tier3_sources: HashMap::new(),
         }
+    }
+
+    /// Record (or refresh) provenance for a Tier 3 ingestion batch.
+    /// Re-registering the same `source_id` overwrites the prior entry,
+    /// which is how clients refresh `imported_at_ms` after a re-import.
+    pub fn register_tier3_source(
+        &mut self,
+        source: crate::query_graph::types::Tier3Source,
+    ) {
+        self.tier3_sources.insert(source.source_id.clone(), source);
+    }
+
+    /// All currently-registered Tier 3 provenance records, sorted by
+    /// `source_id` for deterministic output.
+    pub fn tier3_sources(&self) -> Vec<crate::query_graph::types::Tier3Source> {
+        let mut out: Vec<_> = self.tier3_sources.values().cloned().collect();
+        out.sort_by(|a, b| a.source_id.cmp(&b.source_id));
+        out
     }
 
     // ── Mutations ─────────────────────────────────────────────────────────
@@ -2859,6 +2883,59 @@ impl Greeter {
             "removed file must not appear in consumers; got {:?}",
             consumers
         );
+    }
+
+    // ── tier3 provenance ──────────────────────────────────────────────────
+
+    #[test]
+    fn tier3_sources_sorted_by_source_id() {
+        use crate::query_graph::types::Tier3Source;
+        let mut db = LipDatabase::new();
+        db.register_tier3_source(Tier3Source {
+            source_id: "b".into(),
+            tool_name: "scip-typescript".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///b".into(),
+            imported_at_ms: 2,
+        });
+        db.register_tier3_source(Tier3Source {
+            source_id: "a".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///a".into(),
+            imported_at_ms: 1,
+        });
+        let got = db.tier3_sources();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].source_id, "a");
+        assert_eq!(got[1].source_id, "b");
+    }
+
+    /// Re-registering the same `source_id` must overwrite the prior
+    /// record in place, refreshing `imported_at_ms`. This is the
+    /// mechanism clients rely on to mark a fresh import.
+    #[test]
+    fn tier3_reregistration_overwrites_in_place() {
+        use crate::query_graph::types::Tier3Source;
+        let mut db = LipDatabase::new();
+        db.register_tier3_source(Tier3Source {
+            source_id: "same".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///r".into(),
+            imported_at_ms: 1,
+        });
+        db.register_tier3_source(Tier3Source {
+            source_id: "same".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.4.0".into(),
+            project_root: "file:///r".into(),
+            imported_at_ms: 99,
+        });
+        let got = db.tier3_sources();
+        assert_eq!(got.len(), 1, "re-registration must not grow the list");
+        assert_eq!(got[0].tool_version, "0.4.0");
+        assert_eq!(got[0].imported_at_ms, 99);
     }
 
     // ── symbol_embeddings / nearest_symbol_by_vector ──────────────────────

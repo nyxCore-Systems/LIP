@@ -272,6 +272,13 @@ pub enum ServerMessage {
         mixed_models: bool,
         /// Distinct model names present across all stored file embeddings, sorted.
         models_in_index: Vec<String>,
+        /// Provenance for every Tier 3 ingestion source registered on this
+        /// daemon, sorted by `source_id`. Added in v2.1 to let clients
+        /// surface "SCIP imported N hours ago" warnings without the daemon
+        /// taking a position on what "stale" means. `#[serde(default)]`;
+        /// older daemons return an empty vector.
+        #[serde(default)]
+        tier3_sources: Vec<Tier3Source>,
     },
     /// Response to [`ClientMessage::QueryFileStatus`].
     FileStatusResult {
@@ -509,6 +516,37 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// Provenance record for a Tier 3 ingestion source (typically a SCIP
+/// import). Exposes *what* produced the imported symbols and *when* —
+/// nothing about whether the source repo has since changed. Staleness
+/// policy is left to the caller: compare `imported_at_ms` against a
+/// freshness threshold, or pin `project_root` externally to a commit
+/// hash out-of-band. The daemon deliberately does no detection of its
+/// own; stale Tier 3 symbols live in the graph at their original
+/// confidence until the source is re-imported.
+///
+/// Returned inside [`ServerMessage::IndexStatusResult::tier3_sources`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tier3Source {
+    /// Caller-supplied stable identifier (e.g. `sha256("scip-rust:/repo")`).
+    /// Re-registering the same `source_id` overwrites the prior record,
+    /// which is the intended mechanism for refreshing `imported_at_ms`
+    /// after a re-import.
+    pub source_id: String,
+    /// Producer name from SCIP `Metadata.tool_info.name` (e.g.
+    /// `"scip-rust"`). Empty when the import path had no metadata.
+    pub tool_name: String,
+    /// Producer version from SCIP `Metadata.tool_info.version`.
+    pub tool_version: String,
+    /// SCIP `Metadata.project_root` — a `file://` URL identifying the
+    /// source tree the producer indexed. Clients that want commit-level
+    /// staleness can resolve this to a working tree and compare HEAD.
+    pub project_root: String,
+    /// Unix timestamp (ms) when the daemon accepted the registration.
+    /// Re-registration updates this in place.
+    pub imported_at_ms: i64,
 }
 
 /// Stable, machine-readable category for [`ServerMessage::Error`].
@@ -1021,6 +1059,23 @@ pub enum ClientMessage {
         #[serde(default)]
         model: Option<String>,
     },
+
+    /// Record provenance for a Tier 3 ingestion batch. Typically called
+    /// once by `lip import --push-to-daemon` before streaming SCIP
+    /// `Delta` messages, so `QueryIndexStatus` can later report which
+    /// producer generated the imported symbols and when.
+    ///
+    /// Idempotent: re-registering the same `source_id` overwrites the
+    /// previous record, refreshing `imported_at_ms` to the new
+    /// import time. Acknowledged with `DeltaAck`.
+    ///
+    /// The daemon does *not* infer freshness from this record — stale
+    /// Tier 3 symbols remain in the graph at their original confidence
+    /// until the caller re-imports. Surfacing the provenance lets
+    /// clients decide when to warn a user that imported data has aged.
+    RegisterTier3Source {
+        source: Tier3Source,
+    },
 }
 
 impl ClientMessage {
@@ -1081,6 +1136,7 @@ impl ClientMessage {
             "explain_match",
             "embed_text",
             "stream_context",
+            "register_tier3_source",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -1149,6 +1205,7 @@ impl ClientMessage {
             ClientMessage::ExplainMatch { .. } => "explain_match",
             ClientMessage::EmbedText { .. } => "embed_text",
             ClientMessage::StreamContext { .. } => "stream_context",
+            ClientMessage::RegisterTier3Source { .. } => "register_tier3_source",
         }
     }
 
@@ -1270,6 +1327,49 @@ mod tests {
         assert_eq!(protocol_version, 2);
         assert!(supported_messages.contains(&"handshake".to_string()));
         assert!(supported_messages.contains(&"stream_context".to_string()));
+    }
+
+    #[test]
+    fn register_tier3_source_round_trips() {
+        let msg = ClientMessage::RegisterTier3Source {
+            source: Tier3Source {
+                source_id: "sha256:abc".into(),
+                tool_name: "scip-rust".into(),
+                tool_version: "0.3.1".into(),
+                project_root: "file:///repo".into(),
+                imported_at_ms: 1_700_000_000_000,
+            },
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::RegisterTier3Source { source } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(source.source_id, "sha256:abc");
+        assert_eq!(source.tool_name, "scip-rust");
+        assert_eq!(source.tool_version, "0.3.1");
+        assert_eq!(source.project_root, "file:///repo");
+        assert_eq!(source.imported_at_ms, 1_700_000_000_000);
+    }
+
+    /// Older daemons (pre-v2.1) will serialise `IndexStatusResult`
+    /// without a `tier3_sources` field; newer deserialisers must
+    /// treat that as an empty list, not a parse failure.
+    #[test]
+    fn index_status_result_accepts_missing_tier3_sources() {
+        let legacy = serde_json::json!({
+            "type": "index_status_result",
+            "indexed_files": 7,
+            "pending_embedding_files": 0,
+            "last_updated_ms": 123,
+            "embedding_model": null,
+            "mixed_models": false,
+            "models_in_index": []
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        let ServerMessage::IndexStatusResult { tier3_sources, .. } = parsed else {
+            panic!("wrong variant");
+        };
+        assert!(tier3_sources.is_empty());
     }
 
     /// Drift guard: every tag produced by [`ClientMessage::variant_tag`]
@@ -1488,6 +1588,15 @@ mod tests {
                 cursor_position: crate::schema::OwnedRange::default(),
                 max_tokens: 0,
                 model: None,
+            },
+            ClientMessage::RegisterTier3Source {
+                source: Tier3Source {
+                    source_id: String::new(),
+                    tool_name: String::new(),
+                    tool_version: String::new(),
+                    project_root: String::new(),
+                    imported_at_ms: 0,
+                },
             },
         ];
 

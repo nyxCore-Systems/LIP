@@ -5,7 +5,7 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use lip::query_graph::{ClientMessage, ServerMessage};
+use lip::query_graph::{ClientMessage, ServerMessage, Tier3Source};
 use lip::schema::{
     sha256_hex, Action, OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence, OwnedRange,
     OwnedSymbolInfo, Role, SymbolKind,
@@ -61,6 +61,12 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         args.scip_file.display()
     );
 
+    // Capture Tier 3 provenance before consuming `index.documents`.
+    // `project_root` is a file:// URL identifying the source tree the
+    // producer indexed; clients can later resolve it to a working tree
+    // to compare HEAD against `imported_at_ms` for staleness.
+    let tier3_source = build_tier3_source(&index, &args.scip_file);
+
     let confidence = args.confidence;
     let mut deltas: Vec<OwnedDelta> = index
         .documents
@@ -100,6 +106,34 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
             anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
         })?;
+
+        // Register provenance before streaming deltas so the daemon can
+        // timestamp the import and expose the record via `QueryIndexStatus`.
+        // Older daemons that predate `register_tier3_source` will reply
+        // with `UnknownMessage`; we tolerate that and proceed — the deltas
+        // still land, the provenance is just unavailable.
+        let reg_msg = ClientMessage::RegisterTier3Source {
+            source: tier3_source,
+        };
+        let reg_body = serde_json::to_vec(&reg_msg)?;
+        stream.write_all(&(reg_body.len() as u32).to_be_bytes()).await?;
+        stream.write_all(&reg_body).await?;
+        let mut reg_len = [0u8; 4];
+        stream.read_exact(&mut reg_len).await?;
+        let reg_resp_len = u32::from_be_bytes(reg_len) as usize;
+        let mut reg_resp_bytes = vec![0u8; reg_resp_len];
+        stream.read_exact(&mut reg_resp_bytes).await?;
+        // We do not fail on UnknownMessage — that only means the daemon
+        // is pre-v2.1. We do surface a genuine DeltaAck rejection.
+        if let Ok(ServerMessage::DeltaAck { accepted: false, error, .. }) =
+            serde_json::from_slice::<ServerMessage>(&reg_resp_bytes)
+        {
+            eprintln!(
+                "warning: daemon rejected tier3 provenance registration: {}",
+                error.as_deref().unwrap_or("?")
+            );
+        }
+
         let total = deltas.len();
         for (seq, delta) in deltas.into_iter().enumerate() {
             let Some(doc) = delta.document else { continue };
@@ -152,6 +186,45 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Build a Tier 3 provenance record from a SCIP index.
+///
+/// `source_id` is derived from producer name + `project_root` (or the
+/// .scip filename when metadata is absent), so re-imports of the same
+/// source refresh the record in place rather than growing the list.
+fn build_tier3_source(index: &scip::Index, scip_path: &std::path::Path) -> Tier3Source {
+    let (tool_name, tool_version, project_root) = match index.metadata.as_ref() {
+        Some(md) => {
+            let (tn, tv) = md
+                .tool_info
+                .as_ref()
+                .map(|ti| (ti.name.clone(), ti.version.clone()))
+                .unwrap_or_default();
+            (tn, tv, md.project_root.clone())
+        }
+        None => (String::new(), String::new(), String::new()),
+    };
+
+    let fingerprint = if project_root.is_empty() {
+        scip_path.display().to_string()
+    } else {
+        project_root.clone()
+    };
+    let source_id = sha256_hex(format!("{tool_name}:{fingerprint}").as_bytes());
+
+    let imported_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    Tier3Source {
+        source_id,
+        tool_name,
+        tool_version,
+        project_root,
+        imported_at_ms,
+    }
 }
 
 // ─── Conversion helpers ───────────────────────────────────────────────────────
