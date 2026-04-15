@@ -170,6 +170,11 @@ pub struct LipDatabase {
     symbol_embedding_models: HashMap<String, String>,
     /// Unix timestamps (ms) recording when each URI was last upserted.
     file_indexed_at: HashMap<String, i64>,
+    /// Provenance for Tier 3 ingestion batches (typically SCIP imports),
+    /// keyed by caller-supplied `source_id`. Surfaced through
+    /// `QueryIndexStatus` so clients can implement their own staleness
+    /// policy; the daemon never reasons about freshness itself.
+    tier3_sources: HashMap<String, crate::query_graph::types::Tier3Source>,
 }
 
 impl LipDatabase {
@@ -196,7 +201,26 @@ impl LipDatabase {
             symbol_embeddings: HashMap::new(),
             symbol_embedding_models: HashMap::new(),
             file_indexed_at: HashMap::new(),
+            tier3_sources: HashMap::new(),
         }
+    }
+
+    /// Record (or refresh) provenance for a Tier 3 ingestion batch.
+    /// Re-registering the same `source_id` overwrites the prior entry,
+    /// which is how clients refresh `imported_at_ms` after a re-import.
+    pub fn register_tier3_source(
+        &mut self,
+        source: crate::query_graph::types::Tier3Source,
+    ) {
+        self.tier3_sources.insert(source.source_id.clone(), source);
+    }
+
+    /// All currently-registered Tier 3 provenance records, sorted by
+    /// `source_id` for deterministic output.
+    pub fn tier3_sources(&self) -> Vec<crate::query_graph::types::Tier3Source> {
+        let mut out: Vec<_> = self.tier3_sources.values().cloned().collect();
+        out.sort_by(|a, b| a.source_id.cmp(&b.source_id));
+        out
     }
 
     // ── Mutations ─────────────────────────────────────────────────────────
@@ -902,6 +926,35 @@ impl LipDatabase {
         names
     }
 
+    /// Rank symbols semantically related to `query_vec` (produced by
+    /// `actual_model`) and return their display names as query-expansion
+    /// terms.
+    ///
+    /// Encapsulates the post-embedding work of the `QueryExpansion`
+    /// handler so the daemon-side wiring (filter results to symbols
+    /// embedded with `actual_model`, then resolve display names) is
+    /// pinned by a db-level test and cannot silently regress in the
+    /// session handler. Cross-model cosine scores are meaningless —
+    /// mixing them would rank random symbols highest.
+    pub fn query_expansion_terms(
+        &mut self,
+        query_vec: &[f32],
+        actual_model: &str,
+        top_k: usize,
+    ) -> Vec<String> {
+        let hits = self.nearest_symbol_by_vector(query_vec, top_k, None, Some(actual_model));
+        let uris: Vec<String> = hits.into_iter().map(|item| item.uri).collect();
+        uris.into_iter()
+            .map(|uri| match self.symbol_by_uri(&uri) {
+                Some(s) => s.display_name,
+                None => uri
+                    .rfind('#')
+                    .map(|i| uri[i + 1..].to_owned())
+                    .unwrap_or(uri),
+            })
+            .collect()
+    }
+
     /// Find the `top_k` symbols whose embedding is most similar (cosine) to `query_vec`.
     ///
     /// Mirrors `nearest_by_vector` but operates over `symbol_embeddings`.
@@ -910,6 +963,7 @@ impl LipDatabase {
         query_vec: &[f32],
         top_k: usize,
         exclude_uri: Option<&str>,
+        model_filter: Option<&str>,
     ) -> Vec<crate::query_graph::types::NearestItem> {
         let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if q_norm == 0.0 || top_k == 0 {
@@ -919,6 +973,17 @@ impl LipDatabase {
             .symbol_embeddings
             .iter()
             .filter(|(uri, _)| exclude_uri.map(|e| e != uri.as_str()).unwrap_or(true))
+            .filter(|(uri, _)| {
+                // When `model_filter` is set, skip any symbol whose stored
+                // embedding was produced by a different model — cross-model
+                // cosine scores are not meaningful.
+                model_filter.is_none_or(|want| {
+                    self.symbol_embedding_models
+                        .get(uri.as_str())
+                        .map(|m| m == want)
+                        .unwrap_or(false)
+                })
+            })
             .filter_map(|(uri, vec)| {
                 if vec.len() != query_vec.len() {
                     return None;
@@ -2849,6 +2914,59 @@ impl Greeter {
         );
     }
 
+    // ── tier3 provenance ──────────────────────────────────────────────────
+
+    #[test]
+    fn tier3_sources_sorted_by_source_id() {
+        use crate::query_graph::types::Tier3Source;
+        let mut db = LipDatabase::new();
+        db.register_tier3_source(Tier3Source {
+            source_id: "b".into(),
+            tool_name: "scip-typescript".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///b".into(),
+            imported_at_ms: 2,
+        });
+        db.register_tier3_source(Tier3Source {
+            source_id: "a".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///a".into(),
+            imported_at_ms: 1,
+        });
+        let got = db.tier3_sources();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].source_id, "a");
+        assert_eq!(got[1].source_id, "b");
+    }
+
+    /// Re-registering the same `source_id` must overwrite the prior
+    /// record in place, refreshing `imported_at_ms`. This is the
+    /// mechanism clients rely on to mark a fresh import.
+    #[test]
+    fn tier3_reregistration_overwrites_in_place() {
+        use crate::query_graph::types::Tier3Source;
+        let mut db = LipDatabase::new();
+        db.register_tier3_source(Tier3Source {
+            source_id: "same".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.3.0".into(),
+            project_root: "file:///r".into(),
+            imported_at_ms: 1,
+        });
+        db.register_tier3_source(Tier3Source {
+            source_id: "same".into(),
+            tool_name: "scip-rust".into(),
+            tool_version: "0.4.0".into(),
+            project_root: "file:///r".into(),
+            imported_at_ms: 99,
+        });
+        let got = db.tier3_sources();
+        assert_eq!(got.len(), 1, "re-registration must not grow the list");
+        assert_eq!(got[0].tool_version, "0.4.0");
+        assert_eq!(got[0].imported_at_ms, 99);
+    }
+
     // ── symbol_embeddings / nearest_symbol_by_vector ──────────────────────
 
     #[test]
@@ -2872,7 +2990,7 @@ impl Greeter {
         db.set_symbol_embedding("lip://local/f.rs#baz", vec![0.0, 0.0, 1.0], "test-model");
 
         let query = vec![1.0_f32, 0.0, 0.0];
-        let results = db.nearest_symbol_by_vector(&query, 3, None);
+        let results = db.nearest_symbol_by_vector(&query, 3, None, None);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].uri, "lip://local/f.rs#foo");
         assert!(
@@ -2889,7 +3007,7 @@ impl Greeter {
         db.set_symbol_embedding("lip://local/f.rs#bar", vec![0.9, 0.1], "test-model");
 
         let query = vec![1.0_f32, 0.0];
-        let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"));
+        let results = db.nearest_symbol_by_vector(&query, 5, Some("lip://local/f.rs#foo"), None);
         assert!(
             !results.iter().any(|r| r.uri == "lip://local/f.rs#foo"),
             "excluded URI must not appear in results"
@@ -2900,8 +3018,77 @@ impl Greeter {
     #[test]
     fn nearest_symbol_by_vector_empty_store_returns_empty() {
         let db = LipDatabase::new();
-        let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None);
+        let results = db.nearest_symbol_by_vector(&[1.0, 0.0], 5, None, None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn nearest_symbol_by_vector_filters_by_model() {
+        let mut db = LipDatabase::new();
+        // Two symbols with near-identical vectors but different embedding
+        // models. A query pinned to model-a must not match the model-b symbol
+        // even though the raw cosine score would be high.
+        db.set_symbol_embedding("lip://local/f.rs#alpha", vec![1.0, 0.0], "model-a");
+        db.set_symbol_embedding("lip://local/f.rs#beta", vec![1.0, 0.0], "model-b");
+
+        let query = vec![1.0_f32, 0.0];
+
+        let all = db.nearest_symbol_by_vector(&query, 5, None, None);
+        assert_eq!(all.len(), 2, "without filter both symbols rank");
+
+        let pinned = db.nearest_symbol_by_vector(&query, 5, None, Some("model-a"));
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].uri, "lip://local/f.rs#alpha");
+    }
+
+    /// Pins the `QueryExpansion` handler contract: when the embedding
+    /// service returns model X for the query, the subsequent ranking
+    /// must be restricted to symbols embedded with model X.
+    ///
+    /// This test mirrors the exact call the session handler makes
+    /// (see `session.rs::ClientMessage::QueryExpansion`). A regression
+    /// that passes `None` for the model filter — which would silently
+    /// re-introduce cross-model cosine scoring — would cause
+    /// `cross-model-vector` to appear in the expansion terms and fail
+    /// this assertion.
+    #[test]
+    fn query_expansion_terms_rejects_cross_model_scoring() {
+        let mut db = LipDatabase::new();
+
+        // Two symbols in different models, both aligned with the query
+        // vector. Naive (unfiltered) cosine would rank both highly.
+        let f_uri = "file:///src/f.rs".to_owned();
+        db.upsert_file(
+            f_uri.clone(),
+            "fn matching_model() {}\nfn cross_model_vector() {}".into(),
+            "rust".into(),
+        );
+        db.set_symbol_embedding(
+            "lip://local/f.rs#matching_model",
+            vec![1.0, 0.0],
+            "model-a",
+        );
+        db.set_symbol_embedding(
+            "lip://local/f.rs#cross_model_vector",
+            vec![1.0, 0.0],
+            "model-b",
+        );
+
+        let query_vec = vec![1.0_f32, 0.0];
+
+        // The embedding service would have returned "model-a" for the
+        // query. Handler passes that through.
+        let terms = db.query_expansion_terms(&query_vec, "model-a", 5);
+
+        assert!(
+            terms.iter().any(|t| t.contains("matching_model")),
+            "same-model term must appear: got {terms:?}"
+        );
+        assert!(
+            !terms.iter().any(|t| t.contains("cross_model_vector")),
+            "cross-model term must NOT appear — indicates the filter was \
+             bypassed: got {terms:?}"
+        );
     }
 
     // ── outliers ──────────────────────────────────────────────────────────

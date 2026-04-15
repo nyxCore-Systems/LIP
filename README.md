@@ -379,7 +379,7 @@ Requires Rust 1.78+. No system `protoc` required.
 
 ## Status
 
-v2.0 — `ExplainMatch` (chunk-level explanation: which lines in a result file drove the match), model provenance (`FileStatus` exposes the embedding model per file; `IndexStatus` warns when the index contains mixed-model vectors). v1.9: `filter` glob + `min_score` on all NN calls, `GetCentroid`, `QueryStaleEmbeddings`. v1.8: `FindBoundaries`, `SemanticDiff`, `QueryNearestInStore` (cross-repo federation), `QueryNoveltyScore`, `ExtractTerminology`, `PruneDeleted`. v1.7: 6 semantic retrieval primitives. v1.6: `ReindexFiles`, `Similarity`, `QueryExpansion`, `Cluster`, `ExportEmbeddings`. Wire format is JSON.
+v2.1 — `StreamContext` (token-budgeted RAG context streaming): callers stream symbols ranked by relevance to a cursor and stop reading when the prompt budget is full instead of fetching top-k and locally truncating; `protocol_version` bumped to `2`. v2.0 — `ExplainMatch` (chunk-level explanation: which lines in a result file drove the match), model provenance (`FileStatus` exposes the embedding model per file; `IndexStatus` warns when the index contains mixed-model vectors). v1.9: `filter` glob + `min_score` on all NN calls, `GetCentroid`, `QueryStaleEmbeddings`. v1.8: `FindBoundaries`, `SemanticDiff`, `QueryNearestInStore` (cross-repo federation), `QueryNoveltyScore`, `ExtractTerminology`, `PruneDeleted`. v1.7: 6 semantic retrieval primitives. v1.6: `ReindexFiles`, `Similarity`, `QueryExpansion`, `Cluster`, `ExportEmbeddings`. Wire format is JSON.
 
 ---
 

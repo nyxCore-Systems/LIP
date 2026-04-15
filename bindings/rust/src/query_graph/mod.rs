@@ -39,6 +39,6 @@ pub mod types;
 
 pub use db::LipDatabase;
 pub use types::{
-    ApiSurface, BatchQueryResult, BlastRadiusResult, ClientMessage, ImpactItem, RiskLevel,
-    ServerMessage, SimilarSymbol,
+    ApiSurface, BatchQueryResult, BlastRadiusResult, ClientMessage, ErrorCode, ImpactItem,
+    RiskLevel, ServerMessage, SimilarSymbol, Tier3Source,
 };

@@ -237,7 +237,13 @@ pub enum ServerMessage {
         stale_uris: Vec<String>,
     },
     Error {
+        /// Human-readable error string. Still free-form.
         message: String,
+        /// Machine-readable code. Clients branch on this instead of
+        /// string-matching `message`. Defaults to
+        /// [`ErrorCode::Internal`] on older daemons that predate this field.
+        #[serde(default)]
+        code: ErrorCode,
     },
     /// Response to [`ClientMessage::EmbeddingBatch`].
     ///
@@ -266,6 +272,13 @@ pub enum ServerMessage {
         mixed_models: bool,
         /// Distinct model names present across all stored file embeddings, sorted.
         models_in_index: Vec<String>,
+        /// Provenance for every Tier 3 ingestion source registered on this
+        /// daemon, sorted by `source_id`. Added in v2.1 to let clients
+        /// surface "SCIP imported N hours ago" warnings without the daemon
+        /// taking a position on what "stale" means. `#[serde(default)]`;
+        /// older daemons return an empty vector.
+        #[serde(default)]
+        tier3_sources: Vec<Tier3Source>,
     },
     /// Response to [`ClientMessage::QueryFileStatus`].
     FileStatusResult {
@@ -306,6 +319,16 @@ pub enum ServerMessage {
         daemon_version: String,
         /// Monotonic integer bumped only on breaking wire-format changes.
         protocol_version: u32,
+        /// Snake-case names of every `ClientMessage` `type` tag this daemon
+        /// understands. Lets clients probe support for an individual message
+        /// without writing "handshake then pray" code — a forward-compatible
+        /// alternative to comparing `protocol_version` integers.
+        ///
+        /// Older daemons predating this field omit it; serde defaults to an
+        /// empty vector on the client side, which clients should treat as
+        /// "unknown — fall back to `protocol_version`."
+        #[serde(default)]
+        supported_messages: Vec<String>,
     },
 
     // ── v1.6 features ────────────────────────────────────────────────────
@@ -444,6 +467,143 @@ pub enum ServerMessage {
         /// The embedding model used to score the chunks.
         query_model: String,
     },
+
+    // ── v2.1 features ────────────────────────────────────────────────────
+    /// Sent in place of [`ServerMessage::Error`] when the client sent a
+    /// well-formed JSON object whose `"type"` tag is not recognised by this
+    /// daemon. The connection stays open so the client can fall back to a
+    /// supported message instead of disconnecting.
+    UnknownMessage {
+        /// The unrecognised `type` tag, when extractable from the request.
+        message_type: Option<String>,
+        /// Snake-case names of every `ClientMessage` `type` tag this daemon
+        /// understands — same list as `HandshakeResult.supported_messages`.
+        supported: Vec<String>,
+    },
+
+    /// Response to [`ClientMessage::EmbedText`].
+    EmbedTextResult {
+        /// Raw embedding vector. Empty when the endpoint returned no data.
+        vector: Vec<f32>,
+        /// Model that produced the vector (after any client-side override).
+        embedding_model: String,
+    },
+
+    /// One frame of a [`ClientMessage::StreamContext`] response: a single
+    /// ranked symbol with its estimated prompt token cost.
+    ///
+    /// Wire tag is `"symbol_info"`. Multiple frames precede the
+    /// [`ServerMessage::EndStream`] terminator.
+    SymbolInfo {
+        symbol_info: crate::schema::OwnedSymbolInfo,
+        /// Heuristic score in `[0.0, 1.0]`; higher = more relevant to the cursor.
+        relevance_score: f32,
+        /// Estimated prompt-token cost of this symbol's serialised context.
+        token_cost: u32,
+    },
+
+    /// Terminator frame for a [`ClientMessage::StreamContext`] response.
+    ///
+    /// Wire tag is `"end_stream"`. Exactly one terminator follows N
+    /// [`ServerMessage::SymbolInfo`] frames.
+    EndStream {
+        reason: EndStreamReason,
+        /// Number of `SymbolInfo` frames emitted before this terminator.
+        emitted: u32,
+        /// Total candidate symbols the daemon considered.
+        total_candidates: u32,
+        /// Set only when `reason == EndStreamReason::Error`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// Provenance record for a Tier 3 ingestion source (typically a SCIP
+/// import). Exposes *what* produced the imported symbols and *when* —
+/// nothing about whether the source repo has since changed. Staleness
+/// policy is left to the caller: compare `imported_at_ms` against a
+/// freshness threshold, or pin `project_root` externally to a commit
+/// hash out-of-band. The daemon deliberately does no detection of its
+/// own; stale Tier 3 symbols live in the graph at their original
+/// confidence until the source is re-imported.
+///
+/// Returned inside [`ServerMessage::IndexStatusResult::tier3_sources`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tier3Source {
+    /// Caller-supplied stable identifier (e.g. `sha256("scip-rust:/repo")`).
+    /// Re-registering the same `source_id` overwrites the prior record,
+    /// which is the intended mechanism for refreshing `imported_at_ms`
+    /// after a re-import.
+    pub source_id: String,
+    /// Producer name from SCIP `Metadata.tool_info.name` (e.g.
+    /// `"scip-rust"`). Empty when the import path had no metadata.
+    pub tool_name: String,
+    /// Producer version from SCIP `Metadata.tool_info.version`.
+    pub tool_version: String,
+    /// SCIP `Metadata.project_root` — a `file://` URL identifying the
+    /// source tree the producer indexed. Clients that want commit-level
+    /// staleness can resolve this to a working tree and compare HEAD.
+    pub project_root: String,
+    /// Unix timestamp (ms) when the daemon accepted the registration.
+    /// Re-registration updates this in place.
+    pub imported_at_ms: i64,
+}
+
+/// Stable, machine-readable category for [`ServerMessage::Error`].
+///
+/// Clients branch on this field instead of string-matching the free-form
+/// `message`. Older daemons predating this field deserialize as
+/// [`ErrorCode::Internal`] via `#[serde(default)]`, so forward-compatible
+/// clients should treat `Internal` as "no classification available."
+///
+/// The set is intentionally small and stable. New codes are additive —
+/// adding one is non-breaking; renaming or removing one is breaking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request used a `type` tag this daemon does not understand.
+    /// Preferred reply is [`ServerMessage::UnknownMessage`]; this code
+    /// exists for legacy paths that still emit `Error`.
+    UnknownMessageType,
+    /// The caller asked for an embedding model this daemon does not
+    /// recognize. Retrying is pointless until the model is configured.
+    UnknownModel,
+    /// The daemon has no embedding service configured at all
+    /// (`LIP_EMBEDDING_URL` unset). Distinct from [`UnknownModel`]:
+    /// this is a daemon-side configuration gap, not a caller problem.
+    EmbeddingNotConfigured,
+    /// The requested URI has no cached embedding yet. The remedy is to
+    /// call `EmbeddingBatch` first; the model itself is fine. Clients
+    /// can distinguish this from [`UnknownModel`] / [`EmbeddingNotConfigured`]
+    /// to drive "index-then-retry" flows instead of giving up.
+    NoEmbedding,
+    /// A cursor position (line/col or byte offset) fell outside the
+    /// target file. Emitted e.g. by `StreamContext`.
+    CursorOutOfRange,
+    /// A writer or exclusive index operation is in progress; the
+    /// request cannot proceed right now. Retry is safe.
+    IndexLocked,
+    /// The request was well-formed on the wire but used incorrectly —
+    /// e.g. a nested `Batch`, or a `StreamContext` submitted inside a
+    /// `Batch`. Callers should not blindly retry; the request must be
+    /// changed. Distinct from [`Internal`], which indicates a
+    /// daemon-side failure.
+    InvalidRequest,
+    /// Anything not captured by a more specific code. Default.
+    #[default]
+    Internal,
+}
+
+/// Why a [`ServerMessage::EndStream`] terminated a context stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndStreamReason {
+    /// Daemon emitted enough symbols to reach `max_tokens`.
+    BudgetReached,
+    /// No more relevant candidates exist.
+    Exhausted,
+    /// An error terminated the stream; see [`ServerMessage::EndStream::error`].
+    Error,
 }
 
 /// A contiguous region of a file that contributes to a semantic match.
@@ -870,9 +1030,185 @@ pub enum ClientMessage {
         /// Override the embedding model for this request.
         model: Option<String>,
     },
+
+    // ── v2.1 features ────────────────────────────────────────────────────
+    /// Embed an arbitrary text string and return the raw vector.
+    ///
+    /// Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText`
+    /// (embeds internally but discards the vector). Callers that want to feed
+    /// the embedding into their own scoring (re-ranking, centroid arithmetic,
+    /// federated nearest-neighbour) need the vector itself.
+    EmbedText {
+        text: String,
+        /// Optional model override. `None` uses the daemon's default.
+        #[serde(default)]
+        model: Option<String>,
+    },
+
+    /// Stream symbols ordered by relevance to `cursor_position` in `file_uri`,
+    /// stopping when the caller closes the connection or when the daemon has
+    /// emitted enough symbols to reach `max_tokens` estimated prompt cost.
+    ///
+    /// Response is N [`ServerMessage::SymbolInfo`] frames followed by exactly
+    /// one [`ServerMessage::EndStream`] terminator.
+    StreamContext {
+        file_uri: String,
+        cursor_position: OwnedRange,
+        max_tokens: u32,
+        /// Optional: restrict to a specific embedding model.
+        #[serde(default)]
+        model: Option<String>,
+    },
+
+    /// Record provenance for a Tier 3 ingestion batch. Typically called
+    /// once by `lip import --push-to-daemon` before streaming SCIP
+    /// `Delta` messages, so `QueryIndexStatus` can later report which
+    /// producer generated the imported symbols and when.
+    ///
+    /// Idempotent: re-registering the same `source_id` overwrites the
+    /// previous record, refreshing `imported_at_ms` to the new
+    /// import time. Acknowledged with `DeltaAck`.
+    ///
+    /// The daemon does *not* infer freshness from this record — stale
+    /// Tier 3 symbols remain in the graph at their original confidence
+    /// until the caller re-imports. Surfacing the provenance lets
+    /// clients decide when to warn a user that imported data has aged.
+    RegisterTier3Source {
+        source: Tier3Source,
+    },
 }
 
 impl ClientMessage {
+    /// Snake-case `type` tags of every variant this daemon understands.
+    ///
+    /// Returned by `Handshake` and `UnknownMessage` so clients can probe
+    /// support for individual messages without parsing protocol-version
+    /// integers. Order is stable; callers that compare lists should sort
+    /// or hash first.
+    pub fn supported_messages() -> Vec<String> {
+        [
+            "manifest",
+            "delta",
+            "query_definition",
+            "query_references",
+            "query_hover",
+            "query_blast_radius",
+            "query_workspace_symbols",
+            "query_document_symbols",
+            "query_dead_symbols",
+            "annotation_set",
+            "annotation_get",
+            "annotation_list",
+            "annotation_workspace_list",
+            "batch_query",
+            "batch",
+            "similar_symbols",
+            "query_stale_files",
+            "load_slice",
+            "embedding_batch",
+            "query_index_status",
+            "query_file_status",
+            "query_nearest",
+            "query_nearest_by_text",
+            "batch_query_nearest_by_text",
+            "query_nearest_by_symbol",
+            "batch_annotation_get",
+            "handshake",
+            "reindex_files",
+            "similarity",
+            "query_expansion",
+            "cluster",
+            "export_embeddings",
+            "query_nearest_by_contrast",
+            "query_outliers",
+            "query_semantic_drift",
+            "similarity_matrix",
+            "find_semantic_counterpart",
+            "query_coverage",
+            "find_boundaries",
+            "semantic_diff",
+            "query_nearest_in_store",
+            "query_novelty_score",
+            "extract_terminology",
+            "prune_deleted",
+            "get_centroid",
+            "query_stale_embeddings",
+            "explain_match",
+            "embed_text",
+            "stream_context",
+            "register_tier3_source",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
+    /// Snake-case `type` tag for a specific variant.
+    ///
+    /// Exists primarily as a drift guard: the exhaustive match below
+    /// fails to compile when a new [`ClientMessage`] variant is added
+    /// without acknowledgement, and the paired
+    /// `supported_messages_covers_all_variants` test then enforces
+    /// that the new tag also appears in
+    /// [`ClientMessage::supported_messages`].
+    ///
+    /// Update [`ClientMessage::supported_messages`] in lockstep with
+    /// the arms here.
+    pub fn variant_tag(&self) -> &'static str {
+        match self {
+            ClientMessage::Manifest(_) => "manifest",
+            ClientMessage::Delta { .. } => "delta",
+            ClientMessage::QueryDefinition { .. } => "query_definition",
+            ClientMessage::QueryReferences { .. } => "query_references",
+            ClientMessage::QueryHover { .. } => "query_hover",
+            ClientMessage::QueryBlastRadius { .. } => "query_blast_radius",
+            ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
+            ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
+            ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
+            ClientMessage::AnnotationSet { .. } => "annotation_set",
+            ClientMessage::AnnotationGet { .. } => "annotation_get",
+            ClientMessage::AnnotationList { .. } => "annotation_list",
+            ClientMessage::AnnotationWorkspaceList { .. } => "annotation_workspace_list",
+            ClientMessage::BatchQuery { .. } => "batch_query",
+            ClientMessage::Batch { .. } => "batch",
+            ClientMessage::SimilarSymbols { .. } => "similar_symbols",
+            ClientMessage::QueryStaleFiles { .. } => "query_stale_files",
+            ClientMessage::LoadSlice { .. } => "load_slice",
+            ClientMessage::EmbeddingBatch { .. } => "embedding_batch",
+            ClientMessage::QueryIndexStatus => "query_index_status",
+            ClientMessage::QueryFileStatus { .. } => "query_file_status",
+            ClientMessage::QueryNearest { .. } => "query_nearest",
+            ClientMessage::QueryNearestByText { .. } => "query_nearest_by_text",
+            ClientMessage::BatchQueryNearestByText { .. } => "batch_query_nearest_by_text",
+            ClientMessage::QueryNearestBySymbol { .. } => "query_nearest_by_symbol",
+            ClientMessage::BatchAnnotationGet { .. } => "batch_annotation_get",
+            ClientMessage::Handshake { .. } => "handshake",
+            ClientMessage::ReindexFiles { .. } => "reindex_files",
+            ClientMessage::Similarity { .. } => "similarity",
+            ClientMessage::QueryExpansion { .. } => "query_expansion",
+            ClientMessage::Cluster { .. } => "cluster",
+            ClientMessage::ExportEmbeddings { .. } => "export_embeddings",
+            ClientMessage::QueryNearestByContrast { .. } => "query_nearest_by_contrast",
+            ClientMessage::QueryOutliers { .. } => "query_outliers",
+            ClientMessage::QuerySemanticDrift { .. } => "query_semantic_drift",
+            ClientMessage::SimilarityMatrix { .. } => "similarity_matrix",
+            ClientMessage::FindSemanticCounterpart { .. } => "find_semantic_counterpart",
+            ClientMessage::QueryCoverage { .. } => "query_coverage",
+            ClientMessage::FindBoundaries { .. } => "find_boundaries",
+            ClientMessage::SemanticDiff { .. } => "semantic_diff",
+            ClientMessage::QueryNearestInStore { .. } => "query_nearest_in_store",
+            ClientMessage::QueryNoveltyScore { .. } => "query_novelty_score",
+            ClientMessage::ExtractTerminology { .. } => "extract_terminology",
+            ClientMessage::PruneDeleted => "prune_deleted",
+            ClientMessage::GetCentroid { .. } => "get_centroid",
+            ClientMessage::QueryStaleEmbeddings { .. } => "query_stale_embeddings",
+            ClientMessage::ExplainMatch { .. } => "explain_match",
+            ClientMessage::EmbedText { .. } => "embed_text",
+            ClientMessage::StreamContext { .. } => "stream_context",
+            ClientMessage::RegisterTier3Source { .. } => "register_tier3_source",
+        }
+    }
+
     /// Returns `true` for any message that may appear inside a [`ClientMessage::Batch`].
     /// A `Batch` itself is excluded to prevent nesting. `LoadSlice` is also excluded
     /// because it requires mutable database access outside the read-only batch lock.
@@ -975,18 +1311,408 @@ mod tests {
     fn handshake_result_round_trips() {
         let msg = ServerMessage::HandshakeResult {
             daemon_version: "1.5.0".into(),
-            protocol_version: 1,
+            protocol_version: 2,
+            supported_messages: ClientMessage::supported_messages(),
         };
         let rt = round_trip_server(&msg);
         let ServerMessage::HandshakeResult {
             daemon_version,
             protocol_version,
+            supported_messages,
         } = rt
         else {
             panic!("wrong variant");
         };
         assert_eq!(daemon_version, "1.5.0");
-        assert_eq!(protocol_version, 1);
+        assert_eq!(protocol_version, 2);
+        assert!(supported_messages.contains(&"handshake".to_string()));
+        assert!(supported_messages.contains(&"stream_context".to_string()));
+    }
+
+    #[test]
+    fn register_tier3_source_round_trips() {
+        let msg = ClientMessage::RegisterTier3Source {
+            source: Tier3Source {
+                source_id: "sha256:abc".into(),
+                tool_name: "scip-rust".into(),
+                tool_version: "0.3.1".into(),
+                project_root: "file:///repo".into(),
+                imported_at_ms: 1_700_000_000_000,
+            },
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::RegisterTier3Source { source } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(source.source_id, "sha256:abc");
+        assert_eq!(source.tool_name, "scip-rust");
+        assert_eq!(source.tool_version, "0.3.1");
+        assert_eq!(source.project_root, "file:///repo");
+        assert_eq!(source.imported_at_ms, 1_700_000_000_000);
+    }
+
+    /// Older daemons (pre-v2.1) will serialise `IndexStatusResult`
+    /// without a `tier3_sources` field; newer deserialisers must
+    /// treat that as an empty list, not a parse failure.
+    #[test]
+    fn index_status_result_accepts_missing_tier3_sources() {
+        let legacy = serde_json::json!({
+            "type": "index_status_result",
+            "indexed_files": 7,
+            "pending_embedding_files": 0,
+            "last_updated_ms": 123,
+            "embedding_model": null,
+            "mixed_models": false,
+            "models_in_index": []
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        let ServerMessage::IndexStatusResult { tier3_sources, .. } = parsed else {
+            panic!("wrong variant");
+        };
+        assert!(tier3_sources.is_empty());
+    }
+
+    /// Drift guard: every tag produced by [`ClientMessage::variant_tag`]
+    /// must also appear in [`ClientMessage::supported_messages`], and
+    /// the two lists must be the same size. Combined with the
+    /// compile-time exhaustiveness of `variant_tag`'s match, this
+    /// prevents a new [`ClientMessage`] variant from being added
+    /// without being advertised in the handshake capability list.
+    #[test]
+    fn supported_messages_covers_all_variants() {
+        // One representative instance per variant. Payloads are the
+        // cheapest legal construction — we only exercise `variant_tag`,
+        // not behavior.
+        let samples: Vec<ClientMessage> = vec![
+            ClientMessage::Manifest(crate::daemon::manifest::ManifestRequest {
+                repo_root: String::new(),
+                merkle_root: String::new(),
+                dep_tree_hash: String::new(),
+                lip_version: String::new(),
+            }),
+            ClientMessage::Delta {
+                seq: 0,
+                action: crate::schema::Action::Upsert,
+                document: crate::schema::OwnedDocument {
+                    uri: String::new(),
+                    content_hash: String::new(),
+                    language: String::new(),
+                    occurrences: vec![],
+                    symbols: vec![],
+                    merkle_path: String::new(),
+                    edges: vec![],
+                    source_text: None,
+                },
+            },
+            ClientMessage::QueryDefinition {
+                uri: String::new(),
+                line: 0,
+                col: 0,
+            },
+            ClientMessage::QueryReferences {
+                symbol_uri: String::new(),
+                limit: None,
+            },
+            ClientMessage::QueryHover {
+                uri: String::new(),
+                line: 0,
+                col: 0,
+            },
+            ClientMessage::QueryBlastRadius {
+                symbol_uri: String::new(),
+            },
+            ClientMessage::QueryWorkspaceSymbols {
+                query: String::new(),
+                limit: None,
+            },
+            ClientMessage::QueryDocumentSymbols {
+                uri: String::new(),
+            },
+            ClientMessage::QueryDeadSymbols { limit: None },
+            ClientMessage::AnnotationSet {
+                symbol_uri: String::new(),
+                key: String::new(),
+                value: String::new(),
+                author_id: String::new(),
+            },
+            ClientMessage::AnnotationGet {
+                symbol_uri: String::new(),
+                key: String::new(),
+            },
+            ClientMessage::AnnotationList {
+                symbol_uri: String::new(),
+            },
+            ClientMessage::AnnotationWorkspaceList {
+                key_prefix: String::new(),
+            },
+            ClientMessage::BatchQuery { queries: vec![] },
+            ClientMessage::Batch { requests: vec![] },
+            ClientMessage::SimilarSymbols {
+                query: String::new(),
+                limit: 0,
+            },
+            ClientMessage::QueryStaleFiles { files: vec![] },
+            ClientMessage::LoadSlice {
+                slice: crate::schema::OwnedDependencySlice {
+                    manager: String::new(),
+                    package_name: String::new(),
+                    version: String::new(),
+                    package_hash: String::new(),
+                    content_hash: String::new(),
+                    symbols: vec![],
+                    slice_url: String::new(),
+                    built_at_ms: 0,
+                },
+            },
+            ClientMessage::EmbeddingBatch {
+                uris: vec![],
+                model: None,
+            },
+            ClientMessage::QueryIndexStatus,
+            ClientMessage::QueryFileStatus { uri: String::new() },
+            ClientMessage::QueryNearest {
+                uri: String::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNearestByText {
+                text: String::new(),
+                top_k: 0,
+                model: None,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::BatchQueryNearestByText {
+                queries: vec![],
+                top_k: 0,
+                model: None,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNearestBySymbol {
+                symbol_uri: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::BatchAnnotationGet {
+                uris: vec![],
+                key: String::new(),
+            },
+            ClientMessage::Handshake {
+                client_version: None,
+            },
+            ClientMessage::ReindexFiles { uris: vec![] },
+            ClientMessage::Similarity {
+                uri_a: String::new(),
+                uri_b: String::new(),
+            },
+            ClientMessage::QueryExpansion {
+                query: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::Cluster {
+                uris: vec![],
+                radius: 0.0,
+            },
+            ClientMessage::ExportEmbeddings { uris: vec![] },
+            ClientMessage::QueryNearestByContrast {
+                like_uri: String::new(),
+                unlike_uri: String::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryOutliers {
+                uris: vec![],
+                top_k: 0,
+            },
+            ClientMessage::QuerySemanticDrift {
+                uri_a: String::new(),
+                uri_b: String::new(),
+            },
+            ClientMessage::SimilarityMatrix { uris: vec![] },
+            ClientMessage::FindSemanticCounterpart {
+                uri: String::new(),
+                candidates: vec![],
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryCoverage {
+                root: String::new(),
+            },
+            ClientMessage::FindBoundaries {
+                uri: String::new(),
+                chunk_lines: 0,
+                threshold: 0.0,
+                model: None,
+            },
+            ClientMessage::SemanticDiff {
+                content_a: String::new(),
+                content_b: String::new(),
+                top_k: 0,
+                model: None,
+            },
+            ClientMessage::QueryNearestInStore {
+                uri: String::new(),
+                store: std::collections::HashMap::new(),
+                top_k: 0,
+                filter: None,
+                min_score: None,
+            },
+            ClientMessage::QueryNoveltyScore { uris: vec![] },
+            ClientMessage::ExtractTerminology {
+                uris: vec![],
+                top_k: 0,
+            },
+            ClientMessage::PruneDeleted,
+            ClientMessage::GetCentroid { uris: vec![] },
+            ClientMessage::QueryStaleEmbeddings {
+                root: String::new(),
+            },
+            ClientMessage::ExplainMatch {
+                query: String::new(),
+                result_uri: String::new(),
+                top_k: 0,
+                chunk_lines: 0,
+                model: None,
+            },
+            ClientMessage::EmbedText {
+                text: String::new(),
+                model: None,
+            },
+            ClientMessage::StreamContext {
+                file_uri: String::new(),
+                cursor_position: crate::schema::OwnedRange::default(),
+                max_tokens: 0,
+                model: None,
+            },
+            ClientMessage::RegisterTier3Source {
+                source: Tier3Source {
+                    source_id: String::new(),
+                    tool_name: String::new(),
+                    tool_version: String::new(),
+                    project_root: String::new(),
+                    imported_at_ms: 0,
+                },
+            },
+        ];
+
+        let supported = ClientMessage::supported_messages();
+        for m in &samples {
+            let tag = m.variant_tag();
+            assert!(
+                supported.iter().any(|s| s == tag),
+                "variant tag {tag:?} missing from supported_messages()"
+            );
+        }
+        assert_eq!(
+            samples.len(),
+            supported.len(),
+            "variant count drifted from supported_messages() length"
+        );
+    }
+
+    #[test]
+    fn embed_text_request_round_trips() {
+        let msg = ClientMessage::EmbedText {
+            text: "verify token expiry".into(),
+            model: Some("text-embedding-3-small".into()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "embed_text");
+        assert_eq!(json["text"], "verify token expiry");
+        assert_eq!(json["model"], "text-embedding-3-small");
+
+        let rt = round_trip_client(&msg);
+        let ClientMessage::EmbedText { text, model } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(text, "verify token expiry");
+        assert_eq!(model.as_deref(), Some("text-embedding-3-small"));
+    }
+
+    #[test]
+    fn embed_text_result_round_trips() {
+        let msg = ServerMessage::EmbedTextResult {
+            vector: vec![0.1, 0.2, -0.3],
+            embedding_model: "text-embedding-3-small".into(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "embed_text_result");
+        assert_eq!(json["embedding_model"], "text-embedding-3-small");
+
+        let rt = round_trip_server(&msg);
+        let ServerMessage::EmbedTextResult {
+            vector,
+            embedding_model,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(vector, vec![0.1, 0.2, -0.3]);
+        assert_eq!(embedding_model, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn stream_context_request_round_trips() {
+        let msg = ClientMessage::StreamContext {
+            file_uri: "file:///src/main.rs".into(),
+            cursor_position: OwnedRange {
+                start_line: 10,
+                start_char: 4,
+                end_line: 10,
+                end_char: 4,
+            },
+            max_tokens: 4096,
+            model: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "stream_context");
+        assert_eq!(json["max_tokens"], 4096);
+        let rt = round_trip_client(&msg);
+        let ClientMessage::StreamContext {
+            file_uri,
+            max_tokens,
+            ..
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(file_uri, "file:///src/main.rs");
+        assert_eq!(max_tokens, 4096);
+    }
+
+    #[test]
+    fn end_stream_frame_round_trips() {
+        let msg = ServerMessage::EndStream {
+            reason: EndStreamReason::BudgetReached,
+            emitted: 3,
+            total_candidates: 12,
+            error: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "end_stream");
+        assert_eq!(json["reason"], "budget_reached");
+        // Optional `error` field omitted when None.
+        assert!(json.get("error").is_none());
+
+        let rt = round_trip_server(&msg);
+        let ServerMessage::EndStream {
+            reason,
+            emitted,
+            total_candidates,
+            error,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(reason, EndStreamReason::BudgetReached);
+        assert_eq!(emitted, 3);
+        assert_eq!(total_candidates, 12);
+        assert!(error.is_none());
     }
 
     #[test]
