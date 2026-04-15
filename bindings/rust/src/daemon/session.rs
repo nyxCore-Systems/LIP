@@ -6,10 +6,10 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-use crate::query_graph::{BatchQueryResult, ClientMessage, LipDatabase, ServerMessage};
+use crate::query_graph::{BatchQueryResult, ClientMessage, ErrorCode, LipDatabase, ServerMessage};
 use crate::schema::{Action, IndexingState, OwnedAnnotationEntry, OwnedRange};
 
-use super::embedding::EmbeddingClient;
+use super::embedding::{EmbedError, EmbeddingClient};
 use super::journal::{Journal, JournalEntry};
 use super::manifest::ManifestResponse;
 use super::tier2_manager::VerificationJob;
@@ -17,7 +17,23 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 
 /// Monotonic protocol version. Bumped only on breaking wire-format changes.
 /// Clients can detect drift by comparing against this value in `HandshakeResult`.
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
+
+/// Convert a classified [`EmbedError`] into the appropriate wire-level
+/// error response. Centralises the mapping so every embedding call site
+/// reports the same [`ErrorCode`] category for the same failure mode.
+fn embed_error_response(e: EmbedError) -> ServerMessage {
+    let code = match e {
+        EmbedError::UnknownModel(_) => ErrorCode::UnknownModel,
+        EmbedError::Transport(_) | EmbedError::Protocol(_) | EmbedError::Http(_) => {
+            ErrorCode::Internal
+        }
+    };
+    ServerMessage::Error {
+        message: format!("embedding failed: {e}"),
+        code,
+    }
+}
 
 /// Per-connection session state.
 pub struct Session {
@@ -88,13 +104,51 @@ impl Session {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("parse error: {e}");
-                    let err = ServerMessage::Error {
-                        message: e.to_string(),
+                    let err_text = e.to_string();
+                    // Unknown-variant parses are recoverable: the JSON was
+                    // well-formed but carried a `type` tag this daemon
+                    // doesn't know. Surface it as `UnknownMessage` with the
+                    // supported list so the client can fall back gracefully
+                    // instead of dropping the connection.
+                    let response = if err_text.contains("unknown variant") {
+                        let message_type = serde_json::from_slice::<serde_json::Value>(&msg_bytes)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("type").and_then(|t| t.as_str()).map(str::to_owned)
+                            });
+                        ServerMessage::UnknownMessage {
+                            message_type,
+                            supported: ClientMessage::supported_messages(),
+                        }
+                    } else {
+                        ServerMessage::Error {
+                            message: err_text,
+                            code: ErrorCode::Internal,
+                        }
                     };
-                    let _ = write_message(&mut stream, &err).await;
+                    let _ = write_message(&mut stream, &response).await;
                     continue;
                 }
             };
+
+            // Streaming requests bypass the unary handle/response cycle:
+            // they write N frames + an end_stream terminator directly.
+            if let ClientMessage::StreamContext {
+                file_uri,
+                cursor_position,
+                max_tokens,
+                model: _,
+            } = msg
+            {
+                if let Err(e) = self
+                    .handle_stream_context(&mut stream, file_uri, cursor_position, max_tokens)
+                    .await
+                {
+                    error!("stream_context write error: {e}");
+                    break;
+                }
+                continue;
+            }
 
             let response = self.handle(msg).await;
             if let Err(e) = write_message(&mut stream, &response).await {
@@ -404,6 +458,7 @@ impl Session {
                     let _ = bad; // already matched by is_batchable
                     return ServerMessage::Error {
                         message: "nested Batch not allowed".into(),
+                        code: ErrorCode::InvalidRequest,
                     };
                 }
                 let mut results = Vec::with_capacity(requests.len());
@@ -454,6 +509,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Separate URIs that already have a cached embedding from those
@@ -494,9 +550,7 @@ impl Session {
                     match client.embed_texts(&miss_texts, model.as_deref()).await {
                         Ok(r) => r,
                         Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                            }
+                            return embed_error_response(e)
                         }
                     }
                 };
@@ -566,6 +620,7 @@ impl Session {
                     .map(|c| c.default_model().to_owned());
                 let models_in_index = db.file_embedding_model_names();
                 let mixed_models = models_in_index.len() > 1;
+                let tier3_sources = db.tier3_sources();
                 ServerMessage::IndexStatusResult {
                     indexed_files,
                     pending_embedding_files: pending,
@@ -573,6 +628,7 @@ impl Session {
                     embedding_model,
                     mixed_models,
                     models_in_index,
+                    tier3_sources,
                 }
             }
 
@@ -600,6 +656,7 @@ impl Session {
                 let Some(query_vec) = db.get_file_embedding(&uri).cloned() else {
                     return ServerMessage::Error {
                         message: format!("no embedding for {uri} — call EmbeddingBatch first"),
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let results = db.nearest_by_vector(
@@ -622,15 +679,14 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let texts = vec![text];
                 let (mut vecs, _) = match client.embed_texts(&texts, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let query_vec = vecs.pop().unwrap_or_default();
@@ -651,15 +707,14 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Embed all queries in one HTTP batch call; no lock held during await.
                 let (vecs, _) = match client.embed_texts(&queries, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let db = self.db.lock().await;
@@ -679,6 +734,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 // Check cache — avoid re-embedding the same symbol repeatedly.
@@ -706,6 +762,7 @@ impl Session {
                             None => {
                                 return ServerMessage::Error {
                                     message: format!("symbol not found: {symbol_uri}"),
+                                    code: ErrorCode::Internal,
                                 }
                             }
                         }
@@ -716,9 +773,7 @@ impl Session {
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok(r) => r,
                             Err(e) => {
-                                return ServerMessage::Error {
-                                    message: format!("embedding failed: {e}"),
-                                }
+                                return embed_error_response(e)
                             }
                         };
                     let v = vecs.pop().unwrap_or_default();
@@ -730,8 +785,12 @@ impl Session {
                     v
                 };
                 let db = self.db.lock().await;
-                let results =
-                    db.nearest_symbol_by_vector(&query_vec, top_k, Some(symbol_uri.as_str()));
+                let results = db.nearest_symbol_by_vector(
+                    &query_vec,
+                    top_k,
+                    Some(symbol_uri.as_str()),
+                    None,
+                );
                 ServerMessage::NearestResult { results }
             }
 
@@ -758,6 +817,7 @@ impl Session {
                 ServerMessage::HandshakeResult {
                     daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
                     protocol_version: PROTOCOL_VERSION,
+                    supported_messages: ClientMessage::supported_messages(),
                 }
             }
 
@@ -826,32 +886,19 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
-                let (mut vecs, _) = match client.embed_texts(&[query], model.as_deref()).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
+                let (mut vecs, actual_model) =
+                    match client.embed_texts(&[query], model.as_deref()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return embed_error_response(e)
                         }
-                    }
-                };
+                    };
                 let query_vec = vecs.pop().unwrap_or_default();
                 let mut db = self.db.lock().await;
-                let hits = db.nearest_symbol_by_vector(&query_vec, top_k, None);
-                // Resolve display names; fall back to URI fragment.
-                let mut terms = Vec::with_capacity(hits.len());
-                for item in hits {
-                    let name = match db.symbol_by_uri(&item.uri) {
-                        Some(s) => s.display_name.clone(),
-                        None => item
-                            .uri
-                            .rfind('#')
-                            .map(|i| item.uri[i + 1..].to_owned())
-                            .unwrap_or(item.uri.clone()),
-                    };
-                    terms.push(name);
-                }
+                let terms = db.query_expansion_terms(&query_vec, &actual_model, top_k);
                 ServerMessage::QueryExpansionResult { terms }
             }
 
@@ -966,6 +1013,7 @@ impl Session {
                         message: "both URIs must have cached embeddings with matching \
                                   dimensions — call embedding_batch first"
                             .into(),
+                        code: ErrorCode::NoEmbedding,
                     },
                 }
             }
@@ -1035,6 +1083,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1119,6 +1168,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let chunk_size = chunk_lines.max(1);
@@ -1143,9 +1193,7 @@ impl Session {
                 let (vecs, _) = match client.embed_texts(&chunks, model.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 let mut boundaries = Vec::new();
@@ -1184,6 +1232,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let (mut vecs, _) = match client
@@ -1192,14 +1241,13 @@ impl Session {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        return ServerMessage::Error {
-                            message: format!("embedding failed: {e}"),
-                        }
+                        return embed_error_response(e)
                     }
                 };
                 if vecs.len() < 2 {
                     return ServerMessage::Error {
                         message: "embedding service returned fewer vectors than expected".into(),
+                        code: ErrorCode::Internal,
                     };
                 }
                 let vb = vecs.pop().unwrap();
@@ -1250,6 +1298,7 @@ impl Session {
                         message: format!(
                             "{uri} has no cached embedding — call embedding_batch first"
                         ),
+                        code: ErrorCode::NoEmbedding,
                     };
                 };
                 let q_norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1381,6 +1430,7 @@ impl Session {
                 let Some(client) = self.embedding_client.as_ref().as_ref() else {
                     return ServerMessage::Error {
                         message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
                     };
                 };
                 let effective_top_k = if top_k == 0 { 5 } else { top_k };
@@ -1402,9 +1452,7 @@ impl Session {
                         match client.embed_texts(&texts, model.as_deref()).await {
                             Ok((mut vecs, m)) => (vecs.pop().unwrap_or_default(), m),
                             Err(e) => {
-                                return ServerMessage::Error {
-                                    message: format!("embedding failed: {e}"),
-                                }
+                                return embed_error_response(e)
                             }
                         }
                     }
@@ -1413,6 +1461,7 @@ impl Session {
                 if query_vec.is_empty() {
                     return ServerMessage::Error {
                         message: "could not obtain query embedding".into(),
+                        code: ErrorCode::Internal,
                     };
                 }
 
@@ -1454,9 +1503,7 @@ impl Session {
                     match client.embed_texts(&chunk_texts, model.as_deref()).await {
                         Ok(r) => r,
                         Err(e) => {
-                            return ServerMessage::Error {
-                                message: format!("embedding failed: {e}"),
-                            }
+                            return embed_error_response(e)
                         }
                     };
                 let _ = chunk_model; // we report query_model, not per-chunk model
@@ -1497,8 +1544,243 @@ impl Session {
                     query_model,
                 }
             }
+
+            // ── v2.1: EmbedText ─────────────────────────────────────────
+            ClientMessage::EmbedText { text, model } => {
+                let Some(client) = self.embedding_client.as_ref().as_ref() else {
+                    return ServerMessage::Error {
+                        message: "embedding not configured — set LIP_EMBEDDING_URL".into(),
+                        code: ErrorCode::EmbeddingNotConfigured,
+                    };
+                };
+                let texts = vec![text];
+                match client.embed_texts(&texts, model.as_deref()).await {
+                    Ok((mut vecs, used_model)) => ServerMessage::EmbedTextResult {
+                        vector: vecs.pop().unwrap_or_default(),
+                        embedding_model: used_model,
+                    },
+                    Err(e) => embed_error_response(e),
+                }
+            }
+
+            // Streaming variant — caught earlier in `run`. Reached only if a
+            // client embedded one inside a Batch / BatchQuery, which is not
+            // supported.
+            ClientMessage::StreamContext { .. } => ServerMessage::Error {
+                message: "stream_context is a streaming request and cannot be \
+                          batched or nested"
+                    .into(),
+                code: ErrorCode::InvalidRequest,
+            },
+
+            // ── v2.1: Tier 3 provenance registration ──────────────────────
+            ClientMessage::RegisterTier3Source { source } => {
+                let mut db = self.db.lock().await;
+                db.register_tier3_source(source);
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
+            }
         }
     }
+
+    /// Handle a [`ClientMessage::StreamContext`] by streaming `symbol_info`
+    /// frames followed by exactly one `end_stream` terminator.
+    ///
+    /// Frames are written one at a time with no internal buffering — the
+    /// daemon's `write_message` blocks on socket back-pressure, which throttles
+    /// ranking work when the client stops reading. A closed socket surfaces
+    /// as `BrokenPipe` and aborts the loop cleanly.
+    async fn handle_stream_context(
+        &self,
+        stream: &mut UnixStream,
+        file_uri: String,
+        cursor_position: OwnedRange,
+        max_tokens: u32,
+    ) -> anyhow::Result<()> {
+        use crate::query_graph::types::EndStreamReason;
+
+        // Validate cursor position. "Outside the file" = not tracked, or line
+        // beyond the file's line count.
+        let line_count_opt = {
+            let db = self.db.lock().await;
+            db.file_source_text(&file_uri)
+                .map(|t| t.lines().count() as i32)
+        };
+        let Some(line_count) = line_count_opt else {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::Error,
+                emitted: 0,
+                total_candidates: 0,
+                error: Some("cursor_out_of_range".into()),
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        };
+        if cursor_position.start_line < 0 || cursor_position.start_line >= line_count {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::Error,
+                emitted: 0,
+                total_candidates: 0,
+                error: Some("cursor_out_of_range".into()),
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        }
+
+        // Rank candidates relative to the cursor.
+        let candidates = {
+            let mut db = self.db.lock().await;
+            rank_context_candidates(
+                &mut db,
+                &file_uri,
+                cursor_position.start_line,
+                cursor_position.start_char,
+            )
+        };
+        let total_candidates = candidates.len() as u32;
+
+        // Empty-budget short-circuit: emit terminator immediately. Per spec
+        // this counts as `budget_reached` (acceptance criterion 2).
+        if max_tokens == 0 {
+            let term = ServerMessage::EndStream {
+                reason: EndStreamReason::BudgetReached,
+                emitted: 0,
+                total_candidates,
+                error: None,
+            };
+            write_message(stream, &term).await?;
+            return Ok(());
+        }
+
+        let mut emitted: u32 = 0;
+        let mut spent: u64 = 0;
+        let mut reason = EndStreamReason::Exhausted;
+
+        for (sym, score) in candidates {
+            let cost = estimate_token_cost(&sym);
+            if spent + cost as u64 > max_tokens as u64 {
+                reason = EndStreamReason::BudgetReached;
+                break;
+            }
+            let frame = ServerMessage::SymbolInfo {
+                symbol_info: sym,
+                relevance_score: score,
+                token_cost: cost,
+            };
+            // BrokenPipe / EBADF aborts the walk — client closed early.
+            write_message(stream, &frame).await?;
+            spent += cost as u64;
+            emitted += 1;
+        }
+
+        let term = ServerMessage::EndStream {
+            reason,
+            emitted,
+            total_candidates,
+            error: None,
+        };
+        write_message(stream, &term).await?;
+        Ok(())
+    }
+}
+
+/// Conservative chars÷4 + 8 token estimate per spec §2.4.
+fn estimate_token_cost(sym: &crate::schema::OwnedSymbolInfo) -> u32 {
+    let sig_len = sym.signature.as_deref().map(str::len).unwrap_or(0);
+    let doc_len = sym.documentation.as_deref().map(str::len).unwrap_or(0);
+    ((sig_len + doc_len) as u32).div_ceil(4) + 8
+}
+
+/// Rank symbols by relevance to a cursor inside `file_uri` (spec §2.3 ordering):
+/// 1. The symbol the cursor is on (definition).
+/// 2. Callers — symbols whose blast-radius walk reaches the target.
+/// 3. Callees / references — outgoing relationships of the target.
+/// 4. Related types — relationships flagged `is_type_definition`.
+///
+/// Within a tier, frames are ordered by descending heuristic score.
+fn rank_context_candidates(
+    db: &mut crate::query_graph::LipDatabase,
+    file_uri: &str,
+    line: i32,
+    col: i32,
+) -> Vec<(crate::schema::OwnedSymbolInfo, f32)> {
+    use std::collections::HashSet;
+
+    let mut out: Vec<(crate::schema::OwnedSymbolInfo, f32)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let target_uri_opt = db.symbol_at_position(file_uri, line, col);
+
+    // Tier 1 — direct definition.
+    if let Some(ref target_uri) = target_uri_opt {
+        if let Some(sym) = db.symbol_by_uri(target_uri) {
+            seen.insert(sym.uri.clone());
+            out.push((sym, 1.0));
+        }
+    }
+
+    // Tier 2 — callers from the blast-radius CPG walk.
+    if let Some(ref target_uri) = target_uri_opt {
+        let blast = db.blast_radius_for(target_uri);
+        let mut callers: Vec<_> = blast
+            .direct_items
+            .iter()
+            .chain(blast.transitive_items.iter())
+            .filter(|item| !item.symbol_uri.is_empty())
+            .cloned()
+            .collect();
+        callers.sort_by_key(|item| item.distance);
+        for item in callers {
+            if !seen.insert(item.symbol_uri.clone()) {
+                continue;
+            }
+            if let Some(sym) = db.symbol_by_uri(&item.symbol_uri) {
+                let score = (0.9 - 0.1 * item.distance as f32).max(0.1);
+                out.push((sym, score));
+            }
+        }
+    }
+
+    // Tier 3 + 4 — outgoing relationships (callees, then types).
+    if let Some(ref target_uri) = target_uri_opt {
+        if let Some(target) = db.symbol_by_uri(target_uri) {
+            // Callees and plain references first.
+            for rel in target
+                .relationships
+                .iter()
+                .filter(|r| !r.is_type_definition)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if !seen.insert(rel.target_uri.clone()) {
+                    continue;
+                }
+                if let Some(sym) = db.symbol_by_uri(&rel.target_uri) {
+                    out.push((sym, 0.5));
+                }
+            }
+            // Related types last.
+            for rel in target
+                .relationships
+                .iter()
+                .filter(|r| r.is_type_definition)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if !seen.insert(rel.target_uri.clone()) {
+                    continue;
+                }
+                if let Some(sym) = db.symbol_by_uri(&rel.target_uri) {
+                    out.push((sym, 0.4));
+                }
+            }
+        }
+    }
+
+    out
 }
 
 // ── Batch query helper ────────────────────────────────────────────────────────
@@ -1660,6 +1942,7 @@ fn process_query_sync(
             let (indexed_files, pending, last_ms) = db.index_status();
             let models_in_index = db.file_embedding_model_names();
             let mixed_models = models_in_index.len() > 1;
+            let tier3_sources = db.tier3_sources();
             ok(ServerMessage::IndexStatusResult {
                 indexed_files,
                 pending_embedding_files: pending,
@@ -1667,6 +1950,7 @@ fn process_query_sync(
                 embedding_model: None, // no client reference available in sync context
                 mixed_models,
                 models_in_index,
+                tier3_sources,
             })
         }
 
@@ -1696,6 +1980,7 @@ fn process_query_sync(
         ClientMessage::Handshake { .. } => ok(ServerMessage::HandshakeResult {
             daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: PROTOCOL_VERSION,
+            supported_messages: ClientMessage::supported_messages(),
         }),
 
         // BatchAnnotationGet is a pure read — safe inside a batch.
@@ -2044,6 +2329,18 @@ fn process_query_sync(
         ClientMessage::ExplainMatch { .. } => {
             err("ExplainMatch requires async HTTP; not permitted in BatchQuery")
         }
+
+        ClientMessage::StreamContext { .. } => {
+            err("StreamContext is a streaming request; not permitted in BatchQuery")
+        }
+
+        ClientMessage::EmbedText { .. } => {
+            err("EmbedText requires async HTTP; not permitted in BatchQuery")
+        }
+
+        ClientMessage::RegisterTier3Source { .. } => {
+            err("RegisterTier3Source is a mutation; not permitted in BatchQuery")
+        }
     }
 }
 
@@ -2097,6 +2394,7 @@ mod tests {
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let msg = ServerMessage::Error {
             message: "hello framing".to_owned(),
+            code: ErrorCode::Internal,
         };
 
         // Writer task.
@@ -2113,7 +2411,7 @@ mod tests {
 
         let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
         match decoded {
-            ServerMessage::Error { message } => assert_eq!(message, "hello framing"),
+            ServerMessage::Error { message, .. } => assert_eq!(message, "hello framing"),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -2123,6 +2421,7 @@ mod tests {
         let payload = "x".repeat(65_536);
         let msg = ServerMessage::Error {
             message: payload.clone(),
+            code: ErrorCode::Internal,
         };
 
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
@@ -2137,7 +2436,7 @@ mod tests {
 
         let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
         match decoded {
-            ServerMessage::Error { message } => assert_eq!(message, payload),
+            ServerMessage::Error { message, .. } => assert_eq!(message, payload),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -2151,6 +2450,7 @@ mod tests {
             for i in 0u32..5 {
                 let msg = ServerMessage::Error {
                     message: i.to_string(),
+                    code: ErrorCode::Internal,
                 };
                 write_message(&mut a, &msg).await.unwrap();
             }
@@ -2161,7 +2461,7 @@ mod tests {
             let bytes = read_message(&mut b).await.unwrap();
             let decoded: ServerMessage = serde_json::from_slice(&bytes).unwrap();
             match decoded {
-                ServerMessage::Error { message } => assert_eq!(message, i.to_string()),
+                ServerMessage::Error { message, .. } => assert_eq!(message, i.to_string()),
                 other => panic!("unexpected variant: {other:?}"),
             }
         }

@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.1.0] — 2026-04-15
+
+### Added
+
+**v2.1 — Streaming context + forward-compat primitives**
+
+**Streaming**
+
+- **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — new streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo { symbol_info, relevance_score, token_cost }` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`. Replaces the broken "fetch top-k, locally truncate to prompt budget" pattern with stream-until-full. Spec §9.2.
+- **Relevance ordering** (spec §2.3): direct symbol at cursor → callers (from blast-radius CPG walk) → callees / references → related types. Conservative token-cost estimate `ceil((len(signature) + len(documentation)) / 4) + 8` per symbol. Daemon does not buffer ahead of the socket; `BrokenPipe` from a closing client aborts the ranking walk cleanly. `StreamContext` is rejected from `Batch` / `BatchQuery`.
+- **`protocol_version` bumped from `1` → `2`** in `HandshakeResult`. Clients can detect streaming support via handshake.
+- **`lip stream-context <file_uri> <line:col> --max-tokens N [--model M]`** — new CLI subcommand prints frames as JSON for manual testing.
+
+**New primitives**
+
+- **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (embeds internally but discards the vector). Callers re-ranking with their own scoring (centroid arithmetic, federated nearest-neighbour, lexical-then-semantic re-rank) get the embedding directly instead of building a centroid out of nearest-neighbour seeds. Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery` (requires async HTTP).
+- **`RegisterTier3Source { source: Tier3Source }`** + **`IndexStatusResult.tier3_sources`** — expose provenance for Tier 3 ingestion batches (SCIP imports). `Tier3Source { source_id, tool_name, tool_version, project_root, imported_at_ms }` records *what* producer generated the symbols and *when* the daemon accepted them. Re-registering the same `source_id` overwrites in place, refreshing `imported_at_ms`. The daemon deliberately does no staleness detection: stale Tier 3 symbols remain in the graph at their original confidence until the caller re-imports. Surfacing provenance lets clients decide when to warn a user that imported data has aged (e.g. `scip-rust imported 3 days ago`). `lip import --push-to-daemon` now sends this before streaming SCIP deltas, with `source_id = sha256(tool_name + ":" + project_root)`. `IndexStatusResult.tier3_sources` is `#[serde(default)]`; older daemons yield an empty vector. Ack'd with `DeltaAck`. Not permitted inside `BatchQuery` (mutation).
+- **`lip import --no-provenance`** — opt out of Tier 3 provenance registration for ephemeral or test imports that should not pollute a long-lived daemon's `tier3_sources` list. No effect on the default EventStream-JSON output path.
+
+**Forward-compat & capability discovery**
+
+- **`HandshakeResult.supported_messages: Vec<String>`** — handshake response now lists every `ClientMessage` `type` tag this daemon understands. Lets clients probe for an individual message (e.g. `stream_context`, `embed_text`) without writing "handshake then pray" code or comparing `protocol_version` integers. Field is `#[serde(default)]`; older daemons yield an empty vector, which clients should treat as "fall back to `protocol_version`."
+- **`ServerMessage::UnknownMessage { message_type, supported }`** — when a client sends a well-formed JSON envelope whose `type` tag is unknown, the daemon now replies with `UnknownMessage` (carrying the tag plus the same supported list as handshake) *and keeps the socket open*, instead of closing after a generic parse `Error`. Lets forward-compatible clients downgrade gracefully to a supported call instead of reconnecting.
+- **`ServerMessage::Error { message, code }`** — `code: ErrorCode` is a stable, machine-readable category. Clients branch on this instead of string-matching `message`. `#[serde(default)]`; older daemons deserialize as `ErrorCode::Internal`.
+- **`ErrorCode`** enum — small, stable set: `unknown_message_type`, `unknown_model`, `embedding_not_configured`, `no_embedding`, `cursor_out_of_range`, `index_locked`, `invalid_request`, `internal` (default). Adding a code is non-breaking; renaming or removing one is breaking.
+  - `embedding_not_configured` — daemon has no embedding service (`LIP_EMBEDDING_URL` unset).
+  - `no_embedding` — URI has no cached embedding yet; call `EmbeddingBatch` first.
+  - `unknown_model` — the embedding endpoint rejected the requested model. Emitted by the daemon when the HTTP backend returns 404 or a 4xx body matching `model_not_found` / `"unknown model"` / `"model … not found/invalid/unsupported"`. Transport, rate-limit, and auth errors stay on `internal` — retrying with the same model only makes sense after a real config change. Classification lives in `daemon/embedding.rs::classify_http_error`.
+  - `invalid_request` — request was well-formed on the wire but used incorrectly (e.g. nested `Batch`, or `StreamContext` inside a `Batch`). Distinct from `internal` so clients can avoid retry loops on caller-side mistakes.
+
+**Drift guard**
+
+- **`ClientMessage::variant_tag`** + `supported_messages_covers_all_variants` test — exhaustive-match helper plus paired test that fails compilation when a new `ClientMessage` variant is added without being advertised in `supported_messages()`. Prevents capability-list drift from silently shrinking the handshake surface.
+
+### Fixed
+
+- **`QueryExpansion` handler contract pinned by a db-level test.** The post-embedding ranking is now encapsulated in `LipDatabase::query_expansion_terms(query_vec, actual_model, top_k)`, which the handler calls in one line. A regression that drops the model filter would cause `query_expansion_terms_rejects_cross_model_scoring` (db.rs) to fail, closing the earlier gap where the fix shipped without a paired assertion.
+- **`QueryExpansion` now honors the caller's model pin.** Previously the handler embedded the query with the requested model but then ranked candidates across *all* stored symbol embeddings regardless of which model produced them — cross-model cosine scores are not meaningful, so the returned "expansion terms" were effectively noise whenever the index held mixed-model vectors. Handler now captures the actual model returned by `embed_texts` and passes it through a new `model_filter: Option<&str>` parameter on `LipDatabase::nearest_symbol_by_vector`, restricting candidates to symbols embedded with the same model. `SimilarSymbols` (which resolves from a URI's own cached embedding) keeps the old unfiltered behavior by passing `None`.
+
+---
+
 ## [2.0.1] — 2026-04-13
 
 ### Changed

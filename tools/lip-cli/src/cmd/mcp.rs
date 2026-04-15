@@ -477,7 +477,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             .iter()
             .enumerate()
             .map(|(i, msg)| match msg {
-                ServerMessage::Error { message } => format!("[{i}] error: {message}"),
+                ServerMessage::Error { message, .. } => format!("[{i}] error: {message}"),
                 other => format!("[{i}]\n{}", format_response(tool, other)),
             })
             .collect::<Vec<_>>()
@@ -535,6 +535,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             embedding_model,
             mixed_models,
             models_in_index,
+            tier3_sources,
         } => {
             let last = last_updated_ms
                 .map(|ms| format!("  last_updated={ms}ms"))
@@ -548,7 +549,21 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             } else {
                 String::new()
             };
-            format!("indexed={indexed_files}  pending_embeddings={pending_embedding_files}{last}{model}{mixed}")
+            let tier3 = if tier3_sources.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = tier3_sources
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{}@{}/{} imported_at={}ms",
+                            s.tool_name, s.tool_version, s.source_id, s.imported_at_ms
+                        )
+                    })
+                    .collect();
+                format!("  tier3=[{}]", parts.join(", "))
+            };
+            format!("indexed={indexed_files}  pending_embeddings={pending_embedding_files}{last}{model}{mixed}{tier3}")
         }
         ServerMessage::FileStatusResult {
             uri,
@@ -760,7 +775,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
             }
             out.trim_end().to_owned()
         }
-        ServerMessage::Error { message } => format!("LIP error: {message}"),
+        ServerMessage::Error { message, .. } => format!("LIP error: {message}"),
         // Catch-all: emit JSON so nothing is silently lost.
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }

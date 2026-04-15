@@ -7,7 +7,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use tokio::runtime::Runtime;
 
 use lip_core::daemon::session::{read_message, write_message};
-use lip_core::query_graph::ServerMessage;
+use lip_core::query_graph::{ErrorCode, ServerMessage};
 
 fn make_rt() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -19,6 +19,7 @@ fn make_rt() -> Runtime {
 fn make_message(payload_bytes: usize) -> ServerMessage {
     ServerMessage::Error {
         message: "x".repeat(payload_bytes),
+        code: ErrorCode::Internal,
     }
 }
 

@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use lip_core::daemon::LipDaemon;
-use lip_core::query_graph::{ClientMessage, ServerMessage};
+use lip_core::query_graph::{ClientMessage, ErrorCode, ServerMessage};
 use lip_core::schema::{Action, IndexingState, OwnedDocument};
 
 // ─── Framing helpers (client side) ───────────────────────────────────────────
@@ -540,4 +540,289 @@ async fn daemon_annotations_survive_restart() {
         task.abort();
         let _ = task.await;
     }
+}
+
+// ─── stream_context (LIP 2.1.0) ──────────────────────────────────────────────
+
+async fn recv_stream_frame(stream: &mut UnixStream) -> anyhow::Result<ServerMessage> {
+    // Filter push notifications (`IndexChanged`, `SymbolUpgraded`) that may
+    // have been queued from earlier upserts.
+    recv(stream).await
+}
+
+#[tokio::test]
+async fn stream_context_zero_budget_terminates_immediately() {
+    use lip_core::query_graph::types::EndStreamReason;
+    use lip_core::schema::OwnedRange;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_zero.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    let uri = "lip://local/test@0.1/budget.rs";
+    let source = "pub fn foo() {}\n";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::StreamContext {
+            file_uri: uri.into(),
+            cursor_position: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 0,
+            },
+            max_tokens: 0,
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frame = recv_stream_frame(&mut client).await.unwrap();
+    match frame {
+        ServerMessage::EndStream {
+            reason, emitted, ..
+        } => {
+            assert_eq!(reason, EndStreamReason::BudgetReached);
+            assert_eq!(emitted, 0);
+        }
+        other => panic!("expected EndStream first frame, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn stream_context_cursor_out_of_range_errors() {
+    use lip_core::query_graph::types::EndStreamReason;
+    use lip_core::schema::OwnedRange;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_oob.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    let uri = "lip://local/test@0.1/oob.rs";
+    let source = "pub fn foo() {}\n"; // 1 line
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::StreamContext {
+            file_uri: uri.into(),
+            cursor_position: OwnedRange {
+                start_line: 9999,
+                start_char: 0,
+                end_line: 9999,
+                end_char: 0,
+            },
+            max_tokens: 4096,
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frame = recv_stream_frame(&mut client).await.unwrap();
+    match frame {
+        ServerMessage::EndStream { reason, error, .. } => {
+            assert_eq!(reason, EndStreamReason::Error);
+            assert_eq!(error.as_deref(), Some("cursor_out_of_range"));
+        }
+        other => panic!("expected EndStream(error), got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn embed_text_without_endpoint_returns_error() {
+    // No `LIP_EMBEDDING_URL` set in the test process → embedding client is None
+    // → daemon returns the documented configuration error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_embed_text.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::EmbedText {
+            text: "verify token expiry".into(),
+            model: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::Error { message, code } => {
+            assert!(
+                message.contains("LIP_EMBEDDING_URL"),
+                "expected configuration error, got {message:?}"
+            );
+            assert_eq!(
+                code,
+                ErrorCode::EmbeddingNotConfigured,
+                "expected EmbeddingNotConfigured code, got {code:?}"
+            );
+        }
+        ServerMessage::EmbedTextResult { vector, .. } => {
+            // If a real embedding endpoint is configured in CI, fall through.
+            assert!(!vector.is_empty(), "vector should be non-empty");
+        }
+        other => panic!("expected Error or EmbedTextResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn stream_context_handshake_advertises_v2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_stream_hs.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::HandshakeResult {
+            protocol_version, ..
+        } => assert_eq!(protocol_version, 2),
+        other => panic!("expected HandshakeResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn handshake_advertises_supported_messages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_caps.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::HandshakeResult {
+            supported_messages, ..
+        } => {
+            assert!(supported_messages.contains(&"handshake".to_string()));
+            assert!(supported_messages.contains(&"stream_context".to_string()));
+            assert!(supported_messages.contains(&"embed_text".to_string()));
+            assert!(!supported_messages.contains(&"nonexistent_message".to_string()));
+        }
+        other => panic!("expected HandshakeResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn unknown_variant_returns_unknown_message_and_keeps_connection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_unknown.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    // Hand-craft an envelope with an unknown `type` tag — the daemon should
+    // recognise this as recoverable and reply with `UnknownMessage` rather
+    // than closing the socket.
+    let bogus = serde_json::json!({
+        "type": "summon_kraken",
+        "payload": {"when": "at_dawn"},
+    });
+    let body = serde_json::to_vec(&bogus).unwrap();
+    client
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    client.write_all(&body).await.unwrap();
+
+    let resp = recv(&mut client).await.unwrap();
+    match resp {
+        ServerMessage::UnknownMessage {
+            message_type,
+            supported,
+        } => {
+            assert_eq!(message_type.as_deref(), Some("summon_kraken"));
+            assert!(supported.contains(&"handshake".to_string()));
+        }
+        other => panic!("expected UnknownMessage, got {other:?}"),
+    }
+
+    // Connection must still be usable: send a Handshake after the error.
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::HandshakeResult { .. } => {}
+        other => panic!("expected HandshakeResult after recovery, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
 }
