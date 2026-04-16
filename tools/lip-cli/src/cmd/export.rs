@@ -113,7 +113,7 @@ fn convert_symbol_info(sym: &OwnedSymbolInfo) -> scip::SymbolInformation {
             is_reference: r.is_reference,
             is_implementation: r.is_implementation,
             is_type_definition: r.is_type_definition,
-            is_override: r.is_override,
+            is_definition: r.is_override,
         })
         .collect();
 

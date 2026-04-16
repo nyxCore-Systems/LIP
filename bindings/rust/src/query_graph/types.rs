@@ -203,6 +203,13 @@ pub enum ServerMessage {
     DeadSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
     },
+    /// Response to [`ClientMessage::QueryInvalidatedFiles`].
+    ///
+    /// Contains the deduplicated set of file URIs that consume at least one of
+    /// the changed symbol names and therefore need re-verification.
+    InvalidatedFilesResult {
+        file_uris: Vec<String>,
+    },
     AnnotationAck,
     AnnotationValue {
         value: Option<String>,
@@ -678,6 +685,12 @@ pub enum ClientMessage {
     QueryDeadSymbols {
         limit: Option<usize>,
     },
+    /// Given a list of changed symbol URIs, return the file URIs that consume
+    /// those symbols and need re-verification (Kotlin IC model).
+    /// Returns `InvalidatedFilesResult`.
+    QueryInvalidatedFiles {
+        changed_symbol_uris: Vec<String>,
+    },
     AnnotationSet {
         symbol_uri: String,
         key: String,
@@ -1114,6 +1127,7 @@ impl ClientMessage {
             "query_workspace_symbols",
             "query_document_symbols",
             "query_dead_symbols",
+            "query_invalidated_files",
             "annotation_set",
             "annotation_get",
             "annotation_list",
@@ -1183,6 +1197,7 @@ impl ClientMessage {
             ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
             ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
             ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
+            ClientMessage::QueryInvalidatedFiles { .. } => "query_invalidated_files",
             ClientMessage::AnnotationSet { .. } => "annotation_set",
             ClientMessage::AnnotationGet { .. } => "annotation_get",
             ClientMessage::AnnotationList { .. } => "annotation_list",
@@ -1445,6 +1460,9 @@ mod tests {
             },
             ClientMessage::QueryDocumentSymbols { uri: String::new() },
             ClientMessage::QueryDeadSymbols { limit: None },
+            ClientMessage::QueryInvalidatedFiles {
+                changed_symbol_uris: vec![],
+            },
             ClientMessage::AnnotationSet {
                 symbol_uri: String::new(),
                 key: String::new(),

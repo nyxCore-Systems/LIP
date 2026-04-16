@@ -1052,6 +1052,26 @@ impl LipDatabase {
             .collect()
     }
 
+    /// Given a set of changed symbol URIs, return the deduplicated set of file
+    /// URIs that need re-verification because they consume at least one of the
+    /// changed names.
+    ///
+    /// This is the public entry-point for symbol-level invalidation (Kotlin IC
+    /// model). It extracts the display name from each symbol URI via
+    /// `extract_name`, then delegates to the `file_consumed_names` index.
+    pub fn invalidated_files_for(&self, changed_symbol_uris: &[String]) -> Vec<String> {
+        let names: HashSet<&str> = changed_symbol_uris
+            .iter()
+            .map(|uri| extract_name(uri))
+            .filter(|n| !n.is_empty())
+            .collect();
+        if names.is_empty() {
+            return vec![];
+        }
+        let name_refs: Vec<&str> = names.into_iter().collect();
+        self.files_consuming_names(&name_refs)
+    }
+
     // ── Embedding / observability ─────────────────────────────────────────
 
     /// Store a pre-computed embedding vector for a file, recording which model produced it.
@@ -3632,5 +3652,118 @@ impl Greeter {
 
         let results = db.workspace_symbols("Foo", 10);
         assert_eq!(results.len(), 1, "re-upsert must not duplicate symbols");
+    }
+
+    // ── Symbol-level invalidation ────────────────────────────────────────
+
+    #[test]
+    fn invalidated_files_for_returns_consumers() {
+        // File A defines `fn foo()`, File B references `foo`.
+        // Changing `foo` must invalidate B.
+        let mut db = LipDatabase::new();
+
+        // File A: defines foo
+        let uri_a = "lip://local/a.rs".to_owned();
+        let sym_foo = OwnedSymbolInfo::new("lip://local/a.rs#foo", "foo");
+        let occ_def = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+        };
+        db.upsert_file_precomputed(
+            uri_a.clone(), "rust".into(), "h1".into(),
+            vec![sym_foo], vec![occ_def], vec![],
+        );
+
+        // File B: references foo (defined in A → external)
+        let uri_b = "lip://local/b.rs".to_owned();
+        let occ_ref = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 80,
+            role: Role::Reference,
+            override_doc: None,
+        };
+        db.upsert_file_precomputed(
+            uri_b.clone(), "rust".into(), "h2".into(),
+            vec![], vec![occ_ref], vec![],
+        );
+
+        let invalidated = db.invalidated_files_for(&["lip://local/a.rs#foo".into()]);
+        assert_eq!(invalidated, vec![uri_b]);
+    }
+
+    #[test]
+    fn invalidated_files_for_unreferenced_symbol() {
+        // File C defines `fn bar()`, no one references it.
+        // Changing `bar` invalidates nothing.
+        let mut db = LipDatabase::new();
+
+        let uri_c = "lip://local/c.rs".to_owned();
+        let sym_bar = OwnedSymbolInfo::new("lip://local/c.rs#bar", "bar");
+        let occ_def = OwnedOccurrence {
+            symbol_uri: "lip://local/c.rs#bar".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+        };
+        db.upsert_file_precomputed(
+            uri_c.clone(), "rust".into(), "h1".into(),
+            vec![sym_bar], vec![occ_def], vec![],
+        );
+
+        let invalidated = db.invalidated_files_for(&["lip://local/c.rs#bar".into()]);
+        assert!(invalidated.is_empty(), "unreferenced symbol should invalidate nothing");
+    }
+
+    #[test]
+    fn remove_file_clears_consumed_names() {
+        // After removing a file, its consumed-names entries must be gone,
+        // so it no longer appears in invalidation results.
+        let mut db = LipDatabase::new();
+
+        // File A: defines foo
+        let uri_a = "lip://local/a.rs".to_owned();
+        let sym_foo = OwnedSymbolInfo::new("lip://local/a.rs#foo", "foo");
+        let occ_def = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+        };
+        db.upsert_file_precomputed(
+            uri_a.clone(), "rust".into(), "h1".into(),
+            vec![sym_foo], vec![occ_def], vec![],
+        );
+
+        // File B: references foo
+        let uri_b = "lip://local/b.rs".to_owned();
+        let occ_ref = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 80,
+            role: Role::Reference,
+            override_doc: None,
+        };
+        db.upsert_file_precomputed(
+            uri_b.clone(), "rust".into(), "h2".into(),
+            vec![], vec![occ_ref], vec![],
+        );
+
+        // Sanity: B is invalidated before removal
+        assert_eq!(
+            db.invalidated_files_for(&["lip://local/a.rs#foo".into()]),
+            vec![uri_b.clone()],
+        );
+
+        // Remove B — its consumed-names entry should be cleaned up
+        db.remove_file(&uri_b);
+
+        let invalidated = db.invalidated_files_for(&["lip://local/a.rs#foo".into()]);
+        assert!(invalidated.is_empty(), "removed file must not appear in invalidation results");
     }
 }

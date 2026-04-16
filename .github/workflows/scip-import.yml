@@ -1,0 +1,154 @@
+name: SCIP Import
+
+on:
+  workflow_call:
+    inputs:
+      scip-tool:
+        description: "SCIP indexer to run"
+        required: true
+        type: string    # rust | typescript | python
+      scip-file-path:
+        description: "Path to the SCIP index file"
+        required: false
+        type: string
+        default: ".scip/index.scip"
+      daemon-socket:
+        description: "Unix socket path for the LIP daemon"
+        required: false
+        type: string
+        default: "/tmp/lip-ci.sock"
+      confidence:
+        description: "Confidence score for imported symbols (1-100)"
+        required: false
+        type: number
+        default: 100
+
+  workflow_dispatch:
+    inputs:
+      scip-tool:
+        description: "SCIP indexer to run"
+        required: true
+        type: choice
+        options:
+          - rust
+          - typescript
+          - python
+      scip-file-path:
+        description: "Path to the SCIP index file"
+        required: false
+        type: string
+        default: ".scip/index.scip"
+      daemon-socket:
+        description: "Unix socket path for the LIP daemon"
+        required: false
+        type: string
+        default: "/tmp/lip-ci.sock"
+      confidence:
+        description: "Confidence score for imported symbols (1-100)"
+        required: false
+        type: number
+        default: 100
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  scip-import:
+    name: SCIP Import (${{ inputs.scip-tool }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Install lip CLI ──────────────────────────────────────────────────────
+      - uses: actions/cache@v4
+        id: lip-cache
+        with:
+          path: ~/.cargo/bin/lip
+          key: lip-cli-${{ runner.os }}-${{ hashFiles('.github/workflows/scip-import.yml') }}
+
+      - name: Install lip CLI
+        if: steps.lip-cache.outputs.cache-hit != 'true'
+        run: cargo install lip-cli --locked
+
+      # ── Start LIP daemon ─────────────────────────────────────────────────────
+      - name: Start LIP daemon
+        run: |
+          lip daemon --socket ${{ inputs.daemon-socket }} &
+          DAEMON_PID=$!
+          echo "DAEMON_PID=$DAEMON_PID" >> "$GITHUB_ENV"
+          # Wait for socket to appear
+          for i in $(seq 1 30); do
+            [ -S "${{ inputs.daemon-socket }}" ] && break
+            sleep 0.2
+          done
+          if [ ! -S "${{ inputs.daemon-socket }}" ]; then
+            echo "::error::Daemon socket did not appear within 6s"
+            exit 1
+          fi
+
+      # ── Install and run SCIP indexer ─────────────────────────────────────────
+      - name: Install Rust toolchain
+        if: inputs.scip-tool == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
+
+      - name: Run scip-rust indexer
+        if: inputs.scip-tool == 'rust'
+        run: |
+          mkdir -p "$(dirname '${{ inputs.scip-file-path }}')"
+          rust-analyzer scip .
+          # rust-analyzer writes to index.scip in cwd; move if needed
+          if [ "${{ inputs.scip-file-path }}" != "index.scip" ] && [ -f index.scip ]; then
+            mv index.scip "${{ inputs.scip-file-path }}"
+          fi
+
+      - name: Setup Node.js
+        if: inputs.scip-tool == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run scip-typescript indexer
+        if: inputs.scip-tool == 'typescript'
+        run: |
+          npm install -g @sourcegraph/scip-typescript
+          mkdir -p "$(dirname '${{ inputs.scip-file-path }}')"
+          scip-typescript index --output "${{ inputs.scip-file-path }}"
+
+      - name: Setup Python
+        if: inputs.scip-tool == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run scip-python indexer
+        if: inputs.scip-tool == 'python'
+        run: |
+          pip install scip-python
+          mkdir -p "$(dirname '${{ inputs.scip-file-path }}')"
+          scip-python index --output "${{ inputs.scip-file-path }}"
+
+      # ── Import into daemon ───────────────────────────────────────────────────
+      - name: Import SCIP index into LIP daemon
+        run: |
+          lip import \
+            --from-scip "${{ inputs.scip-file-path }}" \
+            --push-to-daemon "${{ inputs.daemon-socket }}" \
+            --confidence ${{ inputs.confidence }}
+
+      # ── Verify import ────────────────────────────────────────────────────────
+      - name: Verify index status
+        run: |
+          echo '[{"type":"query_index_status"}]' | \
+            lip query --socket "${{ inputs.daemon-socket }}" batch
+
+      # ── Cleanup ──────────────────────────────────────────────────────────────
+      - name: Stop daemon
+        if: always()
+        run: |
+          if [ -n "$DAEMON_PID" ]; then
+            kill "$DAEMON_PID" 2>/dev/null || true
+            wait "$DAEMON_PID" 2>/dev/null || true
+          fi

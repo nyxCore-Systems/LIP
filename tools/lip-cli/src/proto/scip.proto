@@ -131,7 +131,7 @@ message Relationship {
   bool is_reference = 2;
   bool is_implementation = 3;
   bool is_type_definition = 4;
-  bool is_override = 5;
+  bool is_definition = 5;
 }
 
 message Occurrence {

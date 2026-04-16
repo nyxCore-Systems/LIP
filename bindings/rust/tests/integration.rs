@@ -6,7 +6,10 @@ use tokio::net::UnixStream;
 
 use lip_core::daemon::LipDaemon;
 use lip_core::query_graph::{ClientMessage, ErrorCode, ServerMessage};
-use lip_core::schema::{Action, IndexingState, OwnedDocument};
+use lip_core::schema::{
+    Action, IndexingState, OwnedDocument, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role,
+    SymbolKind,
+};
 
 // ─── Framing helpers (client side) ───────────────────────────────────────────
 
@@ -883,6 +886,148 @@ async fn unknown_variant_returns_unknown_message_and_keeps_connection() {
         other => panic!("expected HandshakeResult after recovery, got {other:?}"),
     }
 
+    task.abort();
+    let _ = task.await;
+}
+
+// ─── SCIP import: pre-computed symbols via Delta ─────────────────────────────
+
+/// Regression test for the SCIP import path. When a client sends a Delta with
+/// `source_text: None` and pre-computed `symbols` + `occurrences`, the daemon
+/// must store them verbatim (via `upsert_file_precomputed`) and make them
+/// queryable through both `WorkspaceSymbols` and `QueryDefinition`.
+#[tokio::test]
+async fn scip_import_precomputed_symbols_searchable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_scip.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    // ── Build a pre-computed document (SCIP-style: no source_text) ───────────
+    let uri = "lip://local/dep@1.0/scip_mod.rs";
+    let symbol_uri = format!("{uri}#ScipWidget");
+
+    let doc = OwnedDocument {
+        uri: uri.to_owned(),
+        content_hash: "cafebabe01234567".to_owned(),
+        language: "rust".to_owned(),
+        symbols: vec![OwnedSymbolInfo {
+            uri: symbol_uri.clone(),
+            display_name: "ScipWidget".to_owned(),
+            kind: SymbolKind::Class,
+            documentation: Some("A widget from SCIP import.".to_owned()),
+            signature: Some("pub struct ScipWidget".to_owned()),
+            confidence_score: 100,
+            relationships: vec![],
+            runtime_p99_ms: None,
+            call_rate_per_s: None,
+            taint_labels: vec![],
+            blast_radius: 0,
+            is_exported: true,
+        }],
+        occurrences: vec![OwnedOccurrence {
+            symbol_uri: symbol_uri.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 11,
+                end_line: 0,
+                end_char: 21,
+            },
+            confidence_score: 100,
+            role: Role::Definition,
+            override_doc: None,
+        }],
+        merkle_path: uri.to_owned(),
+        edges: vec![],
+        source_text: None, // <-- key: SCIP imports have no source
+    };
+
+    // ── Send the Delta ───────────────────────────────────────────────────────
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 100,
+            action: Action::Upsert,
+            document: doc,
+        },
+    )
+    .await
+    .expect("send scip delta");
+
+    let resp = recv(&mut client).await.expect("recv scip delta ack");
+    match resp {
+        ServerMessage::DeltaAck { seq, accepted, .. } => {
+            assert_eq!(seq, 100);
+            assert!(accepted, "daemon rejected pre-computed delta");
+        }
+        other => panic!("expected DeltaAck, got {other:?}"),
+    }
+
+    // ── WorkspaceSymbols: the pre-computed symbol must be discoverable ───────
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            query: "ScipWidget".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send workspace symbols query");
+
+    let resp = recv(&mut client).await.expect("recv workspace symbols");
+    match resp {
+        ServerMessage::WorkspaceSymbolsResult { symbols } => {
+            assert!(
+                !symbols.is_empty(),
+                "expected ScipWidget in workspace symbols, got none"
+            );
+            assert!(
+                symbols.iter().any(|s| s.display_name == "ScipWidget"),
+                "ScipWidget not found in results: {symbols:?}"
+            );
+        }
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    }
+
+    // ── QueryDefinition: the Definition-role occurrence must resolve ─────────
+    send(
+        &mut client,
+        &ClientMessage::QueryDefinition {
+            uri: uri.to_owned(),
+            line: 0,
+            col: 15, // inside the occurrence range [11..21]
+        },
+    )
+    .await
+    .expect("send query definition");
+
+    let resp = recv(&mut client).await.expect("recv definition result");
+    match resp {
+        ServerMessage::DefinitionResult {
+            symbol,
+            location_uri,
+            ..
+        } => {
+            assert!(
+                symbol.is_some(),
+                "expected symbol info for ScipWidget, got None"
+            );
+            let sym = symbol.unwrap();
+            assert_eq!(sym.display_name, "ScipWidget");
+            assert_eq!(
+                location_uri.as_deref(),
+                Some(uri),
+                "definition should resolve to the same file"
+            );
+        }
+        other => panic!("expected DefinitionResult, got {other:?}"),
+    }
+
+    // ── Cleanup ──────────────────────────────────────────────────────────────
     task.abort();
     let _ = task.await;
 }

@@ -419,6 +419,14 @@ impl Session {
                 ServerMessage::DeadSymbolsResult { symbols }
             }
 
+            ClientMessage::QueryInvalidatedFiles {
+                changed_symbol_uris,
+            } => {
+                let db = self.db.lock().await;
+                let file_uris = db.invalidated_files_for(&changed_symbol_uris);
+                ServerMessage::InvalidatedFilesResult { file_uris }
+            }
+
             // ── Annotations ───────────────────────────────────────────────
             ClientMessage::AnnotationSet {
                 symbol_uri,
@@ -1893,6 +1901,13 @@ fn process_query_sync(
         ClientMessage::QueryDeadSymbols { limit } => {
             let symbols = db.dead_symbols(limit);
             ok(ServerMessage::DeadSymbolsResult { symbols })
+        }
+
+        ClientMessage::QueryInvalidatedFiles {
+            changed_symbol_uris,
+        } => {
+            let file_uris = db.invalidated_files_for(&changed_symbol_uris);
+            ok(ServerMessage::InvalidatedFilesResult { file_uris })
         }
 
         // ── Annotations ───────────────────────────────────────────────────
