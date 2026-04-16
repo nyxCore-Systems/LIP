@@ -227,9 +227,35 @@ impl Session {
                 let lang = document.language.clone();
                 let source_opt = document.source_text.clone();
 
+                let has_precomputed = document.source_text.is_none()
+                    && (!document.symbols.is_empty()
+                        || !document.occurrences.is_empty());
+                let content_hash = document.content_hash.clone();
+                let symbols = document.symbols.clone();
+                let occurrences = document.occurrences.clone();
+                let edges = document.edges.clone();
+
                 let workspace_root = {
                     let mut db = self.db.lock().await;
                     match action {
+                        Action::Upsert if has_precomputed => {
+                            self.journal_write(JournalEntry::UpsertFilePrecomputed {
+                                uri: uri.clone(),
+                                language: lang.clone(),
+                                content_hash: content_hash.clone(),
+                                symbols: symbols.clone(),
+                                occurrences: occurrences.clone(),
+                                edges: edges.clone(),
+                            });
+                            db.upsert_file_precomputed(
+                                uri.clone(),
+                                lang.clone(),
+                                content_hash,
+                                symbols,
+                                occurrences,
+                                edges,
+                            );
+                        }
                         Action::Upsert => {
                             let text = source_opt.clone().unwrap_or_default();
                             self.journal_write(JournalEntry::UpsertFile {

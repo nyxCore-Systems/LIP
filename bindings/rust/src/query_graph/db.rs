@@ -17,8 +17,8 @@ use crate::query_graph::types::{
 };
 use crate::schema::EdgeKind;
 use crate::schema::{
-    sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedOccurrence, OwnedRange,
-    OwnedSymbolInfo, Role,
+    sha256_hex, OwnedAnnotationEntry, OwnedDependencySlice, OwnedGraphEdge, OwnedOccurrence,
+    OwnedRange, OwnedSymbolInfo, Role,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -94,6 +94,12 @@ struct FileInput {
     language: String,
     /// Revision at which this input was last changed.
     revision: u64,
+    /// `true` when symbols/occurrences were supplied externally (SCIP import)
+    /// rather than derived from `text` by Tier 1.
+    precomputed: bool,
+    /// Content hash supplied by the caller (e.g. from `OwnedDocument.content_hash`).
+    /// Used by `stale_files` so Merkle sync works even when `text` is empty.
+    content_hash: String,
 }
 
 #[derive(Debug)]
@@ -227,12 +233,15 @@ impl LipDatabase {
     pub fn upsert_file(&mut self, uri: String, text: String, language: String) {
         self.revision += 1;
         let rev = self.revision;
+        let content_hash = sha256_hex(text.as_bytes());
         self.file_inputs.insert(
             uri.clone(),
             FileInput {
                 text,
                 language,
                 revision: rev,
+                precomputed: false,
+                content_hash,
             },
         );
         // Invalidate the direct derived caches. api_cache is intentionally kept
@@ -339,6 +348,121 @@ impl LipDatabase {
         self.file_embeddings.remove(&uri);
     }
 
+    /// Upsert a file whose symbols and occurrences are already computed
+    /// (e.g. SCIP import). Populates the same indexes as `upsert_file` but
+    /// skips the Tier 1 parser since the caller already provides the data.
+    pub fn upsert_file_precomputed(
+        &mut self,
+        uri: String,
+        language: String,
+        content_hash: String,
+        symbols: Vec<OwnedSymbolInfo>,
+        occurrences: Vec<OwnedOccurrence>,
+        edges: Vec<OwnedGraphEdge>,
+    ) {
+        self.revision += 1;
+        let rev = self.revision;
+        self.file_inputs.insert(
+            uri.clone(),
+            FileInput {
+                text: String::new(),
+                language,
+                revision: rev,
+                precomputed: true,
+                content_hash,
+            },
+        );
+
+        // Clear stale caches + def_index entries for this file.
+        self.sym_cache.remove(&uri);
+        self.occ_cache.remove(&uri);
+        let stale_defs: Vec<String> = self
+            .def_index
+            .iter()
+            .filter(|(_, (furi, _))| furi == &uri)
+            .map(|(sym_uri, _)| sym_uri.clone())
+            .collect();
+        for sym_uri in &stale_defs {
+            let name = extract_name(sym_uri);
+            if let Some(uris) = self.name_to_symbols.get_mut(name) {
+                uris.retain(|u| u != sym_uri);
+                if uris.is_empty() {
+                    self.name_to_symbols.remove(name);
+                }
+            }
+        }
+        self.def_index.retain(|_, (furi, _)| furi != &uri);
+
+        // Build def_index + name_to_symbols from pre-computed occurrences.
+        let occs = Arc::new(occurrences);
+        for occ in occs.iter() {
+            if occ.role == Role::Definition {
+                self.def_index
+                    .insert(occ.symbol_uri.clone(), (uri.clone(), occ.range.clone()));
+                let name = extract_name(&occ.symbol_uri).to_owned();
+                if !name.is_empty() {
+                    self.name_to_symbols
+                        .entry(name)
+                        .or_default()
+                        .push(occ.symbol_uri.clone());
+                }
+            }
+        }
+        self.occ_cache
+            .insert(uri.clone(), Cached::new(occs.clone(), rev));
+
+        // Seed sym_cache so file_symbols() returns the pre-computed symbols.
+        let syms = Arc::new(symbols);
+        self.sym_cache
+            .insert(uri.clone(), Cached::new(syms, rev));
+
+        // Consumed-names index (same as upsert_file).
+        {
+            let mut consumed: HashSet<String> = HashSet::new();
+            for occ in occs.iter().filter(|o| o.role == Role::Reference) {
+                let name = extract_name(&occ.symbol_uri);
+                if name.is_empty() {
+                    continue;
+                }
+                let is_external = self
+                    .def_index
+                    .get(&occ.symbol_uri)
+                    .map(|(def_file, _)| def_file != &uri)
+                    .unwrap_or(true);
+                if is_external {
+                    consumed.insert(name.to_owned());
+                }
+            }
+            self.file_consumed_names.insert(uri.clone(), consumed);
+        }
+
+        // Call-edge indexes from pre-computed edges.
+        self.remove_file_call_edges(&uri);
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for edge in edges.iter().filter(|e| e.kind == EdgeKind::Calls) {
+            self.callee_to_callers
+                .entry(edge.to_uri.clone())
+                .or_default()
+                .push(edge.from_uri.clone());
+            let callee_name = extract_name(&edge.to_uri).to_owned();
+            if !callee_name.is_empty() {
+                self.callee_name_to_callers
+                    .entry(callee_name)
+                    .or_default()
+                    .push(edge.from_uri.clone());
+            }
+            pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
+        }
+        self.file_call_edges.insert(uri.clone(), pairs);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.file_indexed_at.insert(uri.clone(), now_ms);
+        self.file_embeddings.remove(&uri);
+    }
+
     pub fn remove_file(&mut self, uri: &str) {
         self.revision += 1;
         self.file_inputs.remove(uri);
@@ -402,7 +526,16 @@ impl LipDatabase {
 
     /// Returns the source text stored for `uri`, or `None` if not indexed.
     pub fn file_source_text(&self, uri: &str) -> Option<String> {
-        self.file_inputs.get(uri).map(|f| f.text.clone())
+        let fi = self.file_inputs.get(uri)?;
+        if fi.precomputed && fi.text.is_empty() {
+            if let Some(path) = uri.strip_prefix("file://") {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    return Some(text);
+                }
+            }
+            return None;
+        }
+        Some(fi.text.clone())
     }
 
     pub fn set_workspace_root(&mut self, root: PathBuf) {
@@ -475,6 +608,48 @@ impl LipDatabase {
         self.file_inputs.keys().cloned().collect()
     }
 
+    pub fn is_precomputed(&self, uri: &str) -> bool {
+        self.file_inputs.get(uri).is_some_and(|f| f.precomputed)
+    }
+
+    pub fn file_content_hash(&self, uri: &str) -> Option<&str> {
+        self.file_inputs.get(uri).map(|f| f.content_hash.as_str())
+    }
+
+    /// Read-only access to cached symbols (for journal compaction).
+    pub fn cached_symbols(&self, uri: &str) -> Arc<Vec<OwnedSymbolInfo>> {
+        self.sym_cache
+            .get(uri)
+            .map(|c| c.value.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read-only access to cached occurrences (for journal compaction).
+    pub fn cached_occurrences(&self, uri: &str) -> Arc<Vec<OwnedOccurrence>> {
+        self.occ_cache
+            .get(uri)
+            .map(|c| c.value.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return stored call-edge pairs for a file (for journal compaction).
+    pub fn file_call_edges_raw(&self, uri: &str) -> Vec<OwnedGraphEdge> {
+        self.file_call_edges
+            .get(uri)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|(from, to)| OwnedGraphEdge {
+                        from_uri: from.clone(),
+                        to_uri: to.clone(),
+                        kind: EdgeKind::Calls,
+                        at_range: OwnedRange::default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Merkle sync probe: given a slice of `(uri, client_content_hash)` pairs,
     /// returns URIs that are stale (daemon hash ≠ client hash) or unknown to
     /// the daemon (never indexed). The client should re-Delta each returned URI.
@@ -484,7 +659,7 @@ impl LipDatabase {
             .filter(|(uri, client_hash)| {
                 match self.file_inputs.get(uri) {
                     None => true, // daemon has never seen this file
-                    Some(fi) => sha256_hex(fi.text.as_bytes()) != *client_hash,
+                    Some(fi) => fi.content_hash != *client_hash,
                 }
             })
             .map(|(uri, _)| uri.clone())
@@ -3375,5 +3550,87 @@ impl Greeter {
 
         let (total, _, _) = db.coverage("/project/src");
         assert_eq!(total, 1, "should only count files under /project/src");
+    }
+
+    // ── Precomputed upsert (SCIP import path) ────────────────────────────
+
+    #[test]
+    fn precomputed_symbols_appear_in_search() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/lib.rs".to_owned();
+        let sym_uri = "lip://local/lib.rs#MyStruct".to_owned();
+        let symbols = vec![OwnedSymbolInfo {
+            uri: sym_uri.clone(),
+            display_name: "MyStruct".into(),
+            kind: SymbolKind::Class,
+            documentation: None,
+            signature: None,
+            confidence_score: 90,
+            relationships: vec![],
+            runtime_p99_ms: None,
+            call_rate_per_s: None,
+            taint_labels: vec![],
+            blast_radius: 0,
+            is_exported: false,
+        }];
+        let occurrences = vec![OwnedOccurrence {
+            symbol_uri: sym_uri.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 8,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+        }];
+
+        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash123".into(), symbols, occurrences, vec![]);
+
+        let syms = db.file_symbols(&uri);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].display_name, "MyStruct");
+
+        let results = db.workspace_symbols("MyStruct", 10);
+        assert_eq!(results.len(), 1, "pre-computed symbol must appear in workspace search");
+
+        assert!(
+            db.symbol_definition_location(&sym_uri).is_some(),
+            "pre-computed definition must be resolvable"
+        );
+    }
+
+    #[test]
+    fn precomputed_upsert_is_idempotent() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/lib.rs".to_owned();
+        let sym = OwnedSymbolInfo {
+            uri: "lip://local/lib.rs#Foo".into(),
+            display_name: "Foo".into(),
+            kind: SymbolKind::Function,
+            documentation: None,
+            signature: None,
+            confidence_score: 90,
+            relationships: vec![],
+            runtime_p99_ms: None,
+            call_rate_per_s: None,
+            taint_labels: vec![],
+            blast_radius: 0,
+            is_exported: false,
+        };
+        let occ = OwnedOccurrence {
+            symbol_uri: "lip://local/lib.rs#Foo".into(),
+            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+        };
+
+        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash1".into(), vec![sym.clone()], vec![occ.clone()], vec![]);
+        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash1".into(), vec![sym], vec![occ], vec![]);
+
+        let results = db.workspace_symbols("Foo", 10);
+        assert_eq!(results.len(), 1, "re-upsert must not duplicate symbols");
     }
 }
