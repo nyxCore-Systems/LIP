@@ -91,9 +91,11 @@ fn convert_document(doc: OwnedDocument) -> scip::Document {
     let occurrences: Vec<scip::Occurrence> =
         doc.occurrences.iter().map(convert_occurrence).collect();
 
-    // Note: scip::Document has no `text` field in the generated proto; source
-    // text is not part of the SCIP wire format at this schema version.
-    let _ = doc.source_text; // present in LIP, absent in SCIP
+    // SCIP has no representation for source text or CPG edges; both are
+    // LIP-only. A SCIP round-trip (import → export) is therefore lossy for
+    // call-graph / blast-radius data.
+    let _ = doc.source_text;
+    let _ = doc.edges;
     scip::Document {
         language: doc.language,
         relative_path: uri_to_relative_path(&doc.uri),

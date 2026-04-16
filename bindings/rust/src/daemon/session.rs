@@ -291,6 +291,11 @@ impl Session {
                 }
 
                 // Enqueue Tier 2 verification for supported languages on upsert.
+                // Skipped for pre-computed imports (SCIP): source_opt is None so
+                // the (Some(tx), Some(source)) guard below won't fire. This is
+                // intentional — SCIP emitters are authoritative; re-verifying via
+                // a local language server would be redundant and may not have the
+                // right project context.
                 if matches!(action, Action::Upsert) {
                     let needs_tier2 = lang == "rust"
                         || uri.ends_with(".rs")
