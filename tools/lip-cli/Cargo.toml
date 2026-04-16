@@ -18,7 +18,7 @@ name = "lip"
 path = "src/main.rs"
 
 [dependencies]
-lip        = { package = "lip-core", path = "../../bindings/rust", version = "2.1.0" }
+lip        = { package = "lip-core", path = "../../bindings/rust", version = "2.1.1" }
 clap       = { version = "4", features = ["derive", "env"] }
 tokio      = { version = "1", features = ["full"] }
 tower-lsp  = "0.20"
