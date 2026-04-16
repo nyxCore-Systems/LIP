@@ -25,3 +25,4 @@ target/
 
 # Dependency locks (kept for reproducibility — remove this line if you prefer)
 # Cargo.lock
+.claude/
