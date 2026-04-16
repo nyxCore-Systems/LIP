@@ -44,9 +44,9 @@ message Document {
 message SymbolInformation {
   string symbol = 1;
   repeated string documentation = 3;
-  repeated Relationship relationships = 2;
-  Kind kind = 4;
-  string display_name = 5;
+  repeated Relationship relationships = 4;
+  Kind kind = 5;
+  string display_name = 6;
 }
 
 // Symbol kind — values prefixed with K_ to avoid conflict with other enums.
