@@ -662,6 +662,7 @@ lip.query.definition(uri: string, position: Range) → SymbolInfo
 lip.query.references(symbol_uri: string, limit?: int) → [Occurrence]
 lip.query.hover(uri: string, position: Range) → HoverResult
 lip.query.blast_radius(symbol_uri: string) → BlastRadiusResult
+lip.query.blast_radius_batch(changed_file_uris: [string], min_score?: f32) → BlastRadiusBatchResult
 lip.query.subgraph(symbol_uri: string, depth: int) → SymbolGraph
 lip.query.taint(symbol_uri: string) → [TaintPath]
 lip.query.workspace_symbols(query: string, limit?: int) → [SymbolInfo]
@@ -757,6 +758,48 @@ lip.query.blast_radius(symbol_uri) → {
 
 Available as a pre-commit hook: "Changing this interface will affect 47 call sites
 across 12 files and 3 microservices."
+
+#### 8.1.1 Batch blast radius with semantic enrichment
+
+```
+lip.query.blast_radius_batch(changed_file_uris, min_score?) → {
+  results: [{
+    symbol_uri:           string,
+    direct_dependents:    int,
+    transitive_dependents: int,
+    affected_files:       [string],
+    direct_items:         [ImpactItem],
+    transitive_items:     [ImpactItem],
+    risk_level:           "low" | "medium" | "high",
+    truncated:            bool,
+    semantic_items:       [SemanticItem],   // only when min_score is set
+  }]
+}
+```
+
+Accepts changed **files** and resolves exported symbols server-side — one round-trip
+regardless of symbol count. Only symbols with kind `Function`, `Method`, `Class`,
+`Interface`, `Constructor`, or `Macro` are resolved; variables, constants, and
+parameters are excluded to avoid framework-wiring noise.
+
+When `min_score` is present, the daemon runs each changed file's embedding against
+the file embedding index and includes neighbours above the threshold as
+`semantic_items`. Each semantic item carries a `source` field:
+
+- **`"semantic"`** — found only via embedding similarity, not in the structural
+  call graph. Catches dynamic dispatch, macro-expanded call sites, and template
+  instantiation chains that SCIP's static graph cannot resolve.
+- **`"both"`** — found in both the structural graph and the embedding search,
+  confirming a structural edge with semantic evidence.
+
+**Embedding scope:** Semantic enrichment currently operates at file-level granularity
+(searching `file_embeddings`). Per-function chunked embeddings are not yet integrated
+into this path; when they are, the `symbol_uri` field in `SemanticItem` (currently
+empty) will carry the matched symbol, with no wire format change required.
+
+**Consumer contract (CKB):** `UniqueCallerCount` (which drives review thresholds)
+stays structural-only. Semantic callers are additive — they inform the human reviewer
+("8 callers (+3 semantically coupled)") but do not inflate risk scores.
 
 ### 8.2 Taint tracking
 

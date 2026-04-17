@@ -8,6 +8,19 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **`QueryBlastRadiusBatch`** — batch blast radius for all exported symbols in changed files, with optional semantic enrichment via file embeddings. Accepts `changed_file_uris` and optional `min_score` threshold. Resolves symbols server-side (filtered to Function, Method, Class, Interface, Constructor, Macro), runs structural BFS per symbol, and when `min_score` is set, augments results with cosine-similarity neighbours from the file embedding index. Each semantic hit carries a `source` field (`"semantic"` or `"both"`) so consumers can distinguish certainty tiers. Spec §8.1.1.
+- **`QueryInvalidatedFiles`** — name-based dependency tracking query. Given a set of changed symbol URIs, returns file URIs that consumed those names externally (Kotlin-IC inspired). Enables symbol-level re-verification without full reindex.
+- **`JournalEntry::UpsertFilePrecomputed`** — journal variant that persists pre-computed symbols, occurrences, and CPG edges from SCIP imports. Fixes data loss on daemon restart for SCIP-imported files.
+
+### Fixed
+
+- **SCIP proto field numbers** — `SymbolInformation.relationships` (2→4), `kind` (4→5), `display_name` (5→6) aligned with upstream SCIP. Fixes protobuf decode crash (`LengthDelimited where Varint expected`) when importing any index produced by a spec-compliant SCIP emitter.
+- **SCIP proto `Relationship.is_override`** → `is_definition` to match upstream field 5 semantics.
+- **SCIP import pre-computed symbol persistence** — Delta handler now routes pre-computed documents through `upsert_file_precomputed`, populating sym_cache, occ_cache, def_index, name_to_symbols, and call-edge indexes. Previously, SCIP-imported symbols were silently dropped.
+- **Journal replay for SCIP imports** — pre-computed symbols now survive daemon restart via `UpsertFilePrecomputed` journal entry.
+- **Merkle stale_files** — uses stored `content_hash` instead of hashing empty text for pre-computed files. Fixes infinite re-sync loop.
+- **file_source_text** — falls back to disk read for precomputed `file://` URIs. Fixes stream_context, embeddings, and explain-match for SCIP-imported files.
+
 - **`EndStreamReason::CursorOutOfRange`** and **`EndStreamReason::FileNotIndexed`** — split the previously-conflated `Error + "cursor_out_of_range"` emission into two typed reasons. Before, a cursor past EOF and a URI the daemon had never indexed both surfaced as `reason: error, error: "cursor_out_of_range"`; clients could not distinguish "user gave bad coordinates" from "daemon has nothing for this path." Now:
   - `CursorOutOfRange` — the file is indexed but the cursor line is outside its range. Error message reports the actual line count.
   - `FileNotIndexed` — the daemon has no record of the URI. Error message names the URI. Callers should upsert or reindex, then retry.

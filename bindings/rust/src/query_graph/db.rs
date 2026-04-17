@@ -1038,9 +1038,28 @@ impl LipDatabase {
         let mut seen_symbols: HashSet<String> = HashSet::new();
         let threshold = min_score.unwrap_or(0.6);
 
+        // Only resolve symbols whose kind produces meaningful blast-radius
+        // results. Variables, constants, parameters, and type aliases are
+        // excluded — they're dominated by framework wiring noise.
+        use crate::schema::SymbolKind;
+        let interesting = |k: SymbolKind| {
+            matches!(
+                k,
+                SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Constructor
+                    | SymbolKind::Macro
+            )
+        };
+
         for file_uri in changed_file_uris {
             let syms = self.file_symbols(file_uri);
             for sym in syms.iter() {
+                if !interesting(sym.kind) {
+                    continue;
+                }
                 if !seen_symbols.insert(sym.uri.clone()) {
                     continue;
                 }
@@ -1048,6 +1067,10 @@ impl LipDatabase {
 
                 let mut semantic_items = Vec::new();
                 if min_score.is_some() {
+                    // NOTE: searches file-level embeddings, not per-symbol embeddings.
+                    // Per-function chunked embeddings aren't integrated yet; when they
+                    // land, this upgrades without a wire format change (semantic_items
+                    // already carries symbol_uri, currently empty at file granularity).
                     if let Some(embedding) = self.file_embeddings.get(file_uri).cloned() {
                         let static_files: HashSet<&str> = static_result
                             .affected_files
