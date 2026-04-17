@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::query_graph::types::{
-    ApiSurface, BlastRadiusResult, ImpactItem, RiskLevel, SimilarSymbol,
+    ApiSurface, BlastRadiusResult, EnrichedBlastRadius, ImpactItem, ImpactSource, RiskLevel,
+    SemanticImpactItem, SimilarSymbol,
 };
 use crate::schema::EdgeKind;
 use crate::schema::{
@@ -1020,6 +1021,71 @@ impl LipDatabase {
             truncated,
             risk_level,
         }
+    }
+
+    /// Batch blast-radius for all symbols defined in the given files,
+    /// optionally enriched with embedding-based semantic coupling.
+    ///
+    /// When `min_score` is `Some(threshold)`, each changed file's embedding
+    /// is compared against the index and neighbours above the threshold are
+    /// returned as `semantic_items`. Omit to get static-only results.
+    pub fn blast_radius_batch(
+        &mut self,
+        changed_file_uris: &[String],
+        min_score: Option<f32>,
+    ) -> Vec<EnrichedBlastRadius> {
+        let mut results = Vec::new();
+        let mut seen_symbols: HashSet<String> = HashSet::new();
+        let threshold = min_score.unwrap_or(0.6);
+
+        for file_uri in changed_file_uris {
+            let syms = self.file_symbols(file_uri);
+            for sym in syms.iter() {
+                if !seen_symbols.insert(sym.uri.clone()) {
+                    continue;
+                }
+                let static_result = self.blast_radius_for(&sym.uri);
+
+                let mut semantic_items = Vec::new();
+                if min_score.is_some() {
+                    if let Some(embedding) = self.file_embeddings.get(file_uri).cloned() {
+                        let static_files: HashSet<&str> = static_result
+                            .affected_files
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect();
+
+                        let neighbours = self.nearest_by_vector(
+                            &embedding,
+                            20,
+                            Some(file_uri),
+                            None,
+                            Some(threshold),
+                        );
+
+                        for neighbour in neighbours {
+                            let source = if static_files.contains(neighbour.uri.as_str()) {
+                                ImpactSource::Both
+                            } else {
+                                ImpactSource::Semantic
+                            };
+                            semantic_items.push(SemanticImpactItem {
+                                file_uri: neighbour.uri,
+                                symbol_uri: String::new(),
+                                similarity: neighbour.score,
+                                source,
+                            });
+                        }
+                    }
+                }
+
+                results.push(EnrichedBlastRadius {
+                    static_result,
+                    semantic_items,
+                });
+            }
+        }
+        results
     }
 
     /// Find the symbol URI whose occurrence range contains `(line, col)` in `uri`.

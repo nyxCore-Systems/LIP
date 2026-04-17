@@ -63,6 +63,40 @@ impl ImpactItem {
     }
 }
 
+/// How an impact item was discovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactSource {
+    /// Discovered via static call graph / dependency analysis.
+    Static,
+    /// Discovered via embedding similarity (semantic coupling).
+    Semantic,
+    /// Confirmed by both static analysis and semantic similarity.
+    Both,
+}
+
+/// A single entry in a batch blast-radius result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedBlastRadius {
+    /// The static blast-radius result.
+    #[serde(flatten)]
+    pub static_result: BlastRadiusResult,
+    /// Semantically coupled files/symbols not in the static call graph.
+    /// Empty when `include_semantic` was false or embeddings are unavailable.
+    pub semantic_items: Vec<SemanticImpactItem>,
+}
+
+/// An impact item discovered through embedding similarity rather than
+/// static call-graph edges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticImpactItem {
+    pub file_uri: String,
+    pub symbol_uri: String,
+    /// Cosine similarity in [0.0, 1.0].
+    pub similarity: f32,
+    pub source: ImpactSource,
+}
+
 /// A single nearest-neighbor hit returned by `ServerMessage::NearestResult`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NearestItem {
@@ -194,6 +228,9 @@ pub enum ServerMessage {
         symbol: Option<OwnedSymbolInfo>,
     },
     BlastRadiusResult(BlastRadiusResult),
+    BlastRadiusBatchResult {
+        results: Vec<EnrichedBlastRadius>,
+    },
     WorkspaceSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
     },
@@ -675,6 +712,21 @@ pub enum ClientMessage {
     QueryBlastRadius {
         symbol_uri: String,
     },
+    /// Batch blast-radius for all symbols defined in the given files.
+    /// Optionally enriched with embedding-based semantic coupling.
+    /// Returns `BlastRadiusBatchResult`.
+    ///
+    /// When `min_score` is present, semantic enrichment is enabled:
+    /// each changed file's embedding is compared against the index and
+    /// neighbours above the threshold are included as `semantic_items`.
+    /// Omit or set to `null` to skip semantic enrichment.
+    QueryBlastRadiusBatch {
+        changed_file_uris: Vec<String>,
+        /// Minimum cosine similarity for semantic hits (default: 0.6).
+        /// Presence enables semantic enrichment.
+        #[serde(default)]
+        min_score: Option<f32>,
+    },
     QueryWorkspaceSymbols {
         query: String,
         limit: Option<usize>,
@@ -1124,6 +1176,7 @@ impl ClientMessage {
             "query_references",
             "query_hover",
             "query_blast_radius",
+            "query_blast_radius_batch",
             "query_workspace_symbols",
             "query_document_symbols",
             "query_dead_symbols",
@@ -1194,6 +1247,7 @@ impl ClientMessage {
             ClientMessage::QueryReferences { .. } => "query_references",
             ClientMessage::QueryHover { .. } => "query_hover",
             ClientMessage::QueryBlastRadius { .. } => "query_blast_radius",
+            ClientMessage::QueryBlastRadiusBatch { .. } => "query_blast_radius_batch",
             ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
             ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
             ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
@@ -1453,6 +1507,10 @@ mod tests {
             },
             ClientMessage::QueryBlastRadius {
                 symbol_uri: String::new(),
+            },
+            ClientMessage::QueryBlastRadiusBatch {
+                changed_file_uris: vec![],
+                min_score: None,
             },
             ClientMessage::QueryWorkspaceSymbols {
                 query: String::new(),

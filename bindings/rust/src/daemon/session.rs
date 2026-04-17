@@ -400,6 +400,16 @@ impl Session {
                 ServerMessage::BlastRadiusResult(result)
             }
 
+            ClientMessage::QueryBlastRadiusBatch {
+                changed_file_uris,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let results =
+                    db.blast_radius_batch(&changed_file_uris, min_score);
+                ServerMessage::BlastRadiusBatchResult { results }
+            }
+
             ClientMessage::QueryWorkspaceSymbols { query, limit } => {
                 let limit = limit.unwrap_or(100);
                 let mut db = self.db.lock().await;
@@ -1885,6 +1895,14 @@ fn process_query_sync(
         ClientMessage::QueryBlastRadius { symbol_uri } => {
             let result = db.blast_radius_for(&symbol_uri);
             ok(ServerMessage::BlastRadiusResult(result))
+        }
+
+        ClientMessage::QueryBlastRadiusBatch {
+            changed_file_uris,
+            min_score,
+        } => {
+            let results = db.blast_radius_batch(&changed_file_uris, min_score);
+            ok(ServerMessage::BlastRadiusBatchResult { results })
         }
 
         ClientMessage::QueryWorkspaceSymbols { query, limit } => {
