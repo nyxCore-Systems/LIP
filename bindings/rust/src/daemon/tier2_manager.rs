@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
@@ -44,35 +45,79 @@ pub struct VerificationJob {
 
 // ─── Per-language backend state ───────────────────────────────────────────────
 
+/// Exponential backoff state for a single backend.
+///
+/// On each failure `fail()` is called — it schedules the backend to be
+/// unavailable for `2^failure_count` seconds, capped at 5 minutes. On
+/// success `reset()` is called — failure count drops to zero.
+#[derive(Default)]
+struct BackoffState {
+    failure_count: u8,
+    available_after: Option<Instant>,
+}
+
+impl BackoffState {
+    fn is_available(&self) -> bool {
+        self.available_after
+            .map(|t| Instant::now() >= t)
+            .unwrap_or(true)
+    }
+
+    fn fail(&mut self) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        let secs = (1u64 << self.failure_count.min(8)).min(300); // 2s … 300s
+        self.available_after = Some(Instant::now() + Duration::from_secs(secs));
+    }
+
+    fn reset(&mut self) {
+        self.failure_count = 0;
+        self.available_after = None;
+    }
+
+    fn is_permanent_failure(&self) -> bool {
+        // Treat as permanent only after 8+ consecutive failures (~5-min blackout).
+        self.failure_count >= 8
+    }
+}
+
 /// Holds an optional instance of each language server backend.
 ///
-/// `None` means either "not yet started" OR "permanently disabled" (spawn
-/// failed). The `disabled_*` sentinels distinguish the two states so we don't
-/// retry a binary that is not installed.
+/// `None` means "not yet started". The `backoff_*` fields track consecutive
+/// failures; a backend is retried after an exponential delay rather than
+/// being permanently disabled, so a transient spawn failure or crash
+/// recovers automatically.
 struct Tier2Backends {
     rust: Option<RustAnalyzerBackend>,
-    rust_ws: Option<PathBuf>, // workspace last used to init rust backend
-    rust_disabled: bool,
+    rust_ws: Option<PathBuf>,
+    rust_backoff: BackoffState,
+    rust_disabled: bool, // binary not installed (spawn returned ENOENT / similar)
 
     typescript: Option<TypeScriptBackend>,
+    typescript_backoff: BackoffState,
     typescript_disabled: bool,
 
     python: Option<PythonBackend>,
+    python_backoff: BackoffState,
     python_disabled: bool,
 
     dart: Option<DartBackend>,
+    dart_backoff: BackoffState,
     dart_disabled: bool,
 
     clangd: Option<ClangdBackend>,
+    clangd_backoff: BackoffState,
     clangd_disabled: bool,
 
     gopls: Option<GoplsBackend>,
+    gopls_backoff: BackoffState,
     gopls_disabled: bool,
 
     kotlin: Option<KotlinBackend>,
+    kotlin_backoff: BackoffState,
     kotlin_disabled: bool,
 
     swift: Option<SwiftBackend>,
+    swift_backoff: BackoffState,
     swift_disabled: bool,
 }
 
@@ -81,20 +126,28 @@ impl Tier2Backends {
         Self {
             rust: None,
             rust_ws: None,
+            rust_backoff: BackoffState::default(),
             rust_disabled: false,
             typescript: None,
+            typescript_backoff: BackoffState::default(),
             typescript_disabled: false,
             python: None,
+            python_backoff: BackoffState::default(),
             python_disabled: false,
             dart: None,
+            dart_backoff: BackoffState::default(),
             dart_disabled: false,
             clangd: None,
+            clangd_backoff: BackoffState::default(),
             clangd_disabled: false,
             gopls: None,
+            gopls_backoff: BackoffState::default(),
             gopls_disabled: false,
             kotlin: None,
+            kotlin_backoff: BackoffState::default(),
             kotlin_disabled: false,
             swift: None,
+            swift_backoff: BackoffState::default(),
             swift_disabled: false,
         }
     }
@@ -174,6 +227,10 @@ impl Tier2Manager {
         if self.backends.rust_disabled {
             return;
         }
+        if !self.backends.rust_backoff.is_available() {
+            debug!("tier2: rust-analyzer in backoff, skipping {}", job.uri);
+            return;
+        }
 
         // If the workspace changed, tear down the old backend.
         if let Some(root) = &job.workspace_root {
@@ -200,11 +257,17 @@ impl Tier2Manager {
                 Ok(b) => {
                     info!("tier2: rust-analyzer backend ready");
                     self.backends.rust = Some(b);
+                    self.backends.rust_backoff.reset();
                 }
                 Err(e) => {
-                    warn!("tier2: rust-analyzer unavailable, disabling: {e}");
-                    self.backends.rust_disabled = true;
-                    self.backends.rust_ws = None;
+                    self.backends.rust_backoff.fail();
+                    if self.backends.rust_backoff.is_permanent_failure() {
+                        warn!("tier2: rust-analyzer unavailable after repeated failures, disabling: {e}");
+                        self.backends.rust_disabled = true;
+                        self.backends.rust_ws = None;
+                    } else {
+                        warn!("tier2: rust-analyzer spawn failed (will retry with backoff): {e}");
+                    }
                     return;
                 }
             }
@@ -220,12 +283,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.rust_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: rust verification failed for {}: {e}", job.uri);
-                // Assume backend crashed; reset so we reinitialise on next job.
                 self.backends.rust = None;
+                self.backends.rust_backoff.fail();
             }
         }
     }
@@ -233,7 +297,10 @@ impl Tier2Manager {
     // ── TypeScript ────────────────────────────────────────────────────────────
 
     async fn ensure_ts_backend(&mut self) {
-        if self.backends.typescript.is_some() || self.backends.typescript_disabled {
+        if self.backends.typescript.is_some()
+            || self.backends.typescript_disabled
+            || !self.backends.typescript_backoff.is_available()
+        {
             return;
         }
 
@@ -241,21 +308,27 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: typescript-language-server backend ready");
                 self.backends.typescript = Some(b);
+                self.backends.typescript_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: typescript-language-server unavailable, disabling: {e}");
-                self.backends.typescript_disabled = true;
+                self.backends.typescript_backoff.fail();
+                if self.backends.typescript_backoff.is_permanent_failure() {
+                    warn!("tier2: typescript-language-server unavailable, disabling: {e}");
+                    self.backends.typescript_disabled = true;
+                } else {
+                    warn!("tier2: typescript-language-server spawn failed (will retry with backoff): {e}");
+                }
             }
         }
     }
 
     async fn handle_typescript(&mut self, job: VerificationJob) {
-        if self.backends.typescript_disabled {
+        if self.backends.typescript_disabled || !self.backends.typescript_backoff.is_available() {
             return;
         }
 
         self.ensure_ts_backend().await;
-        if self.backends.typescript_disabled {
+        if self.backends.typescript.is_none() {
             return;
         }
 
@@ -269,11 +342,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.typescript_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: typescript verification failed for {}: {e}", job.uri);
                 self.backends.typescript = None;
+                self.backends.typescript_backoff.fail();
             }
         }
     }
@@ -281,7 +356,10 @@ impl Tier2Manager {
     // ── Python ────────────────────────────────────────────────────────────────
 
     async fn ensure_python_backend(&mut self) {
-        if self.backends.python.is_some() || self.backends.python_disabled {
+        if self.backends.python.is_some()
+            || self.backends.python_disabled
+            || !self.backends.python_backoff.is_available()
+        {
             return;
         }
 
@@ -289,21 +367,29 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: python language server backend ready");
                 self.backends.python = Some(b);
+                self.backends.python_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: python language server unavailable, disabling: {e}");
-                self.backends.python_disabled = true;
+                self.backends.python_backoff.fail();
+                if self.backends.python_backoff.is_permanent_failure() {
+                    warn!("tier2: python language server unavailable, disabling: {e}");
+                    self.backends.python_disabled = true;
+                } else {
+                    warn!(
+                        "tier2: python language server spawn failed (will retry with backoff): {e}"
+                    );
+                }
             }
         }
     }
 
     async fn handle_python(&mut self, job: VerificationJob) {
-        if self.backends.python_disabled {
+        if self.backends.python_disabled || !self.backends.python_backoff.is_available() {
             return;
         }
 
         self.ensure_python_backend().await;
-        if self.backends.python_disabled {
+        if self.backends.python.is_none() {
             return;
         }
 
@@ -317,11 +403,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.python_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: python verification failed for {}: {e}", job.uri);
                 self.backends.python = None;
+                self.backends.python_backoff.fail();
             }
         }
     }
@@ -329,7 +417,10 @@ impl Tier2Manager {
     // ── Dart ──────────────────────────────────────────────────────────────────
 
     async fn ensure_dart_backend(&mut self) {
-        if self.backends.dart.is_some() || self.backends.dart_disabled {
+        if self.backends.dart.is_some()
+            || self.backends.dart_disabled
+            || !self.backends.dart_backoff.is_available()
+        {
             return;
         }
 
@@ -337,21 +428,29 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: dart language-server backend ready");
                 self.backends.dart = Some(b);
+                self.backends.dart_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: dart language-server unavailable, disabling: {e}");
-                self.backends.dart_disabled = true;
+                self.backends.dart_backoff.fail();
+                if self.backends.dart_backoff.is_permanent_failure() {
+                    warn!("tier2: dart language-server unavailable, disabling: {e}");
+                    self.backends.dart_disabled = true;
+                } else {
+                    warn!(
+                        "tier2: dart language-server spawn failed (will retry with backoff): {e}"
+                    );
+                }
             }
         }
     }
 
     async fn handle_dart(&mut self, job: VerificationJob) {
-        if self.backends.dart_disabled {
+        if self.backends.dart_disabled || !self.backends.dart_backoff.is_available() {
             return;
         }
 
         self.ensure_dart_backend().await;
-        if self.backends.dart_disabled {
+        if self.backends.dart.is_none() {
             return;
         }
 
@@ -365,11 +464,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.dart_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: dart verification failed for {}: {e}", job.uri);
                 self.backends.dart = None;
+                self.backends.dart_backoff.fail();
             }
         }
     }
@@ -377,7 +478,10 @@ impl Tier2Manager {
     // ── C / C++ ───────────────────────────────────────────────────────────────
 
     async fn ensure_clangd_backend(&mut self, workspace_root: Option<PathBuf>) {
-        if self.backends.clangd.is_some() || self.backends.clangd_disabled {
+        if self.backends.clangd.is_some()
+            || self.backends.clangd_disabled
+            || !self.backends.clangd_backoff.is_available()
+        {
             return;
         }
 
@@ -385,21 +489,27 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: clangd backend ready");
                 self.backends.clangd = Some(b);
+                self.backends.clangd_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: clangd unavailable, disabling: {e}");
-                self.backends.clangd_disabled = true;
+                self.backends.clangd_backoff.fail();
+                if self.backends.clangd_backoff.is_permanent_failure() {
+                    warn!("tier2: clangd unavailable, disabling: {e}");
+                    self.backends.clangd_disabled = true;
+                } else {
+                    warn!("tier2: clangd spawn failed (will retry with backoff): {e}");
+                }
             }
         }
     }
 
     async fn handle_clangd(&mut self, job: VerificationJob) {
-        if self.backends.clangd_disabled {
+        if self.backends.clangd_disabled || !self.backends.clangd_backoff.is_available() {
             return;
         }
 
         self.ensure_clangd_backend(job.workspace_root.clone()).await;
-        if self.backends.clangd_disabled {
+        if self.backends.clangd.is_none() {
             return;
         }
 
@@ -413,11 +523,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.clangd_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: clangd verification failed for {}: {e}", job.uri);
                 self.backends.clangd = None;
+                self.backends.clangd_backoff.fail();
             }
         }
     }
@@ -425,7 +537,10 @@ impl Tier2Manager {
     // ── Go ────────────────────────────────────────────────────────────────────
 
     async fn ensure_gopls_backend(&mut self, workspace_root: Option<PathBuf>) {
-        if self.backends.gopls.is_some() || self.backends.gopls_disabled {
+        if self.backends.gopls.is_some()
+            || self.backends.gopls_disabled
+            || !self.backends.gopls_backoff.is_available()
+        {
             return;
         }
 
@@ -433,21 +548,27 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: gopls backend ready");
                 self.backends.gopls = Some(b);
+                self.backends.gopls_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: gopls unavailable, disabling: {e}");
-                self.backends.gopls_disabled = true;
+                self.backends.gopls_backoff.fail();
+                if self.backends.gopls_backoff.is_permanent_failure() {
+                    warn!("tier2: gopls unavailable, disabling: {e}");
+                    self.backends.gopls_disabled = true;
+                } else {
+                    warn!("tier2: gopls spawn failed (will retry with backoff): {e}");
+                }
             }
         }
     }
 
     async fn handle_gopls(&mut self, job: VerificationJob) {
-        if self.backends.gopls_disabled {
+        if self.backends.gopls_disabled || !self.backends.gopls_backoff.is_available() {
             return;
         }
 
         self.ensure_gopls_backend(job.workspace_root.clone()).await;
-        if self.backends.gopls_disabled {
+        if self.backends.gopls.is_none() {
             return;
         }
 
@@ -461,11 +582,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.gopls_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: gopls verification failed for {}: {e}", job.uri);
                 self.backends.gopls = None;
+                self.backends.gopls_backoff.fail();
             }
         }
     }
@@ -473,7 +596,10 @@ impl Tier2Manager {
     // ── Kotlin ────────────────────────────────────────────────────────────────
 
     async fn ensure_kotlin_backend(&mut self, workspace_root: Option<PathBuf>) {
-        if self.backends.kotlin.is_some() || self.backends.kotlin_disabled {
+        if self.backends.kotlin.is_some()
+            || self.backends.kotlin_disabled
+            || !self.backends.kotlin_backoff.is_available()
+        {
             return;
         }
 
@@ -481,21 +607,29 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: kotlin-language-server backend ready");
                 self.backends.kotlin = Some(b);
+                self.backends.kotlin_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: kotlin-language-server unavailable, disabling: {e}");
-                self.backends.kotlin_disabled = true;
+                self.backends.kotlin_backoff.fail();
+                if self.backends.kotlin_backoff.is_permanent_failure() {
+                    warn!("tier2: kotlin-language-server unavailable, disabling: {e}");
+                    self.backends.kotlin_disabled = true;
+                } else {
+                    warn!(
+                        "tier2: kotlin-language-server spawn failed (will retry with backoff): {e}"
+                    );
+                }
             }
         }
     }
 
     async fn handle_kotlin(&mut self, job: VerificationJob) {
-        if self.backends.kotlin_disabled {
+        if self.backends.kotlin_disabled || !self.backends.kotlin_backoff.is_available() {
             return;
         }
 
         self.ensure_kotlin_backend(job.workspace_root.clone()).await;
-        if self.backends.kotlin_disabled {
+        if self.backends.kotlin.is_none() {
             return;
         }
 
@@ -509,11 +643,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.kotlin_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: kotlin verification failed for {}: {e}", job.uri);
                 self.backends.kotlin = None;
+                self.backends.kotlin_backoff.fail();
             }
         }
     }
@@ -521,7 +657,10 @@ impl Tier2Manager {
     // ── Swift ─────────────────────────────────────────────────────────────────
 
     async fn ensure_swift_backend(&mut self, workspace_root: Option<PathBuf>) {
-        if self.backends.swift.is_some() || self.backends.swift_disabled {
+        if self.backends.swift.is_some()
+            || self.backends.swift_disabled
+            || !self.backends.swift_backoff.is_available()
+        {
             return;
         }
 
@@ -529,21 +668,27 @@ impl Tier2Manager {
             Ok(b) => {
                 info!("tier2: sourcekit-lsp backend ready");
                 self.backends.swift = Some(b);
+                self.backends.swift_backoff.reset();
             }
             Err(e) => {
-                warn!("tier2: sourcekit-lsp unavailable, disabling: {e}");
-                self.backends.swift_disabled = true;
+                self.backends.swift_backoff.fail();
+                if self.backends.swift_backoff.is_permanent_failure() {
+                    warn!("tier2: sourcekit-lsp unavailable, disabling: {e}");
+                    self.backends.swift_disabled = true;
+                } else {
+                    warn!("tier2: sourcekit-lsp spawn failed (will retry with backoff): {e}");
+                }
             }
         }
     }
 
     async fn handle_swift(&mut self, job: VerificationJob) {
-        if self.backends.swift_disabled {
+        if self.backends.swift_disabled || !self.backends.swift_backoff.is_available() {
             return;
         }
 
         self.ensure_swift_backend(job.workspace_root.clone()).await;
-        if self.backends.swift_disabled {
+        if self.backends.swift.is_none() {
             return;
         }
 
@@ -557,11 +702,13 @@ impl Tier2Manager {
                 let mut db = self.db.lock().await;
                 self.broadcast_upgrades(&result.uri, &result.symbols, &mut db);
                 db.upgrade_file_symbols(&result.uri, &result.symbols);
+                self.backends.swift_backoff.reset();
                 debug!("tier2: upgraded {upgraded} symbols for {}", job.uri);
             }
             Err(e) => {
                 error!("tier2: swift verification failed for {}: {e}", job.uri);
                 self.backends.swift = None;
+                self.backends.swift_backoff.fail();
             }
         }
     }
@@ -745,7 +892,8 @@ mod tests {
                 workspace_root: None,
                 version: 1,
             };
-            tx.try_send(job).expect("channel should accept up to capacity");
+            tx.try_send(job)
+                .expect("channel should accept up to capacity");
         }
 
         // The next try_send must fail — this is the documented contract.
@@ -1122,27 +1270,35 @@ mod tests {
 
     // ── Tier2Backends default state ──────────────────────────────────────────
 
-    /// Fresh `Tier2Backends` must have all backends as `None` and all
-    /// disabled flags as `false` — backends are lazily initialised.
+    /// Fresh `Tier2Backends` must have all backends as `None`, all
+    /// disabled flags as `false`, and all backoff states clear.
     #[test]
     fn backends_default_state() {
         let b = Tier2Backends::new();
         assert!(b.rust.is_none());
         assert!(!b.rust_disabled);
+        assert!(b.rust_backoff.is_available());
         assert!(b.typescript.is_none());
         assert!(!b.typescript_disabled);
+        assert!(b.typescript_backoff.is_available());
         assert!(b.python.is_none());
         assert!(!b.python_disabled);
+        assert!(b.python_backoff.is_available());
         assert!(b.dart.is_none());
         assert!(!b.dart_disabled);
+        assert!(b.dart_backoff.is_available());
         assert!(b.clangd.is_none());
         assert!(!b.clangd_disabled);
+        assert!(b.clangd_backoff.is_available());
         assert!(b.gopls.is_none());
         assert!(!b.gopls_disabled);
+        assert!(b.gopls_backoff.is_available());
         assert!(b.kotlin.is_none());
         assert!(!b.kotlin_disabled);
+        assert!(b.kotlin_backoff.is_available());
         assert!(b.swift.is_none());
         assert!(!b.swift_disabled);
+        assert!(b.swift_backoff.is_available());
     }
 
     // ── Channel capacity constant ────────────────────────────────────────────
@@ -1150,5 +1306,51 @@ mod tests {
     #[test]
     fn channel_capacity_is_64() {
         assert_eq!(CHANNEL_CAPACITY, 64);
+    }
+
+    // ── BackoffState ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_fresh_is_available() {
+        let b = BackoffState::default();
+        assert!(b.is_available());
+        assert!(!b.is_permanent_failure());
+    }
+
+    #[test]
+    fn backoff_fail_makes_unavailable() {
+        let mut b = BackoffState::default();
+        b.fail();
+        assert!(!b.is_available());
+        assert_eq!(b.failure_count, 1);
+    }
+
+    #[test]
+    fn backoff_reset_clears_state() {
+        let mut b = BackoffState::default();
+        b.fail();
+        b.fail();
+        b.reset();
+        assert!(b.is_available());
+        assert_eq!(b.failure_count, 0);
+        assert!(!b.is_permanent_failure());
+    }
+
+    #[test]
+    fn backoff_permanent_after_8_failures() {
+        let mut b = BackoffState::default();
+        for _ in 0..8 {
+            b.fail();
+        }
+        assert!(b.is_permanent_failure());
+    }
+
+    #[test]
+    fn backoff_not_permanent_before_8_failures() {
+        let mut b = BackoffState::default();
+        for _ in 0..7 {
+            b.fail();
+        }
+        assert!(!b.is_permanent_failure());
     }
 }

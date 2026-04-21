@@ -182,10 +182,7 @@ pub fn compact(path: &Path, db: &LipDatabase) -> anyhow::Result<usize> {
                 continue;
             };
             if db.is_precomputed(&uri) {
-                let content_hash = db
-                    .file_content_hash(&uri)
-                    .unwrap_or_default()
-                    .to_owned();
+                let content_hash = db.file_content_hash(&uri).unwrap_or_default().to_owned();
                 let symbols = db.cached_symbols(&uri).as_ref().clone();
                 let occurrences = db.cached_occurrences(&uri).as_ref().clone();
                 let edges = db.file_call_edges_raw(&uri);

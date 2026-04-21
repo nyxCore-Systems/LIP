@@ -228,8 +228,7 @@ impl Session {
                 let source_opt = document.source_text.clone();
 
                 let has_precomputed = document.source_text.is_none()
-                    && (!document.symbols.is_empty()
-                        || !document.occurrences.is_empty());
+                    && (!document.symbols.is_empty() || !document.occurrences.is_empty());
                 let content_hash = document.content_hash.clone();
                 let symbols = document.symbols.clone();
                 let occurrences = document.occurrences.clone();
@@ -405,8 +404,7 @@ impl Session {
                 min_score,
             } => {
                 let mut db = self.db.lock().await;
-                let results =
-                    db.blast_radius_batch(&changed_file_uris, min_score);
+                let results = db.blast_radius_batch(&changed_file_uris, min_score);
                 ServerMessage::BlastRadiusBatchResult { results }
             }
 
@@ -628,7 +626,7 @@ impl Session {
                 };
                 let vectors: Vec<Option<Vec<f32>>> = cached_hits
                     .into_iter()
-                    .zip(texts_needed.into_iter())
+                    .zip(texts_needed)
                     .map(|(cached, needed)| {
                         if let Some(v) = cached {
                             Some(v)
@@ -1163,6 +1161,7 @@ impl Session {
                         Some(crate::query_graph::types::NearestItem {
                             uri: c.clone(),
                             score,
+                            embedding_model: None,
                         })
                     })
                     .collect();
@@ -1368,6 +1367,7 @@ impl Session {
                         Some(crate::query_graph::types::NearestItem {
                             uri: store_uri.clone(),
                             score,
+                            embedding_model: None,
                         })
                     })
                     .collect();
@@ -1539,7 +1539,7 @@ impl Session {
                 let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let mut scored: Vec<crate::query_graph::types::ExplanationChunk> = raw_chunks
                     .into_iter()
-                    .zip(chunk_vecs.into_iter())
+                    .zip(chunk_vecs)
                     .filter_map(|((start_line, end_line, chunk_text), vec)| {
                         if vec.len() != query_vec.len() || q_norm == 0.0 {
                             return None;
@@ -1609,6 +1609,73 @@ impl Session {
                     accepted: true,
                     error: None,
                 }
+            }
+
+            // ── v2.2 features ─────────────────────────────────────────────
+            ClientMessage::ReindexStale {
+                uris,
+                max_age_seconds,
+            } => {
+                let mut reindexed = Vec::new();
+                let mut skipped = Vec::new();
+                for uri in &uris {
+                    let is_stale = {
+                        let db = self.db.lock().await;
+                        let (indexed, _, age_seconds) = db.file_status(uri);
+                        !indexed || age_seconds.map(|age| age > max_age_seconds).unwrap_or(true)
+                    };
+                    if is_stale {
+                        let Some(path) = uri_to_path(uri) else {
+                            skipped.push(uri.clone());
+                            continue;
+                        };
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            warn!("ReindexStale: could not read {}", path.display());
+                            skipped.push(uri.clone());
+                            continue;
+                        };
+                        let lang = {
+                            use crate::indexer::language::Language;
+                            Language::detect(uri, "").as_str().to_owned()
+                        };
+                        let mut db = self.db.lock().await;
+                        db.upsert_file(uri.clone(), text, lang);
+                        reindexed.push(uri.clone());
+                    } else {
+                        skipped.push(uri.clone());
+                    }
+                }
+                debug!(
+                    "ReindexStale: reindexed {}/{} files",
+                    reindexed.len(),
+                    uris.len()
+                );
+                ServerMessage::ReindexStaleResult { reindexed, skipped }
+            }
+
+            ClientMessage::BatchFileStatus { uris } => {
+                let db = self.db.lock().await;
+                let entries = uris
+                    .into_iter()
+                    .map(|uri| {
+                        let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                        let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
+                        crate::query_graph::types::FileStatusEntry {
+                            uri,
+                            indexed,
+                            has_embedding,
+                            age_seconds,
+                            embedding_model,
+                        }
+                    })
+                    .collect();
+                ServerMessage::BatchFileStatusResult { entries }
+            }
+
+            ClientMessage::QueryAbiHash { uri } => {
+                let mut db = self.db.lock().await;
+                let hash = db.abi_hash(&uri);
+                ServerMessage::AbiHashResult { uri, hash }
             }
         }
     }
@@ -2249,6 +2316,7 @@ fn process_query_sync(
                     Some(crate::query_graph::types::NearestItem {
                         uri: c.clone(),
                         score,
+                        embedding_model: None,
                     })
                 })
                 .collect();
@@ -2344,6 +2412,7 @@ fn process_query_sync(
                     Some(crate::query_graph::types::NearestItem {
                         uri: su.clone(),
                         score,
+                        embedding_model: None,
                     })
                 })
                 .collect();
@@ -2390,6 +2459,34 @@ fn process_query_sync(
 
         ClientMessage::RegisterTier3Source { .. } => {
             err("RegisterTier3Source is a mutation; not permitted in BatchQuery")
+        }
+
+        // ── v2.2: new variants ───────────────────────────────────────────────
+        ClientMessage::ReindexStale { .. } => {
+            err("ReindexStale requires filesystem I/O; not permitted in BatchQuery")
+        }
+
+        ClientMessage::BatchFileStatus { uris } => {
+            let entries = uris
+                .into_iter()
+                .map(|uri| {
+                    let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                    let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
+                    crate::query_graph::types::FileStatusEntry {
+                        uri,
+                        indexed,
+                        has_embedding,
+                        age_seconds,
+                        embedding_model,
+                    }
+                })
+                .collect();
+            ok(ServerMessage::BatchFileStatusResult { entries })
+        }
+
+        ClientMessage::QueryAbiHash { uri } => {
+            let hash = db.abi_hash(&uri);
+            ok(ServerMessage::AbiHashResult { uri, hash })
         }
     }
 }

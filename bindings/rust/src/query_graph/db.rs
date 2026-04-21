@@ -227,6 +227,153 @@ impl LipDatabase {
         out
     }
 
+    // ── ABI surface fingerprinting ────────────────────────────────────────
+
+    /// Compute a stable hash over the file's exported API surface.
+    ///
+    /// The hash is SHA-256 (hex) over the newline-joined list of
+    /// `"URI|kind|signature"` entries for all exported symbols in `uri`,
+    /// sorted by URI for determinism. Returns `None` when the file is not
+    /// in the daemon's index.
+    ///
+    /// A change in hash means the public interface changed — safe as a
+    /// downstream recompilation / re-verification trigger (Kotlin IC model).
+    pub fn abi_hash(&mut self, uri: &str) -> Option<String> {
+        if !self.file_inputs.contains_key(uri) {
+            return None;
+        }
+        let syms = self.file_symbols(uri);
+        let mut surface: Vec<String> = syms
+            .iter()
+            .filter(|s| s.is_exported)
+            .map(|s| {
+                format!(
+                    "{}|{}|{}",
+                    s.uri,
+                    s.kind as u8,
+                    s.signature.as_deref().unwrap_or("")
+                )
+            })
+            .collect();
+        surface.sort();
+        let payload = surface.join("\n");
+        Some(sha256_hex(payload.as_bytes()))
+    }
+
+    // ── Datalog Tier 1.5 inference ────────────────────────────────────────
+
+    /// Run a single fixed-point inference pass and return the number of
+    /// symbols whose confidence was raised.
+    ///
+    /// Rules applied (one iteration; caller loops to fixpoint):
+    ///
+    /// **Rule 1 — Callee elevation**: if every direct caller of a symbol
+    /// has confidence ≥ 80 (Tier 2 / SCIP quality), and the symbol itself
+    /// is below 65, raise it to 65 (Tier 1.5 level). The intuition: if
+    /// all callers have been verified to compiler accuracy, the callee is
+    /// unlikely to have been left dangling; the call site itself acts as
+    /// implicit type evidence.
+    ///
+    /// **Rule 2 — Exported leaf stability**: an exported symbol with no
+    /// callers in the local graph is a stable leaf if its confidence is
+    /// ≥ 40. Raise it by 5 points (capped at 65) — exported with no
+    /// internal callers means it is part of the public API, which is
+    /// typically more carefully maintained than internal helpers.
+    ///
+    /// Both rules are conservative: they never lower confidence and never
+    /// exceed the Tier 1.5 ceiling (65), leaving room for Tier 2 / SCIP
+    /// to raise further.
+    fn inference_step(&mut self) -> usize {
+        const TIER2_THRESHOLD: u8 = 80;
+        const TIER1_5_CEILING: u8 = 65;
+
+        // Snapshot caller confidence per symbol before mutating.
+        // Build: callee_uri → vec of caller confidence scores.
+        let mut callee_caller_confs: HashMap<String, Vec<u8>> = HashMap::new();
+        let all_file_uris: Vec<String> = self.file_inputs.keys().cloned().collect();
+        for file_uri in &all_file_uris {
+            let syms = self.file_symbols(file_uri).to_vec();
+            for sym in &syms {
+                // For each callee edge, record this caller's confidence.
+                if let Some(callers) = self.callee_to_callers.get(&sym.uri).cloned() {
+                    for caller_uri in callers {
+                        // Look up confidence of the caller symbol.
+                        if let Some((caller_file, _)) = self.def_index.get(&caller_uri).cloned() {
+                            let caller_syms = self.file_symbols(&caller_file.clone()).to_vec();
+                            if let Some(caller_sym) =
+                                caller_syms.iter().find(|s| s.uri == caller_uri)
+                            {
+                                callee_caller_confs
+                                    .entry(sym.uri.clone())
+                                    .or_default()
+                                    .push(caller_sym.confidence_score);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply rules and collect upgrades.
+        let mut upgrades: Vec<(String, String, u8)> = Vec::new(); // (file_uri, sym_uri, new_conf)
+        for file_uri in &all_file_uris {
+            let syms = self.file_symbols(file_uri).to_vec();
+            for sym in &syms {
+                if sym.confidence_score >= TIER1_5_CEILING {
+                    continue;
+                }
+                let caller_confs = callee_caller_confs.get(&sym.uri);
+                let new_conf = if let Some(confs) = caller_confs {
+                    if !confs.is_empty()
+                        && confs.iter().all(|&c| c >= TIER2_THRESHOLD)
+                        && sym.confidence_score < TIER1_5_CEILING
+                    {
+                        // Rule 1: all callers are Tier 2+.
+                        Some(TIER1_5_CEILING)
+                    } else {
+                        None
+                    }
+                } else if sym.is_exported && sym.confidence_score >= 40 {
+                    // Rule 2: exported leaf, no local callers.
+                    Some((sym.confidence_score + 5).min(TIER1_5_CEILING))
+                } else {
+                    None
+                };
+                if let Some(conf) = new_conf {
+                    if conf > sym.confidence_score {
+                        upgrades.push((file_uri.clone(), sym.uri.clone(), conf));
+                    }
+                }
+            }
+        }
+
+        let updated = upgrades.len();
+        for (file_uri, sym_uri, new_conf) in upgrades {
+            let syms = self.file_symbols(&file_uri).to_vec();
+            if let Some(sym) = syms.iter().find(|s| s.uri == sym_uri) {
+                let mut upgraded = sym.clone();
+                upgraded.confidence_score = new_conf;
+                self.upgrade_file_symbols(&file_uri, &[upgraded]);
+            }
+        }
+        updated
+    }
+
+    /// Run the Tier 1.5 Datalog inference loop to fixpoint.
+    ///
+    /// Returns the total number of symbol confidence scores raised.
+    pub fn run_tier1_5_inference(&mut self) -> usize {
+        let mut total = 0;
+        loop {
+            let changed = self.inference_step();
+            total += changed;
+            if changed == 0 {
+                break;
+            }
+        }
+        total
+    }
+
     // ── Mutations ─────────────────────────────────────────────────────────
 
     /// Register or update a file. Bumps the global revision and invalidates
@@ -414,8 +561,7 @@ impl LipDatabase {
 
         // Seed sym_cache so file_symbols() returns the pre-computed symbols.
         let syms = Arc::new(symbols);
-        self.sym_cache
-            .insert(uri.clone(), Cached::new(syms, rev));
+        self.sym_cache.insert(uri.clone(), Cached::new(syms, rev));
 
         // Consumed-names index (same as upsert_file).
         {
@@ -1067,27 +1213,49 @@ impl LipDatabase {
 
                 let mut semantic_items = Vec::new();
                 if min_score.is_some() {
-                    // NOTE: searches file-level embeddings, not per-symbol embeddings.
-                    // Per-function chunked embeddings aren't integrated yet; when they
-                    // land, this upgrades without a wire format change (semantic_items
-                    // already carries symbol_uri, currently empty at file granularity).
-                    if let Some(embedding) = self.file_embeddings.get(file_uri).cloned() {
-                        let static_files: HashSet<&str> = static_result
-                            .affected_files
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect();
+                    let static_files: HashSet<String> =
+                        static_result.affected_files.iter().cloned().collect();
 
+                    // Prefer per-symbol embeddings (function-level granularity) when
+                    // available. Fall back to file-level embeddings when the symbol has
+                    // no stored vector. This degrades gracefully for callers that have
+                    // not yet run `EmbeddingBatch` with `lip://` URIs.
+                    if let Some(sym_embedding) = self.symbol_embeddings.get(&sym.uri).cloned() {
+                        let sym_neighbours =
+                            self.nearest_symbol_by_vector(&sym_embedding, 20, Some(&sym.uri), None);
+                        for n in sym_neighbours {
+                            if n.score < threshold {
+                                continue;
+                            }
+                            // Map symbol hit back to its defining file.
+                            let hit_file = self
+                                .def_index
+                                .get(&n.uri)
+                                .map(|(f, _)| f.clone())
+                                .unwrap_or_else(|| n.uri.clone());
+                            let source = if static_files.contains(&hit_file) {
+                                ImpactSource::Both
+                            } else {
+                                ImpactSource::Semantic
+                            };
+                            semantic_items.push(SemanticImpactItem {
+                                file_uri: hit_file,
+                                symbol_uri: n.uri,
+                                similarity: n.score,
+                                source,
+                            });
+                        }
+                    } else if let Some(file_embedding) = self.file_embeddings.get(file_uri).cloned()
+                    {
                         let neighbours = self.nearest_by_vector(
-                            &embedding,
+                            &file_embedding,
                             20,
                             Some(file_uri),
                             None,
                             Some(threshold),
                         );
-
                         for neighbour in neighbours {
-                            let source = if static_files.contains(neighbour.uri.as_str()) {
+                            let source = if static_files.contains(&neighbour.uri) {
                                 ImpactSource::Both
                             } else {
                                 ImpactSource::Semantic
@@ -1281,7 +1449,14 @@ impl LipDatabase {
         scored
             .into_iter()
             .take(top_k)
-            .map(|(uri, score)| crate::query_graph::types::NearestItem { uri, score })
+            .map(|(uri, score)| {
+                let embedding_model = self.symbol_embedding_models.get(&uri).cloned();
+                crate::query_graph::types::NearestItem {
+                    uri,
+                    score,
+                    embedding_model,
+                }
+            })
             .collect()
     }
 
@@ -1352,7 +1527,14 @@ impl LipDatabase {
         scored
             .into_iter()
             .take(top_k)
-            .map(|(uri, score)| crate::query_graph::types::NearestItem { uri, score })
+            .map(|(uri, score)| {
+                let embedding_model = self.file_embedding_models.get(&uri).cloned();
+                crate::query_graph::types::NearestItem {
+                    uri,
+                    score,
+                    embedding_model,
+                }
+            })
             .collect()
     }
 
@@ -1458,9 +1640,16 @@ impl LipDatabase {
             return vec![];
         }
         if pairs.len() == 1 {
+            let uri = pairs[0].0.to_owned();
+            let embedding_model = if uri.starts_with("lip://") {
+                self.symbol_embedding_models.get(&uri).cloned()
+            } else {
+                self.file_embedding_models.get(&uri).cloned()
+            };
             return vec![NearestItem {
-                uri: pairs[0].0.to_owned(),
+                uri,
                 score: 0.0,
+                embedding_model,
             }];
         }
 
@@ -1498,7 +1687,18 @@ impl LipDatabase {
         scores
             .into_iter()
             .take(top_k)
-            .map(|(uri, score)| NearestItem { uri, score })
+            .map(|(uri, score)| {
+                let embedding_model = if uri.starts_with("lip://") {
+                    self.symbol_embedding_models.get(&uri).cloned()
+                } else {
+                    self.file_embedding_models.get(&uri).cloned()
+                };
+                NearestItem {
+                    uri,
+                    score,
+                    embedding_model,
+                }
+            })
             .collect()
     }
 
@@ -3695,14 +3895,25 @@ impl Greeter {
             override_doc: None,
         }];
 
-        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash123".into(), symbols, occurrences, vec![]);
+        db.upsert_file_precomputed(
+            uri.clone(),
+            "rust".into(),
+            "hash123".into(),
+            symbols,
+            occurrences,
+            vec![],
+        );
 
         let syms = db.file_symbols(&uri);
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].display_name, "MyStruct");
 
         let results = db.workspace_symbols("MyStruct", 10);
-        assert_eq!(results.len(), 1, "pre-computed symbol must appear in workspace search");
+        assert_eq!(
+            results.len(),
+            1,
+            "pre-computed symbol must appear in workspace search"
+        );
 
         assert!(
             db.symbol_definition_location(&sym_uri).is_some(),
@@ -3730,14 +3941,33 @@ impl Greeter {
         };
         let occ = OwnedOccurrence {
             symbol_uri: "lip://local/lib.rs#Foo".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
         };
 
-        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash1".into(), vec![sym.clone()], vec![occ.clone()], vec![]);
-        db.upsert_file_precomputed(uri.clone(), "rust".into(), "hash1".into(), vec![sym], vec![occ], vec![]);
+        db.upsert_file_precomputed(
+            uri.clone(),
+            "rust".into(),
+            "hash1".into(),
+            vec![sym.clone()],
+            vec![occ.clone()],
+            vec![],
+        );
+        db.upsert_file_precomputed(
+            uri.clone(),
+            "rust".into(),
+            "hash1".into(),
+            vec![sym],
+            vec![occ],
+            vec![],
+        );
 
         let results = db.workspace_symbols("Foo", 10);
         assert_eq!(results.len(), 1, "re-upsert must not duplicate symbols");
@@ -3756,28 +3986,46 @@ impl Greeter {
         let sym_foo = OwnedSymbolInfo::new("lip://local/a.rs#foo", "foo");
         let occ_def = OwnedOccurrence {
             symbol_uri: "lip://local/a.rs#foo".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
         };
         db.upsert_file_precomputed(
-            uri_a.clone(), "rust".into(), "h1".into(),
-            vec![sym_foo], vec![occ_def], vec![],
+            uri_a.clone(),
+            "rust".into(),
+            "h1".into(),
+            vec![sym_foo],
+            vec![occ_def],
+            vec![],
         );
 
         // File B: references foo (defined in A → external)
         let uri_b = "lip://local/b.rs".to_owned();
         let occ_ref = OwnedOccurrence {
             symbol_uri: "lip://local/a.rs#foo".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 80,
             role: Role::Reference,
             override_doc: None,
         };
         db.upsert_file_precomputed(
-            uri_b.clone(), "rust".into(), "h2".into(),
-            vec![], vec![occ_ref], vec![],
+            uri_b.clone(),
+            "rust".into(),
+            "h2".into(),
+            vec![],
+            vec![occ_ref],
+            vec![],
         );
 
         let invalidated = db.invalidated_files_for(&["lip://local/a.rs#foo".into()]);
@@ -3794,18 +4042,30 @@ impl Greeter {
         let sym_bar = OwnedSymbolInfo::new("lip://local/c.rs#bar", "bar");
         let occ_def = OwnedOccurrence {
             symbol_uri: "lip://local/c.rs#bar".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
         };
         db.upsert_file_precomputed(
-            uri_c.clone(), "rust".into(), "h1".into(),
-            vec![sym_bar], vec![occ_def], vec![],
+            uri_c.clone(),
+            "rust".into(),
+            "h1".into(),
+            vec![sym_bar],
+            vec![occ_def],
+            vec![],
         );
 
         let invalidated = db.invalidated_files_for(&["lip://local/c.rs#bar".into()]);
-        assert!(invalidated.is_empty(), "unreferenced symbol should invalidate nothing");
+        assert!(
+            invalidated.is_empty(),
+            "unreferenced symbol should invalidate nothing"
+        );
     }
 
     #[test]
@@ -3819,28 +4079,46 @@ impl Greeter {
         let sym_foo = OwnedSymbolInfo::new("lip://local/a.rs#foo", "foo");
         let occ_def = OwnedOccurrence {
             symbol_uri: "lip://local/a.rs#foo".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
         };
         db.upsert_file_precomputed(
-            uri_a.clone(), "rust".into(), "h1".into(),
-            vec![sym_foo], vec![occ_def], vec![],
+            uri_a.clone(),
+            "rust".into(),
+            "h1".into(),
+            vec![sym_foo],
+            vec![occ_def],
+            vec![],
         );
 
         // File B: references foo
         let uri_b = "lip://local/b.rs".to_owned();
         let occ_ref = OwnedOccurrence {
             symbol_uri: "lip://local/a.rs#foo".into(),
-            range: OwnedRange { start_line: 0, start_char: 0, end_line: 0, end_char: 3 },
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
             confidence_score: 80,
             role: Role::Reference,
             override_doc: None,
         };
         db.upsert_file_precomputed(
-            uri_b.clone(), "rust".into(), "h2".into(),
-            vec![], vec![occ_ref], vec![],
+            uri_b.clone(),
+            "rust".into(),
+            "h2".into(),
+            vec![],
+            vec![occ_ref],
+            vec![],
         );
 
         // Sanity: B is invalidated before removal
@@ -3853,6 +4131,9 @@ impl Greeter {
         db.remove_file(&uri_b);
 
         let invalidated = db.invalidated_files_for(&["lip://local/a.rs#foo".into()]);
-        assert!(invalidated.is_empty(), "removed file must not appear in invalidation results");
+        assert!(
+            invalidated.is_empty(),
+            "removed file must not appear in invalidation results"
+        );
     }
 }

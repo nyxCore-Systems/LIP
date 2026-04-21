@@ -104,6 +104,20 @@ pub struct NearestItem {
     pub uri: String,
     /// Cosine similarity in [0.0, 1.0] — higher is more similar.
     pub score: f32,
+    /// Model that produced the stored embedding for this item.
+    /// `None` when the item has no embedding or the model is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+/// Per-file entry inside [`ServerMessage::BatchFileStatusResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatusEntry {
+    pub uri: String,
+    pub indexed: bool,
+    pub has_embedding: bool,
+    pub age_seconds: Option<u64>,
+    pub embedding_model: Option<String>,
 }
 
 /// A line-range chunk boundary returned by [`ServerMessage::BoundariesResult`].
@@ -559,6 +573,28 @@ pub enum ServerMessage {
         /// Set only when `reason == EndStreamReason::Error`.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+
+    // ── v2.2 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::ReindexStale`].
+    ReindexStaleResult {
+        /// URIs that were re-indexed from disk.
+        reindexed: Vec<String>,
+        /// URIs that were within the age threshold and were skipped.
+        skipped: Vec<String>,
+    },
+    /// Response to [`ClientMessage::BatchFileStatus`].
+    BatchFileStatusResult {
+        entries: Vec<FileStatusEntry>,
+    },
+    /// Response to [`ClientMessage::QueryAbiHash`].
+    ///
+    /// The hash is a hex-encoded SHA-256 over the file's exported symbols
+    /// sorted by URI. A change in hash means the public interface changed.
+    AbiHashResult {
+        uri: String,
+        /// `None` when the file is not in the daemon's index.
+        hash: Option<String>,
     },
 }
 
@@ -1159,6 +1195,33 @@ pub enum ClientMessage {
     RegisterTier3Source {
         source: Tier3Source,
     },
+
+    // ── v2.2 features ────────────────────────────────────────────────────
+    /// Re-index stale files atomically. For each URI, if the file is
+    /// not indexed or was last indexed more than `max_age_seconds` ago,
+    /// it is re-read from disk and re-indexed. URIs within the threshold
+    /// are skipped. Pass `max_age_seconds = 0` to force re-index of all
+    /// listed URIs regardless of age. Returns `ReindexStaleResult`.
+    ReindexStale {
+        uris: Vec<String>,
+        /// Files older than this threshold are re-indexed.
+        max_age_seconds: u64,
+    },
+    /// Query the index status of multiple files in a single round-trip.
+    /// Equivalent to issuing `QueryFileStatus` once per URI inside a
+    /// `Batch`, but without the overhead of individual messages.
+    /// Returns `BatchFileStatusResult`.
+    BatchFileStatus {
+        uris: Vec<String>,
+    },
+    /// Query the ABI surface hash for a file. The hash is a stable hex
+    /// string computed over the file's exported symbols sorted by URI,
+    /// including their signatures and kinds. A change in hash means the
+    /// public interface changed — useful as a recompilation trigger.
+    /// Returns `AbiHashResult`.
+    QueryAbiHash {
+        uri: String,
+    },
 }
 
 impl ClientMessage {
@@ -1222,6 +1285,9 @@ impl ClientMessage {
             "embed_text",
             "stream_context",
             "register_tier3_source",
+            "reindex_stale",
+            "batch_file_status",
+            "query_abi_hash",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -1293,6 +1359,9 @@ impl ClientMessage {
             ClientMessage::EmbedText { .. } => "embed_text",
             ClientMessage::StreamContext { .. } => "stream_context",
             ClientMessage::RegisterTier3Source { .. } => "register_tier3_source",
+            ClientMessage::ReindexStale { .. } => "reindex_stale",
+            ClientMessage::BatchFileStatus { .. } => "batch_file_status",
+            ClientMessage::QueryAbiHash { .. } => "query_abi_hash",
         }
     }
 
@@ -1315,6 +1384,7 @@ impl ClientMessage {
                 | ClientMessage::PruneDeleted
                 | ClientMessage::QueryStaleEmbeddings { .. }
                 | ClientMessage::ExplainMatch { .. }
+                | ClientMessage::ReindexStale { .. }
         )
     }
 }
@@ -1457,6 +1527,146 @@ mod tests {
             panic!("wrong variant");
         };
         assert!(tier3_sources.is_empty());
+    }
+
+    // ── v2.2 round-trip tests ─────────────────────────────────────────
+
+    #[test]
+    fn reindex_stale_round_trips() {
+        let msg = ClientMessage::ReindexStale {
+            uris: vec!["file:///src/main.rs".into()],
+            max_age_seconds: 300,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::ReindexStale {
+            uris,
+            max_age_seconds,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris, ["file:///src/main.rs"]);
+        assert_eq!(max_age_seconds, 300);
+    }
+
+    #[test]
+    fn reindex_stale_not_batchable() {
+        assert!(!ClientMessage::ReindexStale {
+            uris: vec![],
+            max_age_seconds: 0
+        }
+        .is_batchable());
+    }
+
+    #[test]
+    fn batch_file_status_round_trips() {
+        let msg = ClientMessage::BatchFileStatus {
+            uris: vec!["file:///a.rs".into(), "file:///b.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::BatchFileStatus { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn batch_file_status_is_batchable() {
+        assert!(ClientMessage::BatchFileStatus { uris: vec![] }.is_batchable());
+    }
+
+    #[test]
+    fn query_abi_hash_round_trips() {
+        let msg = ClientMessage::QueryAbiHash {
+            uri: "file:///src/lib.rs".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryAbiHash { uri } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/lib.rs");
+    }
+
+    #[test]
+    fn query_abi_hash_is_batchable() {
+        assert!(ClientMessage::QueryAbiHash { uri: String::new() }.is_batchable());
+    }
+
+    #[test]
+    fn reindex_stale_result_round_trips() {
+        let msg = ServerMessage::ReindexStaleResult {
+            reindexed: vec!["file:///src/a.rs".into()],
+            skipped: vec!["file:///src/b.rs".into()],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::ReindexStaleResult { reindexed, skipped } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(reindexed, ["file:///src/a.rs"]);
+        assert_eq!(skipped, ["file:///src/b.rs"]);
+    }
+
+    #[test]
+    fn batch_file_status_result_round_trips() {
+        let msg = ServerMessage::BatchFileStatusResult {
+            entries: vec![FileStatusEntry {
+                uri: "file:///src/main.rs".into(),
+                indexed: true,
+                has_embedding: false,
+                age_seconds: Some(42),
+                embedding_model: None,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::BatchFileStatusResult { entries } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].indexed);
+        assert_eq!(entries[0].age_seconds, Some(42));
+    }
+
+    #[test]
+    fn abi_hash_result_round_trips() {
+        let msg = ServerMessage::AbiHashResult {
+            uri: "file:///src/lib.rs".into(),
+            hash: Some("deadbeef".into()),
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::AbiHashResult { uri, hash } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/lib.rs");
+        assert_eq!(hash.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn nearest_item_embedding_model_round_trips() {
+        let msg = ServerMessage::NearestResult {
+            results: vec![NearestItem {
+                uri: "file:///src/auth.rs".into(),
+                score: 0.95,
+                embedding_model: Some("text-embedding-3-small".into()),
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::NearestResult { results } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(
+            results[0].embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn nearest_item_missing_embedding_model_deserializes_as_none() {
+        let json = r#"{"type":"nearest_result","results":[{"uri":"file:///a.rs","score":0.9}]}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        let ServerMessage::NearestResult { results } = msg else {
+            panic!("wrong variant");
+        };
+        assert!(results[0].embedding_model.is_none());
     }
 
     /// Drift guard: every tag produced by [`ClientMessage::variant_tag`]
@@ -1690,6 +1900,12 @@ mod tests {
                     imported_at_ms: 0,
                 },
             },
+            ClientMessage::ReindexStale {
+                uris: vec![],
+                max_age_seconds: 0,
+            },
+            ClientMessage::BatchFileStatus { uris: vec![] },
+            ClientMessage::QueryAbiHash { uri: String::new() },
         ];
 
         let supported = ClientMessage::supported_messages();
@@ -1832,6 +2048,7 @@ mod tests {
                 vec![NearestItem {
                     uri: "file:///a.rs".into(),
                     score: 0.9,
+                    embedding_model: None,
                 }],
                 vec![],
             ],
@@ -2018,6 +2235,7 @@ mod tests {
             outliers: vec![NearestItem {
                 uri: "file:///src/billing.go".into(),
                 score: 0.12,
+                embedding_model: None,
             }],
         };
         let rt = round_trip_server(&msg);
@@ -2224,6 +2442,7 @@ mod tests {
             moving_toward: vec![NearestItem {
                 uri: "file:///src/auth.rs".into(),
                 score: 0.91,
+                embedding_model: None,
             }],
         };
         let rt = round_trip_server(&msg);

@@ -8,6 +8,22 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **`NearestItem.embedding_model`** — every nearest-neighbour hit now carries the model name that produced its stored embedding. Field is optional / `skip_serializing_if = None`; older clients see no change. Populated by `nearest_by_vector`, `nearest_symbol_by_vector`, and `outliers`. Useful for debugging mixed-model indexes and confirming which model was used for a specific result.
+
+- **Function-level blast radius** (`QueryBlastRadiusBatch`) — semantic enrichment now uses per-symbol embeddings when available. If `EmbeddingBatch` has been called with `lip://` URIs (function-level chunks), `semantic_items[].symbol_uri` is populated and results are at function granularity. Falls back to file-level embeddings when no symbol embeddings exist, so the upgrade is transparent.
+
+- **`ReindexStale`** — atomic "reindex if stale" operation. Accepts `uris` and `max_age_seconds`; re-reads from disk only the URIs that are not indexed or whose last-indexed timestamp exceeds the threshold. Returns `ReindexStaleResult { reindexed, skipped }`. Pass `max_age_seconds = 0` to force unconditional reindex. Replaces the manual `QueryFileStatus` → `ReindexFiles` race.
+
+- **`BatchFileStatus`** — query index status for multiple files in one round-trip. Equivalent to issuing `QueryFileStatus` inside a `Batch`, but without message-per-file overhead. Batchable. Returns `BatchFileStatusResult { entries: Vec<FileStatusEntry> }`.
+
+- **`QueryAbiHash`** — stable hex hash (SHA-256) over a file's exported API surface (exported symbol URIs + kinds + signatures, sorted). A change in hash means the public interface changed — safe as a downstream recompilation or re-verification trigger (Kotlin IC model). Returns `AbiHashResult { uri, hash: Option<String> }`. Batchable.
+
+- **Tier 1.5 Datalog inference** — `LipDatabase::run_tier1_5_inference()` runs a fixed-point inference loop applying two rules: (1) if every direct caller of a symbol is at confidence ≥ 80 (Tier 2 / SCIP quality), raise the callee to confidence 65; (2) exported symbols with no local callers are raised by 5 points (capped at 65). Never lowers confidence; never exceeds the Tier 1.5 ceiling, leaving headroom for Tier 2.
+
+- **Tier 2 backoff recovery** — language server backends now recover from transient crashes with exponential backoff (2–300 s, up to 8 failures) instead of being permanently disabled for the session lifetime. `disabled_*` flags are kept for hard failures (binary not installed). A `BackoffState` struct tracks `failure_count` and `available_after` per backend. Tests: `backoff_fresh_is_available`, `backoff_fail_makes_unavailable`, `backoff_reset_clears_state`, `backoff_permanent_after_8_failures`, `backoff_not_permanent_before_8_failures`.
+
+- **`FileStatusEntry`** — new public struct carrying the same fields as `FileStatusResult` but suitable for use inside `BatchFileStatusResult`.
+
 - **`QueryBlastRadiusBatch`** — batch blast radius for all exported symbols in changed files, with optional semantic enrichment via file embeddings. Accepts `changed_file_uris` and optional `min_score` threshold. Resolves symbols server-side (filtered to Function, Method, Class, Interface, Constructor, Macro), runs structural BFS per symbol, and when `min_score` is set, augments results with cosine-similarity neighbours from the file embedding index. Each semantic hit carries a `source` field (`"semantic"` or `"both"`) so consumers can distinguish certainty tiers. Spec §8.1.1.
 - **`QueryInvalidatedFiles`** — name-based dependency tracking query. Given a set of changed symbol URIs, returns file URIs that consumed those names externally (Kotlin-IC inspired). Enables symbol-level re-verification without full reindex.
 - **`JournalEntry::UpsertFilePrecomputed`** — journal variant that persists pre-computed symbols, occurrences, and CPG edges from SCIP imports. Fixes data loss on daemon restart for SCIP-imported files.
