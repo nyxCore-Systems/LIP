@@ -842,6 +842,13 @@ impl LipDatabase {
             }
         }
 
+        // Precomputed files (SCIP imports) have no source text — Tier 1 parsing
+        // on empty text returns nothing anyway, but bail early to make the
+        // invariant explicit: precomputed symbols live only in sym_cache.
+        if self.file_inputs.get(uri).is_some_and(|f| f.precomputed) {
+            return Arc::new(vec![]);
+        }
+
         let result = self.compute_symbols(uri);
         self.sym_cache
             .insert(uri.to_owned(), Cached::new(result.clone(), file_rev));
@@ -1179,8 +1186,9 @@ impl LipDatabase {
         &mut self,
         changed_file_uris: &[String],
         min_score: Option<f32>,
-    ) -> Vec<EnrichedBlastRadius> {
+    ) -> (Vec<EnrichedBlastRadius>, Vec<String>) {
         let mut results = Vec::new();
+        let mut not_indexed_uris = Vec::new();
         let mut seen_symbols: HashSet<String> = HashSet::new();
         let threshold = min_score.unwrap_or(0.6);
 
@@ -1201,6 +1209,10 @@ impl LipDatabase {
         };
 
         for file_uri in changed_file_uris {
+            if !self.file_inputs.contains_key(file_uri.as_str()) {
+                not_indexed_uris.push(file_uri.clone());
+                continue;
+            }
             let syms = self.file_symbols(file_uri);
             for sym in syms.iter() {
                 if !interesting(sym.kind) {
@@ -1271,12 +1283,13 @@ impl LipDatabase {
                 }
 
                 results.push(EnrichedBlastRadius {
+                    file_uri: file_uri.clone(),
                     static_result,
                     semantic_items,
                 });
             }
         }
-        results
+        (results, not_indexed_uris)
     }
 
     /// Find the symbol URI whose occurrence range contains `(line, col)` in `uri`.
@@ -3334,6 +3347,76 @@ impl Greeter {
             "both caller_a and caller_b should produce separate ImpactItems; got {:?}",
             items_for_caller
         );
+    }
+
+    #[test]
+    fn blast_radius_batch_not_indexed_uris_reported() {
+        let mut db = LipDatabase::new();
+        db.upsert_file(
+            "file:///project/lib.rs".to_owned(),
+            "pub fn f() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        let unknown = "file:///project/ghost.rs".to_owned();
+        let (results, not_indexed) =
+            db.blast_radius_batch(&[unknown.clone()], None);
+        assert!(results.is_empty());
+        assert_eq!(not_indexed, vec![unknown]);
+    }
+
+    #[test]
+    fn blast_radius_batch_file_uri_populated() {
+        let mut db = LipDatabase::new();
+        let lib_uri = "file:///project/lib.rs".to_owned();
+        db.upsert_file(
+            lib_uri.clone(),
+            "pub fn exported() {}".to_owned(),
+            "rust".to_owned(),
+        );
+        let (results, not_indexed) =
+            db.blast_radius_batch(&[lib_uri.clone()], None);
+        assert!(not_indexed.is_empty());
+        for entry in &results {
+            assert_eq!(entry.file_uri, lib_uri, "file_uri must trace back to input");
+        }
+    }
+
+    #[test]
+    fn file_symbols_precomputed_cold_cache_returns_empty() {
+        let mut db = LipDatabase::new();
+        let uri = "file:///project/imported.go".to_owned();
+        use crate::schema::{OwnedSymbolInfo, SymbolKind};
+        let sym = OwnedSymbolInfo {
+            uri: "lip://local/imported.go#Foo".to_owned(),
+            kind: SymbolKind::Function,
+            display_name: "Foo".to_owned(),
+            confidence_score: 90,
+            signature: None,
+            documentation: None,
+            relationships: vec![],
+            runtime_p99_ms: None,
+            call_rate_per_s: None,
+            taint_labels: vec![],
+            blast_radius: 0,
+            is_exported: true,
+        };
+        db.upsert_file_precomputed(
+            uri.clone(),
+            "go".to_owned(),
+            "abc123".to_owned(),
+            vec![sym],
+            vec![],
+            vec![],
+        );
+        // Warm path: sym_cache is populated — must return the precomputed symbol.
+        let syms = db.file_symbols(&uri);
+        assert_eq!(syms.len(), 1, "warm path must return precomputed symbol");
+
+        // Simulate cold cache; file_inputs still marks precomputed=true.
+        db.sym_cache.remove(&uri);
+        let syms_cold = db.file_symbols(&uri);
+        // Must not fall through to Tier 1 (which would parse empty text).
+        assert!(syms_cold.is_empty(), "cold precomputed cache must not run Tier-1 parser");
     }
 
     // ── WS3: name consumption index ───────────────────────────────────────────

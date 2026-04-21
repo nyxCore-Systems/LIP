@@ -1,6 +1,6 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v2.0"
+subtitle: "Design Document & Specification v2.2"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
@@ -1197,6 +1197,26 @@ lip-protocol/
 - [x] **`QueryStaleEmbeddings { root }`** — report files under `root` whose stored embedding is older than their current mtime. Detects the case where LIP was offline during a batch of writes and search results are silently stale. Returns `StaleEmbeddingsResult { uris }`. Not permitted inside `BatchQuery`.
 - [x] 2 new MCP tools (`lip_get_centroid`, `lip_stale_embeddings`) + `filter`/`min_score` params on 5 existing tools.
 
+### v2.1 — Streaming context + forward-compat primitives ✓
+
+- [x] **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`, `cursor_out_of_range`, `file_not_indexed`. Replaces the "fetch top-k, locally truncate" pattern. `protocol_version` bumped to `2`. Spec §9.2.
+- [x] **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (discards the vector). Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery`.
+- [x] **`RegisterTier3Source { source: Tier3Source }`** — expose provenance for SCIP-import batches. `Tier3Source { source_id, tool_name, tool_version, project_root, imported_at_ms }` records what producer generated the symbols and when. `IndexStatusResult.tier3_sources` is `#[serde(default)]`; older daemons yield an empty vector. Not permitted inside `BatchQuery` (mutation).
+- [x] **`HandshakeResult.supported_messages`** — handshake response now lists every `ClientMessage` type tag the daemon understands. Clients probe for individual messages without version-integer comparison. `#[serde(default)]`; older daemons yield empty vector.
+- [x] **`ServerMessage::UnknownMessage { message_type, supported }`** — unknown type tag returns this response *and keeps the socket open*, enabling graceful client downgrade.
+- [x] **`ErrorCode`** enum — stable machine-readable error categories: `unknown_message_type`, `unknown_model`, `embedding_not_configured`, `no_embedding`, `cursor_out_of_range`, `index_locked`, `invalid_request`, `internal` (default).
+- [x] **`ClientMessage::variant_tag` + `supported_messages_covers_all_variants` test** — compile-time exhaustive match plus paired test that fails when a new variant is added without being advertised in `supported_messages()`.
+
+### v2.2 — Function-level blast radius + intelligence layer ✓
+
+- [x] **`NearestItem.embedding_model`** — every nearest-neighbour hit now carries the model name that produced its stored embedding. Optional / `skip_serializing_if = None`; older clients see no change. Populated by `nearest_by_vector`, `nearest_symbol_by_vector`, and `outliers`.
+- [x] **Function-level blast radius** — `QueryBlastRadiusBatch` semantic enrichment now uses per-symbol embeddings when available. `semantic_items[].symbol_uri` is populated when `EmbeddingBatch` has been called with `lip://` URIs (function-level chunks); falls back to file embeddings transparently.
+- [x] **`ReindexStale { uris, max_age_seconds }`** — atomic check-then-reindex. Re-reads from disk only URIs that are unindexed or whose `last_indexed_at` exceeds the threshold. `max_age_seconds = 0` forces unconditional reindex. Returns `ReindexStaleResult { reindexed, skipped }`. Not permitted inside `BatchQuery`.
+- [x] **`BatchFileStatus { uris }`** — query index and embedding status for multiple files in one round-trip. Returns `BatchFileStatusResult { entries: Vec<FileStatusEntry> }`. Safe inside `BatchQuery`.
+- [x] **`QueryAbiHash { uri }`** — stable SHA-256 hex hash over a file's exported API surface (exported symbol URIs + kinds + signatures, sorted). Hash change ↔ public interface change — safe as a downstream recompilation or re-verification trigger. Returns `AbiHashResult { uri, hash: Option<String> }`. Safe inside `BatchQuery`.
+- [x] **Tier 1.5 Datalog inference** — `LipDatabase::run_tier1_5_inference()` fixed-point loop: (1) callee elevation when all callers ≥ 80 confidence → raise to 65; (2) exported leaf symbols with ≥ 40 confidence → +5 capped at 65. Never lowers confidence; ceiling 65 leaves headroom for Tier 2.
+- [x] **Tier 2 backoff recovery** — language server backends recover from transient crashes with exponential backoff (2–300 s, permanent disable only after 8 failures). `BackoffState { failure_count, available_after }` per backend. Replaces immediate permanent disable on first crash.
+
 ### v1.2 — In progress
 
 - [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
@@ -1309,5 +1329,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v2.0.1 · April 2026 · MIT License*
+*LIP Specification v2.2.0 · April 2026 · MIT License*
 *Lisa Welsch*

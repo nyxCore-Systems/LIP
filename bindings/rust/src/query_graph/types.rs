@@ -78,6 +78,8 @@ pub enum ImpactSource {
 /// A single entry in a batch blast-radius result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedBlastRadius {
+    /// The input file URI this result was computed for.
+    pub file_uri: String,
     /// The static blast-radius result.
     #[serde(flatten)]
     pub static_result: BlastRadiusResult,
@@ -244,6 +246,10 @@ pub enum ServerMessage {
     BlastRadiusResult(BlastRadiusResult),
     BlastRadiusBatchResult {
         results: Vec<EnrichedBlastRadius>,
+        /// Input URIs from `changed_file_uris` that were not present in the index.
+        /// Absent when empty (all inputs were indexed).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_indexed_uris: Vec<String>,
     },
     WorkspaceSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,

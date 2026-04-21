@@ -404,8 +404,12 @@ impl Session {
                 min_score,
             } => {
                 let mut db = self.db.lock().await;
-                let results = db.blast_radius_batch(&changed_file_uris, min_score);
-                ServerMessage::BlastRadiusBatchResult { results }
+                let (results, not_indexed_uris) =
+                    db.blast_radius_batch(&changed_file_uris, min_score);
+                ServerMessage::BlastRadiusBatchResult {
+                    results,
+                    not_indexed_uris,
+                }
             }
 
             ClientMessage::QueryWorkspaceSymbols { query, limit } => {
@@ -1968,8 +1972,12 @@ fn process_query_sync(
             changed_file_uris,
             min_score,
         } => {
-            let results = db.blast_radius_batch(&changed_file_uris, min_score);
-            ok(ServerMessage::BlastRadiusBatchResult { results })
+            let (results, not_indexed_uris) =
+                db.blast_radius_batch(&changed_file_uris, min_score);
+            ok(ServerMessage::BlastRadiusBatchResult {
+                results,
+                not_indexed_uris,
+            })
         }
 
         ClientMessage::QueryWorkspaceSymbols { query, limit } => {

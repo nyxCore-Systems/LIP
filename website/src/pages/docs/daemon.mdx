@@ -103,6 +103,9 @@ Each connection handles one request/response pair. The protocol is synchronous p
 | `QueryNearestByText` | Top-K nearest files by text query |
 | `QueryIndexStatus` | Daemon health and embedding coverage |
 | `QueryFileStatus` | Per-file index and embedding status |
+| `ReindexStale` | Atomic reindex if stale — re-reads only URIs that are unindexed or older than `max_age_seconds` |
+| `BatchFileStatus` | Query index status for multiple files in one round-trip (batchable) |
+| `QueryAbiHash` | SHA-256 over a file's exported API surface — stable recompilation trigger (batchable) |
 | `BatchQuery` | Multiple queries in one round-trip |
 
 **Acknowledgment:** Every `Delta` receives a `DeltaAck { seq, accepted }` response, eliminating the fire-and-forget drift that LSP is known for.
