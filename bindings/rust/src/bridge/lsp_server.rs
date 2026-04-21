@@ -350,12 +350,15 @@ impl LanguageServer for LipLspBackend {
             .rpc(ClientMessage::QueryWorkspaceSymbols {
                 query: params.query,
                 limit: Some(100),
+                kind_filter: None,
+                scope: None,
+                modifier_filter: None,
             })
             .await
             .map_err(Self::to_rpc_error)?;
 
         let syms = match resp {
-            ServerMessage::WorkspaceSymbolsResult { symbols } => symbols,
+            ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols,
             _ => return Ok(None),
         };
 

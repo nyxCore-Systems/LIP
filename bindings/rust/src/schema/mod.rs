@@ -17,10 +17,14 @@
 //! | [`OwnedDependencySlice`] | Pre-built index fragment from the registry |
 //! | [`OwnedEventStream`] | Batch of [`OwnedDelta`]s emitted by the indexer |
 
+pub mod signature;
 pub mod types;
+pub mod visibility;
 
+pub use signature::normalize_signature;
 pub use types::{
-    sha256_hex, Action, EdgeKind, IndexingState, LipUri, OwnedAnnotationEntry, OwnedDelta,
-    OwnedDependencySlice, OwnedDocument, OwnedEventStream, OwnedGraphEdge, OwnedOccurrence,
-    OwnedRange, OwnedRelationship, OwnedSymbolInfo, Role, SymbolKind,
+    sha256_hex, Action, Completeness, EdgeKind, ExtractionTier, IndexingState, LipUri,
+    ModifiersSource, OwnedAnnotationEntry, OwnedDelta, OwnedDependencySlice, OwnedDocument,
+    OwnedEventStream, OwnedGraphEdge, OwnedOccurrence, OwnedRange, OwnedRelationship,
+    OwnedSymbolInfo, ReferenceKind, Role, SymbolKind, Visibility,
 };

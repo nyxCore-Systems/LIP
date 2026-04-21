@@ -338,6 +338,8 @@ mod tests {
             confidence_score: 20,
             role: crate::schema::Role::Reference,
             override_doc: None,
+            kind: crate::schema::ReferenceKind::Unknown,
+            is_test: false,
         };
         let locs = occurrences_to_locations(&[valid], "file:///src/a.rs");
         assert_eq!(locs.len(), 1);

@@ -47,6 +47,9 @@ message SymbolInformation {
   repeated Relationship relationships = 4;
   Kind kind = 5;
   string display_name = 6;
+  // Upstream-compatible (SCIP 0.3+): the enclosing symbol string. Used as
+  // container_name in LIP. Empty when absent.
+  string enclosing_symbol = 8;
 }
 
 // Symbol kind — values prefixed with K_ to avoid conflict with other enums.

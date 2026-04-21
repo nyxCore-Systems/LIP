@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Args;
 use prost::Message;
 
-use lip::schema::{OwnedDocument, OwnedSymbolInfo, Role, SymbolKind};
+use lip::schema::{OwnedDocument, OwnedSymbolInfo, ReferenceKind, Role, SymbolKind};
 
 // Generated from src/proto/scip.proto by prost-build.
 #[allow(clippy::all)]
@@ -127,15 +127,31 @@ fn convert_symbol_info(sym: &OwnedSymbolInfo) -> scip::SymbolInformation {
             .unwrap_or_default(),
         kind: lip_kind_to_scip(sym.kind) as i32,
         relationships,
+        enclosing_symbol: sym.container_name.clone().unwrap_or_default(),
     }
 }
 
 fn convert_occurrence(occ: &lip::schema::OwnedOccurrence) -> scip::Occurrence {
-    let role_bits = if occ.role == Role::Definition {
+    let mut role_bits = if occ.role == Role::Definition {
         scip::SymbolRole::Definition as i32
     } else {
         scip::SymbolRole::UnspecifiedSymbolRole as i32
     };
+    // Preserve LIP ReferenceKind on export via SCIP symbol_roles bits (spec §10.2).
+    match occ.kind {
+        ReferenceKind::Write => role_bits |= scip::SymbolRole::WriteAccess as i32,
+        ReferenceKind::Read => role_bits |= scip::SymbolRole::ReadAccess as i32,
+        // Call/Type/Implements/Extends have no SCIP Occurrence-role equivalent; they
+        // round-trip via other channels (call edges, Relationships, type info).
+        ReferenceKind::Call
+        | ReferenceKind::Type
+        | ReferenceKind::Implements
+        | ReferenceKind::Extends
+        | ReferenceKind::Unknown => {}
+    }
+    if occ.is_test {
+        role_bits |= scip::SymbolRole::Test as i32;
+    }
 
     let range = vec![
         occ.range.start_line,
@@ -257,5 +273,60 @@ mod tests {
         ] {
             assert_eq!(lip_kind_to_scip(lip), scip);
         }
+    }
+
+    fn occ_with(kind: ReferenceKind, is_test: bool, role: Role) -> lip::schema::OwnedOccurrence {
+        lip::schema::OwnedOccurrence {
+            symbol_uri: "lip://local/x".to_owned(),
+            range: lip::schema::OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 1,
+            },
+            confidence_score: 20,
+            role,
+            override_doc: None,
+            kind,
+            is_test,
+        }
+    }
+
+    #[test]
+    fn ref_kind_read_exports_read_access_bit() {
+        let out = convert_occurrence(&occ_with(ReferenceKind::Read, false, Role::Reference));
+        assert!(out.symbol_roles & scip::SymbolRole::ReadAccess as i32 != 0);
+        assert!(out.symbol_roles & scip::SymbolRole::WriteAccess as i32 == 0);
+        assert!(out.symbol_roles & scip::SymbolRole::Test as i32 == 0);
+    }
+
+    #[test]
+    fn ref_kind_write_exports_write_access_bit() {
+        let out = convert_occurrence(&occ_with(ReferenceKind::Write, false, Role::Reference));
+        assert!(out.symbol_roles & scip::SymbolRole::WriteAccess as i32 != 0);
+        assert!(out.symbol_roles & scip::SymbolRole::ReadAccess as i32 == 0);
+    }
+
+    #[test]
+    fn is_test_exports_test_bit() {
+        let out = convert_occurrence(&occ_with(ReferenceKind::Read, true, Role::Reference));
+        assert!(out.symbol_roles & scip::SymbolRole::Test as i32 != 0);
+    }
+
+    #[test]
+    fn ref_kind_call_does_not_set_access_bits() {
+        // Call has no SCIP Occurrence-role equivalent; bits stay cleared.
+        let out = convert_occurrence(&occ_with(ReferenceKind::Call, false, Role::Reference));
+        assert!(out.symbol_roles & scip::SymbolRole::ReadAccess as i32 == 0);
+        assert!(out.symbol_roles & scip::SymbolRole::WriteAccess as i32 == 0);
+    }
+
+    #[test]
+    fn definition_with_write_kind_still_sets_definition() {
+        // Defensive: if an upstream caller somehow marks a def with a Write kind,
+        // both bits end up set. We don't actively strip kind on defs during export;
+        // the pair remains semantically consistent because SCIP permits combined bits.
+        let out = convert_occurrence(&occ_with(ReferenceKind::Write, false, Role::Definition));
+        assert!(out.symbol_roles & scip::SymbolRole::Definition as i32 != 0);
     }
 }

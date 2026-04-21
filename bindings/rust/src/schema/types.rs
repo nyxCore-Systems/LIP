@@ -95,6 +95,36 @@ pub enum Action {
     Delete,
 }
 
+/// Fine-grained classification of a reference occurrence (v2.3).
+///
+/// Populated when `role != Definition`. `Role` marks whether an occurrence is
+/// a definition/reference/read/write; `ReferenceKind` adds the *reason* the
+/// reference exists — call site vs. type position vs. inheritance clause. CKB
+/// uses it to distinguish "X is called from Y" from "X is the return type of
+/// Y" without re-parsing.
+///
+/// Tier-1 can classify Call/Read/Write from the tree-sitter parent node;
+/// Type/Implements/Extends require Tier-2 type information to distinguish
+/// reliably. Leave as `Unknown` when the extractor cannot decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceKind {
+    #[default]
+    Unknown,
+    Call,
+    Read,
+    Write,
+    Type,
+    Implements,
+    Extends,
+}
+
+impl ReferenceKind {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, ReferenceKind::Unknown)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -137,6 +167,46 @@ pub enum IndexingState {
     WarmFull,
 }
 
+/// Symbol visibility (spec §v2.3 Feature #1).
+///
+/// LIP owns inference — see `schema::visibility::infer`. Derived from language
+/// rules + modifiers at ingest time and carried on `OwnedSymbolInfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Public,
+    Private,
+    Internal,
+    Protected,
+}
+
+/// Which extraction tier produced a symbol record (spec §v2.3 Feature #1).
+///
+/// Telemetry: NOT included in `OwnedSymbolInfo::PartialEq` so that a Tier-1 →
+/// Tier-2 upgrade with no structural change does not invalidate the salsa
+/// early-cutoff. Clients tier-gate confidence at query time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionTier {
+    #[default]
+    Tier1,
+    Tier1p5,
+    Tier2,
+    Tier3Scip,
+}
+
+/// Provenance of the `modifiers` field on SCIP-imported symbols.
+///
+/// `Proto` = the vendored SCIP `SymbolInformation.modifiers` field was present.
+/// `PrefixParse` = fell back to parsing the signature prefix (older `.scip`
+/// blobs predate upstream field 7). CKB discounts confidence on `PrefixParse`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModifiersSource {
+    Proto,
+    PrefixParse,
+}
+
 // ─── Owned heap types ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -156,12 +226,33 @@ pub struct OwnedRelationship {
     pub is_override: bool,
 }
 
+/// How fully the indexer resolved a symbol (spec §v2.3 Feature #1).
+///
+/// `score` in [0.0, 1.0]. `reason` is a short stable tag (e.g. `"tier1_syntactic"`,
+/// `"lsp_verified"`, `"scip_precomputed"`, `"scip_unresolved_local"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Completeness {
+    pub score: f32,
+    pub reason: String,
+}
+
 /// Heap-allocated SymbolInfo.
 ///
 /// `runtime_p99_ms` and `call_rate_per_s` are advisory telemetry fields
 /// (spec §8.3). They are excluded from `PartialEq`/`Eq`/`Hash` so that
 /// salsa's early-cutoff can fire purely on the structural intelligence fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// v2.3 adds rich metadata (spec §v2.3 Feature #1). Eq split per decision C.5:
+/// `modifiers`, `visibility`, `container_name`, `signature_normalized` are
+/// structural (a flip is an ABI change) and participate in Eq. `completeness`,
+/// `visibility_confidence`, `extraction_tier`, `modifiers_source` are telemetry
+/// and are excluded — a Tier-1 → Tier-2 upgrade with no structural change must
+/// not invalidate the salsa early-cutoff.
+///
+/// `Default` is derived so construction sites can use `..Default::default()`
+/// for telemetry/v2.3 fields. Note: the derived default has `confidence_score
+/// = 0`; prefer `OwnedSymbolInfo::new` when you want the `30` baseline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OwnedSymbolInfo {
     pub uri: String,
     pub display_name: String,
@@ -179,6 +270,35 @@ pub struct OwnedSymbolInfo {
     /// Set by the Tier 1 extractor using language-specific visibility rules;
     /// used by `file_api_surface()` for stable ABI hash computation.
     pub is_exported: bool,
+
+    // ── v2.3 rich metadata — structural (in Eq) ──────────────────────────────
+    /// Whitespace- and param-name-stripped signature, for API-compat comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_normalized: Option<String>,
+    /// Raw modifier list from SCIP or tree-sitter (`public`, `async`, `static`,
+    /// `deprecated`, `export`, `test`, …). Empty = extractor ran and saw none.
+    /// Use `extraction_tier` to tell "none" from "not yet extracted".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+    /// Canonical visibility, inferred by `schema::visibility::infer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
+    /// Enclosing class / namespace / module name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+
+    // ── v2.3 rich metadata — telemetry (NOT in Eq) ───────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility_confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<Completeness>,
+    /// Which tier produced this record. Defaults to `Tier1` on deserialize of
+    /// v2.2 payloads.
+    #[serde(default)]
+    pub extraction_tier: ExtractionTier,
+    /// Only set on SCIP-imported symbols; `None` on Tier-1/Tier-2 native paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers_source: Option<ModifiersSource>,
 }
 
 impl PartialEq for OwnedSymbolInfo {
@@ -193,7 +313,13 @@ impl PartialEq for OwnedSymbolInfo {
             && self.taint_labels == other.taint_labels
             && self.blast_radius == other.blast_radius
             && self.is_exported == other.is_exported
-        // runtime_p99_ms / call_rate_per_s intentionally omitted
+            // v2.3 structural fields — ABI-bearing, participate in early-cutoff
+            && self.signature_normalized == other.signature_normalized
+            && self.modifiers == other.modifiers
+            && self.visibility == other.visibility
+            && self.container_name == other.container_name
+        // Excluded telemetry: runtime_p99_ms, call_rate_per_s,
+        // visibility_confidence, completeness, extraction_tier, modifiers_source
     }
 }
 impl Eq for OwnedSymbolInfo {}
@@ -221,6 +347,14 @@ impl OwnedSymbolInfo {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            signature_normalized: None,
+            modifiers: vec![],
+            visibility: None,
+            container_name: None,
+            visibility_confidence: None,
+            completeness: None,
+            extraction_tier: ExtractionTier::Tier1,
+            modifiers_source: None,
         }
     }
 }
@@ -232,6 +366,23 @@ pub struct OwnedOccurrence {
     pub confidence_score: u8,
     pub role: Role,
     pub override_doc: Option<String>,
+
+    // ── v2.3 reference classification (additive) ─────────────────────────────
+    /// Fine-grained reason this reference exists (call site vs. type position
+    /// vs. inheritance clause). Defaults to `Unknown` on v2.2 payloads and
+    /// when the extractor cannot classify. Skipped on wire when `Unknown` so
+    /// v2.2 clients see the exact same JSON they used to.
+    #[serde(default, skip_serializing_if = "ReferenceKind::is_unknown")]
+    pub kind: ReferenceKind,
+    /// True when the enclosing file or function is recognised as a test
+    /// (file path under a test dir, `#[test]` attribute, `@Test` annotation,
+    /// etc.). Lets CKB down-rank test-only references in production queries.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_test: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Edge kind in the Code Property Graph (spec §4.1, §8.5).
@@ -439,5 +590,63 @@ mod tests {
     fn sha256_hex_is_deterministic() {
         assert_eq!(sha256_hex(b"hello"), sha256_hex(b"hello"));
         assert_ne!(sha256_hex(b"hello"), sha256_hex(b"world"));
+    }
+
+    // ── v2.3 reference classification ─────────────────────────────────────────
+
+    #[test]
+    fn v22_occurrence_json_deserializes_with_default_ref_fields() {
+        // A v2.2 client sends no `kind` or `is_test`; v2.3 code must accept
+        // the payload and fill defaults (Unknown / false).
+        let json = r#"{
+            "symbol_uri": "lip://local/a.rs#foo",
+            "range": {"start_line":0,"start_char":0,"end_line":0,"end_char":3},
+            "confidence_score": 80,
+            "role": "reference",
+            "override_doc": null
+        }"#;
+        let occ: OwnedOccurrence = serde_json::from_str(json).expect("v2.2 payload");
+        assert_eq!(occ.kind, ReferenceKind::Unknown);
+        assert!(!occ.is_test);
+    }
+
+    #[test]
+    fn v23_unknown_and_is_test_false_skipped_on_wire() {
+        // Defaults must not bloat the wire — v2.2 clients should see identical
+        // JSON to what they produce.
+        let occ = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange::default(),
+            confidence_score: 50,
+            role: Role::Reference,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+        let json = serde_json::to_string(&occ).unwrap();
+        assert!(!json.contains("\"kind\""), "kind:unknown must be skipped: {json}");
+        assert!(
+            !json.contains("\"is_test\""),
+            "is_test:false must be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn v23_non_default_ref_fields_roundtrip() {
+        let occ = OwnedOccurrence {
+            symbol_uri: "lip://local/a.rs#foo".into(),
+            range: OwnedRange::default(),
+            confidence_score: 50,
+            role: Role::Reference,
+            override_doc: None,
+            kind: ReferenceKind::Call,
+            is_test: true,
+        };
+        let json = serde_json::to_string(&occ).unwrap();
+        assert!(json.contains("\"kind\":\"call\""), "got {json}");
+        assert!(json.contains("\"is_test\":true"), "got {json}");
+        let back: OwnedOccurrence = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, ReferenceKind::Call);
+        assert!(back.is_test);
     }
 }

@@ -7,8 +7,8 @@ use tokio::net::UnixStream;
 use lip_core::daemon::LipDaemon;
 use lip_core::query_graph::{ClientMessage, ErrorCode, ServerMessage};
 use lip_core::schema::{
-    Action, IndexingState, OwnedDocument, OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role,
-    SymbolKind,
+    Action, ExtractionTier, IndexingState, ModifiersSource, OwnedDocument, OwnedOccurrence,
+    OwnedRange, OwnedSymbolInfo, ReferenceKind, Role, SymbolKind, Visibility,
 };
 
 // ─── Framing helpers (client side) ───────────────────────────────────────────
@@ -216,6 +216,9 @@ async fn daemon_workspace_symbols() {
     send(
         &mut client,
         &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
             query: "Widget".to_owned(),
             limit: Some(50),
         },
@@ -225,7 +228,7 @@ async fn daemon_workspace_symbols() {
 
     let resp = recv(&mut client).await.expect("recv workspace symbols");
     match resp {
-        ServerMessage::WorkspaceSymbolsResult { symbols } => {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
             // tree-sitter should have found at least the two struct declarations.
             assert!(
                 !symbols.is_empty(),
@@ -307,6 +310,9 @@ async fn daemon_restart_restores_journal() {
         send(
             &mut client,
             &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
                 query: "persisted".into(),
                 limit: Some(10),
             },
@@ -316,7 +322,7 @@ async fn daemon_restart_restores_journal() {
 
         let resp = recv(&mut client).await.unwrap();
         match resp {
-            ServerMessage::WorkspaceSymbolsResult { symbols } => {
+            ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
                 assert!(
                     !symbols.is_empty(),
                     "expected persisted_fn to survive daemon restart, got no symbols"
@@ -928,6 +934,7 @@ async fn scip_import_precomputed_symbols_searchable() {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: true,
+            ..Default::default()
         }],
         occurrences: vec![OwnedOccurrence {
             symbol_uri: symbol_uri.clone(),
@@ -940,6 +947,8 @@ async fn scip_import_precomputed_symbols_searchable() {
             confidence_score: 100,
             role: Role::Definition,
             override_doc: None,
+            kind: lip_core::schema::ReferenceKind::Unknown,
+            is_test: false,
         }],
         merkle_path: uri.to_owned(),
         edges: vec![],
@@ -971,6 +980,9 @@ async fn scip_import_precomputed_symbols_searchable() {
     send(
         &mut client,
         &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
             query: "ScipWidget".to_owned(),
             limit: Some(10),
         },
@@ -980,7 +992,7 @@ async fn scip_import_precomputed_symbols_searchable() {
 
     let resp = recv(&mut client).await.expect("recv workspace symbols");
     match resp {
-        ServerMessage::WorkspaceSymbolsResult { symbols } => {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
             assert!(
                 !symbols.is_empty(),
                 "expected ScipWidget in workspace symbols, got none"
@@ -1028,6 +1040,835 @@ async fn scip_import_precomputed_symbols_searchable() {
     }
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
+    task.abort();
+    let _ = task.await;
+}
+
+// ─── v2.3 rich metadata end-to-end ───────────────────────────────────────────
+
+/// Upsert a Rust file with source_text, then query WorkspaceSymbols and verify
+/// the Tier-1 extractor's v2.3 structural fields (modifiers, visibility,
+/// container_name, signature_normalized) survive the daemon's storage and
+/// response serialization round-trip. Tier-1 produces `extraction_tier = Tier1`
+/// and leaves `modifiers_source = None` (that field is reserved for SCIP).
+#[tokio::test]
+async fn daemon_tier1_emits_v23_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_tier1.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let source = "\
+pub struct Svc;
+impl Svc {
+    pub async fn handle(&self, x: i32) -> i32 { x }
+}
+";
+    let uri = "lip://local/v23@0.1/svc.rs";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .expect("send upsert");
+    let _ = recv(&mut client).await.expect("recv ack");
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "handle".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send workspace query");
+
+    let resp = recv(&mut client).await.expect("recv workspace symbols");
+    let handle = match resp {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "handle")
+            .expect("expected 'handle' method in workspace symbols"),
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    assert_eq!(handle.extraction_tier, ExtractionTier::Tier1);
+    assert_eq!(
+        handle.modifiers_source, None,
+        "Tier-1 must not set modifiers_source; that field is reserved for SCIP"
+    );
+    assert_eq!(handle.visibility, Some(Visibility::Public));
+    assert_eq!(handle.container_name.as_deref(), Some("Svc"));
+    assert!(
+        handle.modifiers.iter().any(|m| m == "pub"),
+        "expected `pub` modifier, got {:?}",
+        handle.modifiers
+    );
+    assert!(
+        handle.modifiers.iter().any(|m| m == "async"),
+        "expected `async` modifier, got {:?}",
+        handle.modifiers
+    );
+    assert!(
+        handle
+            .signature_normalized
+            .as_deref()
+            .map(|s| s.contains("fn handle"))
+            .unwrap_or(false),
+        "expected normalized signature containing `fn handle`, got {:?}",
+        handle.signature_normalized
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Upsert a Delta carrying pre-computed symbols with v2.3 fields populated (as
+/// a SCIP-style importer would produce) and verify every structural and
+/// telemetry field survives the daemon's storage and query serialization.
+///
+/// This is the tightest available check that the daemon's write path does not
+/// drop `modifiers`, `visibility`, `container_name`, `signature_normalized`,
+/// `extraction_tier`, or `modifiers_source`.
+#[tokio::test]
+async fn daemon_precomputed_preserves_v23_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_scip.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let uri = "lip://local/scip@1.0/imported.rs";
+    let sym_uri = format!("{uri}#RichSym");
+
+    let sym = OwnedSymbolInfo {
+        uri: sym_uri.clone(),
+        display_name: "RichSym".to_owned(),
+        kind: SymbolKind::Function,
+        documentation: Some("A symbol carrying full v2.3 metadata.".to_owned()),
+        signature: Some("pub async fn RichSym(x: i32) -> Bar".to_owned()),
+        signature_normalized: Some("pub async fn RichSym(_: i32) -> Bar".to_owned()),
+        modifiers: vec!["pub".to_owned(), "async".to_owned()],
+        visibility: Some(Visibility::Public),
+        visibility_confidence: Some(1.0),
+        container_name: Some("RichContainer".to_owned()),
+        extraction_tier: ExtractionTier::Tier3Scip,
+        modifiers_source: Some(ModifiersSource::PrefixParse),
+        confidence_score: 100,
+        is_exported: true,
+        ..Default::default()
+    };
+
+    let doc = OwnedDocument {
+        uri: uri.to_owned(),
+        content_hash: "deadbeef".to_owned(),
+        language: "rust".to_owned(),
+        symbols: vec![sym],
+        occurrences: vec![OwnedOccurrence {
+            symbol_uri: sym_uri.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 7,
+            },
+            confidence_score: 100,
+            role: Role::Definition,
+            override_doc: None,
+            kind: lip_core::schema::ReferenceKind::Unknown,
+            is_test: false,
+        }],
+        merkle_path: uri.to_owned(),
+        edges: vec![],
+        source_text: None, // SCIP-style: no source
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 7,
+            action: Action::Upsert,
+            document: doc,
+        },
+    )
+    .await
+    .expect("send delta");
+    let _ = recv(&mut client).await.expect("recv ack");
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "RichSym".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send query");
+
+    let resp = recv(&mut client).await.expect("recv workspace symbols");
+    let got = match resp {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "RichSym")
+            .expect("expected RichSym in workspace symbols"),
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    assert_eq!(got.extraction_tier, ExtractionTier::Tier3Scip);
+    assert_eq!(got.modifiers_source, Some(ModifiersSource::PrefixParse));
+    assert_eq!(got.visibility, Some(Visibility::Public));
+    assert_eq!(got.visibility_confidence, Some(1.0));
+    assert_eq!(got.container_name.as_deref(), Some("RichContainer"));
+    assert_eq!(got.modifiers, vec!["pub".to_owned(), "async".to_owned()]);
+    assert_eq!(
+        got.signature_normalized.as_deref(),
+        Some("pub async fn RichSym(_: i32) -> Bar")
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// End-to-end v2.3 reference-kind test. Upserts a Rust file with a function
+/// definition and a call site, then verifies the daemon's ReferencesResult
+/// carries `kind = Call` on the reference occurrence produced by Tier-1.
+#[tokio::test]
+async fn daemon_tier1_call_occurrence_has_ref_kind_call() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_refkind.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let source = "\
+pub fn callee() {}
+pub fn caller() {
+    callee();
+}
+";
+    let uri = "lip://local/v23refkind@0.1/src.rs";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .expect("send upsert");
+    let _ = recv(&mut client).await.expect("recv ack");
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "callee".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send workspace query");
+    let callee_uri = match recv(&mut client).await.expect("recv workspace") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "callee")
+            .expect("expected 'callee' in workspace symbols")
+            .uri,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::QueryReferences {
+            symbol_uri: callee_uri.clone(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send refs query");
+    let refs = match recv(&mut client).await.expect("recv refs") {
+        ServerMessage::ReferencesResult { occurrences } => occurrences,
+        other => panic!("expected ReferencesResult, got {other:?}"),
+    };
+
+    let call_ref = refs
+        .iter()
+        .find(|o| o.role == Role::Reference)
+        .expect("expected at least one reference occurrence for `callee`");
+    assert_eq!(
+        call_ref.kind,
+        ReferenceKind::Call,
+        "Tier-1 must tag `callee()` with ReferenceKind::Call; got {:?}",
+        call_ref.kind
+    );
+    assert!(
+        !call_ref.is_test,
+        "non-test file must not set is_test; got {:?} for uri {}",
+        call_ref.is_test, uri
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Upsert a file whose URI contains `/tests/` and verify Tier-1 stamps
+/// `is_test = true` on every occurrence — the down-rank signal for CKB.
+#[tokio::test]
+async fn daemon_tier1_test_file_stamps_is_test() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_istest.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let source = "pub fn helper() { helper(); }";
+    let uri = "lip://local/myproj@0.1/tests/integration.rs";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, source),
+        },
+    )
+    .await
+    .expect("send upsert");
+    let _ = recv(&mut client).await.expect("recv ack");
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "helper".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send workspace query");
+    let helper_uri = match recv(&mut client).await.expect("recv workspace") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "helper")
+            .expect("expected 'helper' in workspace symbols")
+            .uri,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::QueryReferences {
+            symbol_uri: helper_uri,
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send refs query");
+    let refs = match recv(&mut client).await.expect("recv refs") {
+        ServerMessage::ReferencesResult { occurrences } => occurrences,
+        other => panic!("expected ReferencesResult, got {other:?}"),
+    };
+
+    assert!(
+        !refs.is_empty(),
+        "expected at least one reference occurrence"
+    );
+    for o in &refs {
+        assert!(
+            o.is_test,
+            "Tier-1 must stamp is_test on occurrences from /tests/ files; got false"
+        );
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// QueryBlastRadiusSymbol (v2.3 Feature #3): single-symbol analogue of
+/// QueryBlastRadiusBatch. Upsert two Rust files where file B calls a function
+/// defined in file A, then ask the daemon for A's function's blast radius and
+/// verify file B appears in `affected_files`. Also verify the `None` path for
+/// unknown symbols.
+#[tokio::test]
+async fn daemon_query_blast_radius_symbol() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_br_symbol.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let a_uri = "lip://local/brsym@0.1/a.rs";
+    let a_src = "pub fn victim() {}";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(a_uri, a_src),
+        },
+    )
+    .await
+    .expect("send a");
+    let _ = recv(&mut client).await.expect("ack a");
+
+    let b_uri = "lip://local/brsym@0.1/b.rs";
+    let b_src = "\
+pub fn caller() {
+    crate::a::victim();
+}
+";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 2,
+            action: Action::Upsert,
+            document: make_doc(b_uri, b_src),
+        },
+    )
+    .await
+    .expect("send b");
+    let _ = recv(&mut client).await.expect("ack b");
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "victim".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send workspace");
+    let victim_uri = match recv(&mut client).await.expect("recv workspace") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "victim")
+            .expect("expected `victim` in workspace")
+            .uri,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri: victim_uri.clone(),
+            min_score: None,
+        },
+    )
+    .await
+    .expect("send br symbol");
+    let enriched = match recv(&mut client).await.expect("recv br symbol") {
+        ServerMessage::BlastRadiusSymbolResult { result } => {
+            result.expect("expected Some(EnrichedBlastRadius) for indexed symbol")
+        }
+        other => panic!("expected BlastRadiusSymbolResult, got {other:?}"),
+    };
+
+    // The file that defines `victim` — the enrichment's anchor.
+    assert_eq!(enriched.file_uri, a_uri);
+    assert!(
+        enriched.static_result.affected_files.iter().any(|f| f == b_uri),
+        "expected caller file {b_uri} in affected_files, got {:?}",
+        enriched.static_result.affected_files
+    );
+    // min_score was None — enrichment must be skipped.
+    assert!(
+        enriched.semantic_items.is_empty(),
+        "min_score = None must skip semantic enrichment; got {:?}",
+        enriched.semantic_items
+    );
+
+    // Unknown symbol URI → None (not an error).
+    send(
+        &mut client,
+        &ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri: "lip://local/does/not/exist#nope".to_owned(),
+            min_score: None,
+        },
+    )
+    .await
+    .expect("send unknown br symbol");
+    match recv(&mut client).await.expect("recv unknown br symbol") {
+        ServerMessage::BlastRadiusSymbolResult { result } => {
+            assert!(result.is_none(), "unknown symbol must return None result")
+        }
+        other => panic!("expected BlastRadiusSymbolResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// QueryOutgoingCalls (v2.3 Feature #4): forward call-graph BFS. Upsert a
+/// single file containing an A→B→C call chain and verify that depth=2
+/// returns both edges, while depth=1 only returns A→B.
+#[tokio::test]
+async fn daemon_query_outgoing_calls_depth() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_outgoing.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    let uri = "lip://local/og@0.1/chain.rs";
+    let src = "\
+fn a() { b(); }
+fn b() { c(); }
+fn c() {}
+";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(uri, src),
+        },
+    )
+    .await
+    .expect("send upsert");
+    let _ = recv(&mut client).await.expect("recv ack");
+
+    // Resolve `a`'s URI via workspace symbols.
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "a".to_owned(),
+            limit: Some(20),
+        },
+    )
+    .await
+    .expect("send workspace");
+    let a_uri = match recv(&mut client).await.expect("recv workspace") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "a")
+            .expect("expected `a` in workspace symbols")
+            .uri,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    // Depth 2: A→B and B→C must both be present.
+    send(
+        &mut client,
+        &ClientMessage::QueryOutgoingCalls {
+            symbol_uri: a_uri.clone(),
+            depth: 2,
+        },
+    )
+    .await
+    .expect("send outgoing depth=2");
+    let (edges, truncated) = match recv(&mut client).await.expect("recv depth=2") {
+        ServerMessage::OutgoingCallsResult { edges, truncated } => (edges, truncated),
+        other => panic!("expected OutgoingCallsResult, got {other:?}"),
+    };
+    assert!(!truncated, "chain is tiny; truncated must be false");
+    assert!(
+        edges.iter().any(|e| e.from_uri == a_uri && e.to_uri.ends_with("#b")),
+        "expected A→B edge; got {edges:?}",
+    );
+    assert!(
+        edges.iter().any(|e| e.from_uri.ends_with("#b") && e.to_uri.ends_with("#c")),
+        "expected B→C edge at depth=2; got {edges:?}",
+    );
+
+    // Depth 1: B→C must be absent.
+    send(
+        &mut client,
+        &ClientMessage::QueryOutgoingCalls {
+            symbol_uri: a_uri.clone(),
+            depth: 1,
+        },
+    )
+    .await
+    .expect("send outgoing depth=1");
+    let (edges1, _) = match recv(&mut client).await.expect("recv depth=1") {
+        ServerMessage::OutgoingCallsResult { edges, truncated } => (edges, truncated),
+        other => panic!("expected OutgoingCallsResult, got {other:?}"),
+    };
+    assert!(
+        edges1.iter().any(|e| e.to_uri.ends_with("#b")),
+        "depth=1 must still include A→B; got {edges1:?}",
+    );
+    assert!(
+        !edges1.iter().any(|e| e.to_uri.ends_with("#c")),
+        "depth=1 must exclude B→C; got {edges1:?}",
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Feature #5c: ranked workspace symbols.
+///
+/// Verifies the four new v2.3 behaviors on `QueryWorkspaceSymbols`:
+/// 1. Ranking tiers: Exact (1.0) > Prefix (0.8), and `ranked` parallels `symbols`.
+/// 2. `kind_filter` narrows the result set to the requested `SymbolKind`s.
+/// 3. `scope` restricts to symbols whose def-file URI starts with the prefix.
+/// 4. `modifier_filter` restricts to symbols carrying at least one listed modifier.
+/// 5. An empty query returns `ranked = []` (preserves pre-v2.3 semantics).
+#[tokio::test]
+async fn daemon_workspace_symbols_v23_filters_and_ranking() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("lip_v23_ranked.sock");
+
+    let daemon = LipDaemon::new(&socket_path);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+
+    // File A under scope `lip://local/srv`: `Handler` struct + async fn `handle`.
+    let srv_uri = "lip://local/srv@0.1/a.rs";
+    let srv_src = "\
+pub struct Handler;
+pub async fn handle() {}
+";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(srv_uri, srv_src),
+        },
+    )
+    .await
+    .expect("send srv upsert");
+    let _ = recv(&mut client).await.expect("recv srv ack");
+
+    // File B under scope `lip://local/cli`: `HandlerFactory` struct.
+    let cli_uri = "lip://local/cli@0.1/b.rs";
+    let cli_src = "pub struct HandlerFactory;\n";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 2,
+            action: Action::Upsert,
+            document: make_doc(cli_uri, cli_src),
+        },
+    )
+    .await
+    .expect("send cli upsert");
+    let _ = recv(&mut client).await.expect("recv cli ack");
+
+    // (1) Ranking tiers — query "Handler" hits Exact on `Handler` and Prefix on `HandlerFactory`.
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: "Handler".to_owned(),
+            limit: Some(50),
+        },
+    )
+    .await
+    .expect("send ranked query");
+    let (symbols, ranked) = match recv(&mut client).await.expect("recv ranked") {
+        ServerMessage::WorkspaceSymbolsResult {
+            symbols, ranked, ..
+        } => (symbols, ranked),
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+    assert_eq!(
+        symbols.len(),
+        ranked.len(),
+        "ranked must parallel symbols; got {} vs {}",
+        symbols.len(),
+        ranked.len(),
+    );
+    let exact = ranked
+        .iter()
+        .zip(symbols.iter())
+        .find(|(_, s)| s.display_name == "Handler")
+        .map(|(r, _)| r)
+        .expect("expected Handler in ranked list");
+    assert!(
+        matches!(exact.match_type, lip_core::query_graph::types::MatchType::Exact),
+        "Handler should be Exact match, got {:?}",
+        exact.match_type,
+    );
+    assert!((exact.score - 1.0).abs() < 1e-6, "exact score must be 1.0");
+    let prefix = ranked
+        .iter()
+        .zip(symbols.iter())
+        .find(|(_, s)| s.display_name == "HandlerFactory")
+        .map(|(r, _)| r)
+        .expect("expected HandlerFactory in ranked list");
+    assert!(
+        matches!(prefix.match_type, lip_core::query_graph::types::MatchType::Prefix),
+        "HandlerFactory should be Prefix match, got {:?}",
+        prefix.match_type,
+    );
+    assert!(
+        (prefix.score - 0.8).abs() < 1e-6,
+        "prefix score must be 0.8"
+    );
+    // Sorted: exact before prefix.
+    let exact_idx = symbols
+        .iter()
+        .position(|s| s.display_name == "Handler")
+        .unwrap();
+    let prefix_idx = symbols
+        .iter()
+        .position(|s| s.display_name == "HandlerFactory")
+        .unwrap();
+    assert!(
+        exact_idx < prefix_idx,
+        "Exact must sort before Prefix; got exact={exact_idx}, prefix={prefix_idx}",
+    );
+
+    // (2) kind_filter — only Function symbols.
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: Some(vec![SymbolKind::Function]),
+            scope: None,
+            modifier_filter: None,
+            query: String::new(),
+            limit: Some(50),
+        },
+    )
+    .await
+    .expect("send kind query");
+    let symbols = match recv(&mut client).await.expect("recv kind") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+    assert!(!symbols.is_empty(), "expected at least one Function");
+    assert!(
+        symbols.iter().all(|s| s.kind == SymbolKind::Function),
+        "kind_filter violated; got kinds {:?}",
+        symbols.iter().map(|s| s.kind).collect::<Vec<_>>(),
+    );
+    assert!(
+        symbols.iter().any(|s| s.display_name == "handle"),
+        "expected `handle` fn, got {:?}",
+        symbols.iter().map(|s| &s.display_name).collect::<Vec<_>>(),
+    );
+
+    // (3) scope — only symbols defined under `lip://local/cli`.
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: Some("lip://local/cli".to_owned()),
+            modifier_filter: None,
+            query: String::new(),
+            limit: Some(50),
+        },
+    )
+    .await
+    .expect("send scope query");
+    let symbols = match recv(&mut client).await.expect("recv scope") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+    assert!(
+        symbols.iter().any(|s| s.display_name == "HandlerFactory"),
+        "scope must include HandlerFactory; got {:?}",
+        symbols.iter().map(|s| &s.display_name).collect::<Vec<_>>(),
+    );
+    assert!(
+        !symbols.iter().any(|s| s.display_name == "Handler"),
+        "scope must exclude `Handler` (wrong scope); got {:?}",
+        symbols.iter().map(|s| &s.display_name).collect::<Vec<_>>(),
+    );
+    assert!(
+        !symbols.iter().any(|s| s.display_name == "handle"),
+        "scope must exclude `handle` (wrong scope); got {:?}",
+        symbols.iter().map(|s| &s.display_name).collect::<Vec<_>>(),
+    );
+
+    // (4) modifier_filter — only symbols with `async` modifier.
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: Some(vec!["async".to_owned()]),
+            query: "handle".to_owned(),
+            limit: Some(20),
+        },
+    )
+    .await
+    .expect("send modifier query");
+    let symbols = match recv(&mut client).await.expect("recv modifier") {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+    assert!(
+        !symbols.is_empty(),
+        "expected at least one async symbol matching `handle`"
+    );
+    assert!(
+        symbols
+            .iter()
+            .all(|s| s.modifiers.iter().any(|m| m == "async")),
+        "modifier_filter violated; modifiers: {:?}",
+        symbols.iter().map(|s| &s.modifiers).collect::<Vec<_>>(),
+    );
+
+    // (5) empty query → `ranked` is empty (legacy behavior preserved).
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+            query: String::new(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("send empty query");
+    let ranked = match recv(&mut client).await.expect("recv empty") {
+        ServerMessage::WorkspaceSymbolsResult { ranked, .. } => ranked,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+    assert!(
+        ranked.is_empty(),
+        "empty query must produce empty ranked (legacy behavior); got {} entries",
+        ranked.len(),
+    );
+
     task.abort();
     let _ = task.await;
 }

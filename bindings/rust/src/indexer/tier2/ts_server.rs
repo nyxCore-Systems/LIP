@@ -21,8 +21,10 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
+use crate::indexer::language::Language;
 use crate::schema::{OwnedRelationship, OwnedSymbolInfo, SymbolKind};
 
+use super::enrich::enrich_v23;
 use super::lsp_client::LspClient;
 use super::rust_analyzer::{file_uri_to_lip_uri, VerificationResult};
 
@@ -161,7 +163,7 @@ impl TypeScriptBackend {
         };
 
         let mut out = vec![];
-        collect_symbols(&items, &mut out);
+        collect_symbols(&items, None, &mut out);
         Ok(out)
     }
 
@@ -287,12 +289,19 @@ impl TypeScriptBackend {
                 .as_deref()
                 .map(|s| s.starts_with("export"))
                 .unwrap_or(false);
-            symbols.push(OwnedSymbolInfo {
+            let ts_lang = if uri.ends_with(".js") || uri.ends_with(".mjs") || uri.ends_with(".cjs") {
+                Language::JavaScript
+            } else if uri.ends_with(".jsx") {
+                Language::JavaScriptReact
+            } else {
+                Language::TypeScript
+            };
+            let mut info = OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
                 kind: lsp_kind_to_lip(sym.kind),
                 documentation: None,
-                signature: sig,
+                signature: sig.clone(),
                 confidence_score: 90,
                 relationships: type_rel.into_iter().collect(),
                 runtime_p99_ms: None,
@@ -300,7 +309,10 @@ impl TypeScriptBackend {
                 taint_labels: vec![],
                 blast_radius: 0,
                 is_exported,
-            });
+                ..Default::default()
+            };
+            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), ts_lang);
+            symbols.push(info);
         }
 
         Ok(VerificationResult {
@@ -317,11 +329,12 @@ struct RawSymbol {
     kind: u64,
     line: u32,
     col: u32,
+    container: Option<String>,
 }
 
 /// Recursively collect symbols from either `DocumentSymbol[]` (nested, with
 /// `selectionRange`) or `SymbolInformation[]` (flat, with `location.range`).
-fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
+fn collect_symbols(items: &[Value], parent: Option<&str>, out: &mut Vec<RawSymbol>) {
     for item in items {
         let name = item
             .get("name")
@@ -349,16 +362,27 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
+        // SymbolInformation has `containerName`; for nested DocumentSymbol
+        // trees we propagate the parent's name so children see the enclosing
+        // class / interface / namespace.
+        let container = item
+            .get("containerName")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| parent.map(str::to_owned));
+
         out.push(RawSymbol {
-            name,
+            name: name.clone(),
             kind,
             line,
             col,
+            container,
         });
 
         // Recurse into nested DocumentSymbol children.
         if let Some(Value::Array(children)) = item.get("children") {
-            collect_symbols(children, out);
+            collect_symbols(children, Some(&name), out);
         }
     }
 }

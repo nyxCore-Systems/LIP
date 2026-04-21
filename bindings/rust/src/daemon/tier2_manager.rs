@@ -814,6 +814,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         }
     }
 
@@ -1121,6 +1122,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         };
 
         db.upsert_file_precomputed(
@@ -1152,6 +1154,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: true,
+            ..Default::default()
         };
 
         db.upgrade_file_symbols(file_uri, &[upgrade]);
@@ -1196,6 +1199,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         };
 
         db.upsert_file_precomputed(
@@ -1221,6 +1225,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         };
 
         db.upgrade_file_symbols(file_uri, &[stale]);

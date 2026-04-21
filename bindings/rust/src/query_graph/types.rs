@@ -88,6 +88,34 @@ pub struct EnrichedBlastRadius {
     pub semantic_items: Vec<SemanticImpactItem>,
 }
 
+/// A single forward call edge returned by `QueryOutgoingCalls` (v2.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct OutgoingCallEdge {
+    pub from_uri: String,
+    pub to_uri: String,
+}
+
+/// How the client's query matched a workspace symbol's display name (v2.3 #5).
+/// Discriminator only — not a ranking signal; the numeric `score` on
+/// [`RankedSymbol`] is what callers sort by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchType {
+    Exact,
+    Prefix,
+    Fuzzy,
+}
+
+/// Per-symbol ranking metadata for [`ServerMessage::WorkspaceSymbolsResult`]
+/// (v2.3 Feature #5). Parallel to `symbols`: `ranked[i]` describes `symbols[i]`.
+/// Tiered scoring — Exact=1.0, Prefix=0.8, Fuzzy=0.5 — not BM25.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RankedSymbol {
+    pub symbol_uri: String,
+    pub score: f32,
+    pub match_type: MatchType,
+}
+
 /// An impact item discovered through embedding similarity rather than
 /// static call-graph edges.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,8 +279,27 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         not_indexed_uris: Vec<String>,
     },
+    /// Response to [`ClientMessage::QueryBlastRadiusSymbol`].
+    /// `result` is `None` when the symbol's defining file is not indexed.
+    BlastRadiusSymbolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<EnrichedBlastRadius>,
+    },
+    /// Response to [`ClientMessage::QueryOutgoingCalls`]. `edges` is a flat
+    /// list of `(caller, callee)` pairs collected during BFS, with no
+    /// guaranteed ordering. `truncated = true` means the configured node
+    /// cap stopped the BFS short.
+    OutgoingCallsResult {
+        edges: Vec<OutgoingCallEdge>,
+        truncated: bool,
+    },
     WorkspaceSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
+        /// v2.3 Feature #5: per-symbol ranking information.
+        /// Empty when the client did not provide any filter/ranking cues
+        /// (pre-v2.3 callers get an empty vec and ignore it via serde default).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ranked: Vec<RankedSymbol>,
     },
     DocumentSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
@@ -769,9 +816,43 @@ pub enum ClientMessage {
         #[serde(default)]
         min_score: Option<f32>,
     },
+    /// Symbol-scoped blast radius with optional semantic enrichment (v2.3).
+    /// Single-symbol analogue of `QueryBlastRadiusBatch`. Delegates to the
+    /// file-level blast-radius computation for the symbol's defining file
+    /// and returns an `EnrichedBlastRadius`.
+    ///
+    /// When `min_score` is present, semantic enrichment runs for that file's
+    /// embedding against the index; absent means structural-only.
+    /// Returns `BlastRadiusSymbolResult`.
+    QueryBlastRadiusSymbol {
+        symbol_uri: String,
+        #[serde(default)]
+        min_score: Option<f32>,
+    },
+    /// Outgoing call graph starting at `symbol_uri` (v2.3 Feature #4).
+    /// Returns the transitive forward call edges up to `depth` hops.
+    /// `truncated = true` when the BFS hit the configured node limit.
+    QueryOutgoingCalls {
+        symbol_uri: String,
+        /// BFS depth (>=1). Values <1 are treated as 1; >8 are clamped to 8
+        /// to bound response size on pathological graphs.
+        depth: u32,
+    },
     QueryWorkspaceSymbols {
         query: String,
         limit: Option<usize>,
+        /// v2.3 Feature #5: only return symbols whose `kind` is in this set.
+        /// Omit for no filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind_filter: Option<Vec<crate::schema::SymbolKind>>,
+        /// v2.3 Feature #5: only return symbols whose defining file URI
+        /// starts with this prefix. Omit to search all files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// v2.3 Feature #5: only return symbols that carry at least one of
+        /// these modifier strings (e.g. "pub", "async"). Omit for no filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifier_filter: Option<Vec<String>>,
     },
     QueryDocumentSymbols {
         uri: String,
@@ -1246,6 +1327,8 @@ impl ClientMessage {
             "query_hover",
             "query_blast_radius",
             "query_blast_radius_batch",
+            "query_blast_radius_symbol",
+            "query_outgoing_calls",
             "query_workspace_symbols",
             "query_document_symbols",
             "query_dead_symbols",
@@ -1320,6 +1403,8 @@ impl ClientMessage {
             ClientMessage::QueryHover { .. } => "query_hover",
             ClientMessage::QueryBlastRadius { .. } => "query_blast_radius",
             ClientMessage::QueryBlastRadiusBatch { .. } => "query_blast_radius_batch",
+            ClientMessage::QueryBlastRadiusSymbol { .. } => "query_blast_radius_symbol",
+            ClientMessage::QueryOutgoingCalls { .. } => "query_outgoing_calls",
             ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
             ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
             ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
@@ -1728,9 +1813,20 @@ mod tests {
                 changed_file_uris: vec![],
                 min_score: None,
             },
+            ClientMessage::QueryBlastRadiusSymbol {
+                symbol_uri: String::new(),
+                min_score: None,
+            },
+            ClientMessage::QueryOutgoingCalls {
+                symbol_uri: String::new(),
+                depth: 1,
+            },
             ClientMessage::QueryWorkspaceSymbols {
                 query: String::new(),
                 limit: None,
+                kind_filter: None,
+                scope: None,
+                modifier_filter: None,
             },
             ClientMessage::QueryDocumentSymbols { uri: String::new() },
             ClientMessage::QueryDeadSymbols { limit: None },

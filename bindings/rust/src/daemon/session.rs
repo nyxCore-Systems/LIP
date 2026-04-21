@@ -412,11 +412,44 @@ impl Session {
                 }
             }
 
-            ClientMessage::QueryWorkspaceSymbols { query, limit } => {
+            ClientMessage::QueryBlastRadiusSymbol {
+                symbol_uri,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let result = db.blast_radius_for_symbol(&symbol_uri, min_score);
+                ServerMessage::BlastRadiusSymbolResult { result }
+            }
+
+            ClientMessage::QueryOutgoingCalls { symbol_uri, depth } => {
+                let db = self.db.lock().await;
+                let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
+                let edges = pairs
+                    .into_iter()
+                    .map(|(from_uri, to_uri)| {
+                        crate::query_graph::types::OutgoingCallEdge { from_uri, to_uri }
+                    })
+                    .collect();
+                ServerMessage::OutgoingCallsResult { edges, truncated }
+            }
+
+            ClientMessage::QueryWorkspaceSymbols {
+                query,
+                limit,
+                kind_filter,
+                scope,
+                modifier_filter,
+            } => {
                 let limit = limit.unwrap_or(100);
                 let mut db = self.db.lock().await;
-                let syms = db.workspace_symbols(&query, limit);
-                ServerMessage::WorkspaceSymbolsResult { symbols: syms }
+                let (symbols, ranked) = db.workspace_symbols_ranked(
+                    &query,
+                    limit,
+                    kind_filter.as_deref(),
+                    scope.as_deref(),
+                    modifier_filter.as_deref(),
+                );
+                ServerMessage::WorkspaceSymbolsResult { symbols, ranked }
             }
 
             ClientMessage::QueryDocumentSymbols { uri } => {
@@ -1980,10 +2013,41 @@ fn process_query_sync(
             })
         }
 
-        ClientMessage::QueryWorkspaceSymbols { query, limit } => {
+        ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri,
+            min_score,
+        } => {
+            let result = db.blast_radius_for_symbol(&symbol_uri, min_score);
+            ok(ServerMessage::BlastRadiusSymbolResult { result })
+        }
+
+        ClientMessage::QueryOutgoingCalls { symbol_uri, depth } => {
+            let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
+            let edges = pairs
+                .into_iter()
+                .map(|(from_uri, to_uri)| {
+                    crate::query_graph::types::OutgoingCallEdge { from_uri, to_uri }
+                })
+                .collect();
+            ok(ServerMessage::OutgoingCallsResult { edges, truncated })
+        }
+
+        ClientMessage::QueryWorkspaceSymbols {
+            query,
+            limit,
+            kind_filter,
+            scope,
+            modifier_filter,
+        } => {
             let limit = limit.unwrap_or(100);
-            let syms = db.workspace_symbols(&query, limit);
-            ok(ServerMessage::WorkspaceSymbolsResult { symbols: syms })
+            let (symbols, ranked) = db.workspace_symbols_ranked(
+                &query,
+                limit,
+                kind_filter.as_deref(),
+                scope.as_deref(),
+                modifier_filter.as_deref(),
+            );
+            ok(ServerMessage::WorkspaceSymbolsResult { symbols, ranked })
         }
 
         ClientMessage::QueryDocumentSymbols { uri } => {

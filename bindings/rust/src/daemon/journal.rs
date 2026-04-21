@@ -398,7 +398,9 @@ mod tests {
 
     #[test]
     fn precomputed_survives_compact_replay() {
-        use crate::schema::{OwnedOccurrence, OwnedRange, OwnedSymbolInfo, Role, SymbolKind};
+        use crate::schema::{
+            OwnedOccurrence, OwnedRange, OwnedSymbolInfo, ReferenceKind, Role, SymbolKind,
+        };
 
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_owned();
@@ -416,6 +418,7 @@ mod tests {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         };
         let occ = OwnedOccurrence {
             symbol_uri: "lip://local/lib.rs#Foo".into(),
@@ -428,6 +431,8 @@ mod tests {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
 
         // Write a precomputed entry.

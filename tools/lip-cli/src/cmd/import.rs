@@ -5,10 +5,12 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use lip::indexer::language::Language;
 use lip::query_graph::{ClientMessage, ServerMessage, Tier3Source};
 use lip::schema::{
-    sha256_hex, Action, OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence, OwnedRange,
-    OwnedSymbolInfo, Role, SymbolKind,
+    normalize_signature, sha256_hex, visibility, Action, ExtractionTier, ModifiersSource,
+    OwnedDelta, OwnedDocument, OwnedEventStream, OwnedOccurrence, OwnedRange, OwnedSymbolInfo,
+    ReferenceKind, Role, SymbolKind,
 };
 
 use crate::output;
@@ -98,7 +100,7 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         let symbols: Vec<OwnedSymbolInfo> = index
             .external_symbols
             .into_iter()
-            .map(|sym| convert_symbol_info(&sym, confidence))
+            .map(|sym| convert_symbol_info(&sym, confidence, Language::Unknown))
             .collect();
 
         let doc = OwnedDocument {
@@ -258,11 +260,12 @@ fn build_tier3_source(index: &scip::Index, scip_path: &std::path::Path) -> Tier3
 fn convert_document(doc: scip::Document, confidence: u8) -> OwnedDelta {
     let uri = format!("file:///{}", doc.relative_path.trim_start_matches('/'));
     let content_hash = sha256_hex(doc.relative_path.as_bytes());
+    let lang = scip_language_to_lip(&doc.language);
 
     let symbols: Vec<OwnedSymbolInfo> = doc
         .symbols
         .iter()
-        .map(|s| convert_symbol_info(s, confidence))
+        .map(|s| convert_symbol_info(s, confidence, lang))
         .collect();
 
     let occurrences: Vec<OwnedOccurrence> = doc
@@ -293,7 +296,11 @@ fn convert_document(doc: scip::Document, confidence: u8) -> OwnedDelta {
     }
 }
 
-fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSymbolInfo {
+fn convert_symbol_info(
+    sym: &scip::SymbolInformation,
+    confidence: u8,
+    lang: Language,
+) -> OwnedSymbolInfo {
     let display = if sym.display_name.is_empty() {
         // Fall back to the last descriptor segment of the symbol string.
         sym.symbol
@@ -314,6 +321,32 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSy
 
     // SCIP private symbols begin with "local "; everything else is exported.
     let is_exported = !sym.symbol.starts_with("local ");
+
+    // v2.3 structural metadata. Upstream SCIP carries `enclosing_symbol` but no
+    // canonical modifier field, so we always reconstruct modifiers by parsing
+    // the signature prefix and tag the source accordingly. CKB discounts
+    // confidence on `PrefixParse` when merging imports with Tier-1 results.
+    let modifiers = signature
+        .as_deref()
+        .map(|s| parse_modifiers_from_signature(s, lang))
+        .unwrap_or_default();
+
+    let (vis, vis_confidence) = if matches!(lang, Language::Unknown) {
+        // Without a language we cannot apply name/keyword rules; skip inference.
+        (None, None)
+    } else {
+        let (v, c) = visibility::infer(&display, &modifiers, lang);
+        (Some(v), Some(c as f32 / 100.0))
+    };
+
+    let signature_normalized = signature
+        .as_deref()
+        .map(|s| normalize_signature(s, lang));
+
+    let container_name = Some(sym.enclosing_symbol.clone())
+        .filter(|s| !s.is_empty())
+        .map(|enc| scip_enclosing_to_display(&enc));
+
     OwnedSymbolInfo {
         uri: scip_symbol_to_lip_uri(&sym.symbol),
         display_name: display,
@@ -327,7 +360,116 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, confidence: u8) -> OwnedSy
         taint_labels: vec![],
         blast_radius: 0,
         is_exported,
+        signature_normalized,
+        modifiers,
+        visibility: vis,
+        container_name,
+        visibility_confidence: vis_confidence,
+        extraction_tier: ExtractionTier::Tier3Scip,
+        modifiers_source: Some(ModifiersSource::PrefixParse),
+        ..Default::default()
     }
+}
+
+/// Map a SCIP `Document.language` string to a LIP [`Language`].
+///
+/// Returns [`Language::Unknown`] when the SCIP index omits the language field or
+/// uses a value we do not handle. Matches the casing upstream producers emit
+/// (e.g. scip-typescript emits `"TypeScript"`).
+fn scip_language_to_lip(lang: &str) -> Language {
+    match lang.to_ascii_lowercase().as_str() {
+        "rust" => Language::Rust,
+        "typescript" | "tsx" => Language::TypeScript,
+        "javascript" | "javascriptreact" | "jsx" => Language::JavaScript,
+        "python" => Language::Python,
+        "dart" => Language::Dart,
+        "go" => Language::Go,
+        "kotlin" => Language::Kotlin,
+        "swift" => Language::Swift,
+        "c" => Language::C,
+        "cpp" | "c++" | "cxx" => Language::Cpp,
+        _ => Language::Unknown,
+    }
+}
+
+/// Parse leading modifier keywords from a signature prefix (SCIP-native docs).
+fn parse_modifiers_from_signature(signature: &str, lang: Language) -> Vec<String> {
+    let keywords: &[&str] = match lang {
+        Language::Rust => &["pub", "const", "async", "unsafe", "extern", "static", "mut"],
+        Language::TypeScript
+        | Language::JavaScript
+        | Language::JavaScriptReact => &[
+            "export", "default", "async", "static", "readonly", "public", "private", "protected",
+            "abstract", "declare", "override",
+        ],
+        Language::Dart => &[
+            "static", "abstract", "final", "const", "external", "factory", "late", "covariant",
+        ],
+        Language::Kotlin => &[
+            "private", "protected", "internal", "public", "abstract", "final", "open", "override",
+            "suspend", "inline", "external", "data", "sealed", "companion", "lateinit", "const",
+            "operator", "infix", "tailrec",
+        ],
+        Language::Swift => &[
+            "private", "fileprivate", "internal", "public", "open", "static", "final", "override",
+            "mutating", "nonmutating", "required", "convenience", "lazy", "weak", "unowned",
+            "dynamic",
+        ],
+        Language::C | Language::Cpp => &[
+            "static", "extern", "const", "virtual", "override", "explicit", "inline", "constexpr",
+            "private", "protected", "public", "friend", "mutable", "volatile",
+        ],
+        // Python / Go / Unknown: prefix-parse not meaningful; rely on name rules.
+        _ => &[],
+    };
+
+    let mut out = Vec::new();
+    let mut rest = signature.trim_start();
+    loop {
+        if matches!(lang, Language::Rust) && rest.starts_with("pub(") {
+            if let Some(close) = rest.find(')') {
+                out.push(rest[..=close].to_owned());
+                rest = rest[close + 1..].trim_start();
+                continue;
+            }
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '(' || c == '<' || c == ':')
+            .unwrap_or(rest.len());
+        if end == 0 {
+            break;
+        }
+        let tok = &rest[..end];
+        if keywords.contains(&tok) {
+            out.push(tok.to_owned());
+            rest = rest[end..].trim_start();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Convert a SCIP `enclosing_symbol` string to a human-readable container name.
+///
+/// SCIP encodes enclosing symbols the same way as regular `symbol` strings
+/// (e.g. `scip-typescript npm react 18.2.0 React#Component.`); the trailing
+/// descriptor is what a human calls the class/namespace.
+fn scip_enclosing_to_display(enc: &str) -> String {
+    // splitn(5): keep the descriptor intact even when it contains spaces.
+    let parts: Vec<&str> = enc.splitn(5, ' ').collect();
+    if parts.len() == 5 {
+        let desc = parts[4];
+        let cleaned = desc.trim_end_matches(['#', '.', '/', '`', ' ']);
+        let last = cleaned
+            .rsplit(['#', '.', '/', '`'])
+            .next()
+            .unwrap_or(cleaned);
+        if !last.is_empty() {
+            return last.to_owned();
+        }
+    }
+    enc.to_owned()
 }
 
 /// Split SCIP documentation entries into a `(signature, doc_comment)` pair.
@@ -369,6 +511,7 @@ fn looks_like_signature(s: &str) -> bool {
     // Java, Go, Dart, and Kotlin.
     const SIG_PREFIXES: &[&str] = &[
         "pub ",
+        "pub(",
         "fn ",
         "async fn ",
         "pub fn ",
@@ -401,11 +544,24 @@ fn looks_like_signature(s: &str) -> bool {
 
 fn convert_occurrence(occ: &scip::Occurrence) -> Option<OwnedOccurrence> {
     let range = parse_scip_range(&occ.range)?;
-    let role = if occ.symbol_roles & (scip::SymbolRole::Definition as i32) != 0 {
+    let roles = occ.symbol_roles;
+    let role = if roles & (scip::SymbolRole::Definition as i32) != 0 {
         Role::Definition
     } else {
         Role::Reference
     };
+    // SCIP symbol_roles bits map to LIP ReferenceKind (spec §10.2).
+    // Write takes precedence over Read if both bits are set.
+    let kind = if matches!(role, Role::Definition) {
+        ReferenceKind::Unknown
+    } else if roles & (scip::SymbolRole::WriteAccess as i32) != 0 {
+        ReferenceKind::Write
+    } else if roles & (scip::SymbolRole::ReadAccess as i32) != 0 {
+        ReferenceKind::Read
+    } else {
+        ReferenceKind::Unknown
+    };
+    let is_test = roles & (scip::SymbolRole::Test as i32) != 0;
 
     Some(OwnedOccurrence {
         symbol_uri: scip_symbol_to_lip_uri(&occ.symbol),
@@ -417,6 +573,8 @@ fn convert_occurrence(occ: &scip::Occurrence) -> Option<OwnedOccurrence> {
         } else {
             Some(occ.override_documentation.join("\n"))
         },
+        kind,
+        is_test,
     })
 }
 
@@ -634,5 +792,232 @@ mod tests {
         let (sig4, doc4) = scip_extract_sig_and_doc(&[]);
         assert!(sig4.is_none());
         assert!(doc4.is_none());
+    }
+
+    // ── v2.3 SCIP importer enrichment ─────────────────────────────────────────
+
+    use lip::schema::{ModifiersSource, Visibility};
+
+    fn sym_with(lang: &str, proto_sym: scip::SymbolInformation) -> OwnedSymbolInfo {
+        convert_symbol_info(&proto_sym, 90, scip_language_to_lip(lang))
+    }
+
+    #[test]
+    fn scip_language_known_values_round_trip() {
+        assert!(matches!(scip_language_to_lip("rust"), Language::Rust));
+        assert!(matches!(
+            scip_language_to_lip("TypeScript"),
+            Language::TypeScript
+        ));
+        assert!(matches!(scip_language_to_lip("Python"), Language::Python));
+        assert!(matches!(scip_language_to_lip(""), Language::Unknown));
+    }
+
+    #[test]
+    fn scip_rust_import_populates_v23_fields() {
+        let proto = scip::SymbolInformation {
+            symbol: "rust-analyzer cargo my_crate 1.0 my_mod/foo().".to_owned(),
+            display_name: "foo".to_owned(),
+            documentation: vec!["pub async fn foo(x: i32) -> Bar".to_owned()],
+            relationships: vec![],
+            kind: scip::Kind::KFunction as i32,
+            enclosing_symbol: String::new(),
+        };
+        let out = sym_with("rust", proto);
+        assert_eq!(out.modifiers, vec!["pub".to_owned(), "async".to_owned()]);
+        assert_eq!(out.visibility, Some(Visibility::Public));
+        assert_eq!(out.visibility_confidence, Some(1.0));
+        assert_eq!(out.extraction_tier, ExtractionTier::Tier3Scip);
+        assert_eq!(out.modifiers_source, Some(ModifiersSource::PrefixParse));
+        assert_eq!(
+            out.signature_normalized.as_deref(),
+            Some("pub async fn foo(_: i32) -> Bar")
+        );
+    }
+
+    #[test]
+    fn scip_enclosing_symbol_becomes_container() {
+        let proto = scip::SymbolInformation {
+            symbol: "scip-typescript npm react 18.2.0 src/App.ts`render().".to_owned(),
+            display_name: "render".to_owned(),
+            documentation: vec!["render(): void".to_owned()],
+            relationships: vec![],
+            kind: scip::Kind::KMethod as i32,
+            enclosing_symbol:
+                "scip-typescript npm react 18.2.0 src/App.ts`App#".to_owned(),
+        };
+        let out = sym_with("typescript", proto);
+        // Last descriptor segment of the enclosing symbol becomes container name.
+        assert_eq!(out.container_name.as_deref(), Some("App"));
+    }
+
+    #[test]
+    fn scip_unknown_language_skips_inference() {
+        let proto = scip::SymbolInformation {
+            symbol: "x y z 1.0 Foo.".to_owned(),
+            display_name: "Foo".to_owned(),
+            documentation: vec![],
+            relationships: vec![],
+            kind: scip::Kind::KClass as i32,
+            enclosing_symbol: String::new(),
+        };
+        let out = sym_with("", proto);
+        // No signature and no language → no modifiers, no visibility inference.
+        assert!(out.modifiers.is_empty());
+        assert!(out.visibility.is_none());
+        assert!(out.visibility_confidence.is_none());
+        // Source is still marked as PrefixParse — absence of a proto modifier
+        // field is the whole reason we tag it that way.
+        assert_eq!(out.modifiers_source, Some(ModifiersSource::PrefixParse));
+    }
+
+    #[test]
+    fn scip_python_uses_name_convention() {
+        let proto = scip::SymbolInformation {
+            symbol: "scip-python pypi mylib 1.0 _helper().".to_owned(),
+            display_name: "_helper".to_owned(),
+            documentation: vec!["def _helper(x: int) -> None".to_owned()],
+            relationships: vec![],
+            kind: scip::Kind::KFunction as i32,
+            enclosing_symbol: String::new(),
+        };
+        let out = sym_with("python", proto);
+        assert_eq!(out.visibility, Some(Visibility::Private));
+        // Python modifier keywords are not meaningful in our prefix-parse set,
+        // so the list stays empty — visibility comes from the name rule.
+        assert!(out.modifiers.is_empty());
+    }
+
+    #[test]
+    fn scip_pub_crate_is_internal() {
+        let proto = scip::SymbolInformation {
+            symbol: "rust-analyzer cargo crate 1.0 foo().".to_owned(),
+            display_name: "foo".to_owned(),
+            documentation: vec!["pub(crate) fn foo()".to_owned()],
+            relationships: vec![],
+            kind: scip::Kind::KFunction as i32,
+            enclosing_symbol: String::new(),
+        };
+        let out = sym_with("rust", proto);
+        assert_eq!(out.modifiers, vec!["pub(crate)".to_owned()]);
+        assert_eq!(out.visibility, Some(Visibility::Internal));
+    }
+
+    /// Wire-format round-trip: encode a `scip::Index` containing
+    /// `enclosing_symbol` (field 8, the only upstream-compatible v2.3 field we
+    /// added to the proto) and verify it decodes back and flows into
+    /// `container_name` on the LIP side. This guards against a future proto
+    /// edit that drops or renumbers the field.
+    #[test]
+    fn scip_enclosing_symbol_survives_wire_round_trip() {
+        let proto = scip::Index {
+            metadata: Some(scip::Metadata {
+                version: scip::ProtocolVersion::UnspecifiedProtocolVersion as i32,
+                tool_info: Some(scip::ToolInfo {
+                    name: "test".to_owned(),
+                    version: "0.0".to_owned(),
+                    arguments: vec![],
+                }),
+                project_root: String::new(),
+                text_document_encoding: scip::TextEncoding::Utf8 as i32,
+            }),
+            documents: vec![scip::Document {
+                language: "rust".to_owned(),
+                relative_path: "src/mod.rs".to_owned(),
+                occurrences: vec![],
+                symbols: vec![scip::SymbolInformation {
+                    symbol: "rust-analyzer cargo mycrate 1.0 Mod/bar().".to_owned(),
+                    display_name: "bar".to_owned(),
+                    documentation: vec!["pub fn bar()".to_owned()],
+                    relationships: vec![],
+                    kind: scip::Kind::KMethod as i32,
+                    enclosing_symbol:
+                        "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#".to_owned(),
+                }],
+            }],
+            external_symbols: vec![],
+        };
+
+        let mut buf = vec![];
+        prost::Message::encode(&proto, &mut buf).expect("prost encode");
+        let decoded = <scip::Index as prost::Message>::decode(&buf[..]).expect("prost decode");
+
+        let doc = &decoded.documents[0];
+        let sym = &doc.symbols[0];
+        assert_eq!(
+            sym.enclosing_symbol,
+            "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#",
+            "field 8 enclosing_symbol lost across prost encode/decode"
+        );
+
+        let out = convert_symbol_info(sym, 90, scip_language_to_lip(&doc.language));
+        assert_eq!(
+            out.container_name.as_deref(),
+            Some("MyStruct"),
+            "decoded enclosing_symbol did not populate container_name"
+        );
+        assert_eq!(out.extraction_tier, ExtractionTier::Tier3Scip);
+        assert_eq!(out.modifiers_source, Some(ModifiersSource::PrefixParse));
+    }
+
+    fn occ_with_roles(roles: i32) -> scip::Occurrence {
+        scip::Occurrence {
+            range: vec![1, 0, 1, 5],
+            symbol: "rust-analyzer cargo c 1.0 m/x.".to_owned(),
+            symbol_roles: roles,
+            override_documentation: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scip_read_access_maps_to_ref_kind_read() {
+        let o = convert_occurrence(&occ_with_roles(scip::SymbolRole::ReadAccess as i32))
+            .expect("occurrence converts");
+        assert_eq!(o.role, Role::Reference);
+        assert_eq!(o.kind, ReferenceKind::Read);
+        assert!(!o.is_test);
+    }
+
+    #[test]
+    fn scip_write_access_maps_to_ref_kind_write() {
+        let o = convert_occurrence(&occ_with_roles(scip::SymbolRole::WriteAccess as i32))
+            .expect("occurrence converts");
+        assert_eq!(o.kind, ReferenceKind::Write);
+    }
+
+    #[test]
+    fn scip_write_wins_over_read_when_both_set() {
+        let bits =
+            scip::SymbolRole::WriteAccess as i32 | scip::SymbolRole::ReadAccess as i32;
+        let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
+        assert_eq!(o.kind, ReferenceKind::Write);
+    }
+
+    #[test]
+    fn scip_test_bit_sets_is_test() {
+        let bits =
+            scip::SymbolRole::Test as i32 | scip::SymbolRole::ReadAccess as i32;
+        let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
+        assert!(o.is_test);
+        assert_eq!(o.kind, ReferenceKind::Read);
+    }
+
+    #[test]
+    fn scip_definition_keeps_kind_unknown() {
+        // SCIP does not set read/write on definitions; kind stays Unknown.
+        let bits =
+            scip::SymbolRole::Definition as i32 | scip::SymbolRole::WriteAccess as i32;
+        let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
+        assert_eq!(o.role, Role::Definition);
+        assert_eq!(o.kind, ReferenceKind::Unknown);
+    }
+
+    #[test]
+    fn scip_unspecified_role_leaves_kind_unknown() {
+        let o = convert_occurrence(&occ_with_roles(0)).expect("occurrence converts");
+        assert_eq!(o.role, Role::Reference);
+        assert_eq!(o.kind, ReferenceKind::Unknown);
+        assert!(!o.is_test);
     }
 }

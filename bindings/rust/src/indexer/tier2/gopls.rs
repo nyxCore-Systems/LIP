@@ -25,8 +25,10 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
+use crate::indexer::language::Language;
 use crate::schema::{OwnedSymbolInfo, SymbolKind};
 
+use super::enrich::enrich_v23;
 use super::lsp_client::LspClient;
 use super::rust_analyzer::VerificationResult;
 
@@ -160,7 +162,7 @@ impl GoplsBackend {
         };
 
         let mut out = vec![];
-        collect_symbols(&items, &mut out);
+        collect_symbols(&items, None, &mut out);
         Ok(out)
     }
 
@@ -229,12 +231,12 @@ impl GoplsBackend {
                 .map(|c| c.is_uppercase())
                 .unwrap_or(false);
 
-            symbols.push(OwnedSymbolInfo {
+            let mut info = OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
                 kind: lsp_kind_to_lip(sym.kind),
                 documentation: None,
-                signature: sig,
+                signature: sig.clone(),
                 confidence_score: 90,
                 relationships: vec![],
                 runtime_p99_ms: None,
@@ -242,7 +244,10 @@ impl GoplsBackend {
                 taint_labels: vec![],
                 blast_radius: 0,
                 is_exported,
-            });
+                ..Default::default()
+            };
+            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Go);
+            symbols.push(info);
         }
 
         Ok(VerificationResult {
@@ -259,9 +264,10 @@ struct RawSymbol {
     kind: u64,
     line: u32,
     col: u32,
+    container: Option<String>,
 }
 
-fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
+fn collect_symbols(items: &[Value], parent: Option<&str>, out: &mut Vec<RawSymbol>) {
     for item in items {
         let name = item
             .get("name")
@@ -287,15 +293,23 @@ fn collect_symbols(items: &[Value], out: &mut Vec<RawSymbol>) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
+        let container = item
+            .get("containerName")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| parent.map(str::to_owned));
+
         out.push(RawSymbol {
-            name,
+            name: name.clone(),
             kind,
             line,
             col,
+            container,
         });
 
         if let Some(Value::Array(children)) = item.get("children") {
-            collect_symbols(children, out);
+            collect_symbols(children, Some(&name), out);
         }
     }
 }

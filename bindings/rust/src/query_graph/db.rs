@@ -144,6 +144,11 @@ pub struct LipDatabase {
     /// CPG reverse call graph: callee_uri → [caller_uris].
     /// Populated eagerly in `upsert_file`; used by `blast_radius_for`.
     callee_to_callers: HashMap<String, Vec<String>>,
+    /// CPG forward call graph: caller_uri → [callee_uris] (v2.3 Feature #4).
+    /// Symmetric mirror of `callee_to_callers`; populated from the same edges
+    /// during upsert, cleared during `remove_file_call_edges`. Used by
+    /// `QueryOutgoingCalls` to answer "what does this symbol call?".
+    caller_to_callees: HashMap<String, Vec<String>>,
     /// Per-file call edge index for cleanup on re-upsert or remove.
     file_call_edges: HashMap<String, Vec<(String, String)>>,
     /// Global name index: display_name → [definition symbol_uris].
@@ -197,6 +202,7 @@ impl LipDatabase {
             workspace_root: None,
             annotations: HashMap::new(),
             callee_to_callers: HashMap::new(),
+            caller_to_callees: HashMap::new(),
             file_call_edges: HashMap::new(),
             name_to_symbols: HashMap::new(),
             callee_name_to_callers: HashMap::new(),
@@ -447,6 +453,10 @@ impl LipDatabase {
                     .entry(edge.to_uri.clone())
                     .or_default()
                     .push(edge.from_uri.clone());
+                self.caller_to_callees
+                    .entry(edge.from_uri.clone())
+                    .or_default()
+                    .push(edge.to_uri.clone());
                 // Name-based index: enables cross-file resolution in blast_radius_for.
                 let callee_name = extract_name(&edge.to_uri).to_owned();
                 if !callee_name.is_empty() {
@@ -591,6 +601,10 @@ impl LipDatabase {
                 .entry(edge.to_uri.clone())
                 .or_default()
                 .push(edge.from_uri.clone());
+            self.caller_to_callees
+                .entry(edge.from_uri.clone())
+                .or_default()
+                .push(edge.to_uri.clone());
             let callee_name = extract_name(&edge.to_uri).to_owned();
             if !callee_name.is_empty() {
                 self.callee_name_to_callers
@@ -645,6 +659,12 @@ impl LipDatabase {
             for (from, to) in pairs {
                 if let Some(callers) = self.callee_to_callers.get_mut(&to) {
                     callers.retain(|c| *c != from);
+                }
+                if let Some(callees) = self.caller_to_callees.get_mut(&from) {
+                    callees.retain(|c| *c != to);
+                    if callees.is_empty() {
+                        self.caller_to_callees.remove(&from);
+                    }
                 }
                 let callee_name = extract_name(&to);
                 if let Some(callers) = self.callee_name_to_callers.get_mut(callee_name) {
@@ -1290,6 +1310,134 @@ impl LipDatabase {
             }
         }
         (results, not_indexed_uris)
+    }
+
+    /// Symbol-scoped blast radius with optional semantic enrichment (v2.3).
+    ///
+    /// Returns `None` when the symbol has no known defining file (either the
+    /// URI doesn't resolve or the file isn't indexed). The semantic-enrichment
+    /// path mirrors [`blast_radius_batch`]: per-symbol embeddings preferred,
+    /// file-level fallback. When `min_score` is `None`, enrichment is skipped.
+    pub fn blast_radius_for_symbol(
+        &mut self,
+        symbol_uri: &str,
+        min_score: Option<f32>,
+    ) -> Option<EnrichedBlastRadius> {
+        let file_uri = self.def_index.get(symbol_uri).map(|(f, _)| f.clone())?;
+        if !self.file_inputs.contains_key(file_uri.as_str()) {
+            return None;
+        }
+        let threshold = min_score.unwrap_or(0.6);
+        let static_result = self.blast_radius_for(symbol_uri);
+
+        let mut semantic_items = Vec::new();
+        if min_score.is_some() {
+            let static_files: HashSet<String> =
+                static_result.affected_files.iter().cloned().collect();
+
+            if let Some(sym_embedding) = self.symbol_embeddings.get(symbol_uri).cloned() {
+                let neighbours =
+                    self.nearest_symbol_by_vector(&sym_embedding, 20, Some(symbol_uri), None);
+                for n in neighbours {
+                    if n.score < threshold {
+                        continue;
+                    }
+                    let hit_file = self
+                        .def_index
+                        .get(&n.uri)
+                        .map(|(f, _)| f.clone())
+                        .unwrap_or_else(|| n.uri.clone());
+                    let source = if static_files.contains(&hit_file) {
+                        ImpactSource::Both
+                    } else {
+                        ImpactSource::Semantic
+                    };
+                    semantic_items.push(SemanticImpactItem {
+                        file_uri: hit_file,
+                        symbol_uri: n.uri,
+                        similarity: n.score,
+                        source,
+                    });
+                }
+            } else if let Some(file_embedding) = self.file_embeddings.get(&file_uri).cloned() {
+                let neighbours = self.nearest_by_vector(
+                    &file_embedding,
+                    20,
+                    Some(&file_uri),
+                    None,
+                    Some(threshold),
+                );
+                for neighbour in neighbours {
+                    let source = if static_files.contains(&neighbour.uri) {
+                        ImpactSource::Both
+                    } else {
+                        ImpactSource::Semantic
+                    };
+                    semantic_items.push(SemanticImpactItem {
+                        file_uri: neighbour.uri,
+                        symbol_uri: String::new(),
+                        similarity: neighbour.score,
+                        source,
+                    });
+                }
+            }
+        }
+
+        Some(EnrichedBlastRadius {
+            file_uri,
+            static_result,
+            semantic_items,
+        })
+    }
+
+    /// Forward-call BFS starting at `symbol_uri` (v2.3 Feature #4).
+    ///
+    /// Walks `caller_to_callees` up to `depth` hops. Returns a flat
+    /// `(caller, callee)` edge list and a `truncated` flag that is `true`
+    /// when the node cap was hit.
+    pub fn outgoing_calls(
+        &self,
+        symbol_uri: &str,
+        depth: u32,
+    ) -> (Vec<(String, String)>, bool) {
+        const NODE_LIMIT: usize = 200;
+        let depth = depth.clamp(1, 8);
+
+        let mut edges: Vec<(String, String)> = Vec::new();
+        let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(symbol_uri.to_owned());
+
+        let mut frontier: Vec<String> = vec![symbol_uri.to_owned()];
+        let mut truncated = false;
+
+        for _ in 0..depth {
+            let mut next: Vec<String> = Vec::new();
+            for caller in &frontier {
+                let Some(callees) = self.caller_to_callees.get(caller) else {
+                    continue;
+                };
+                for callee in callees {
+                    let edge = (caller.clone(), callee.clone());
+                    if seen_edges.insert(edge.clone()) {
+                        if edges.len() >= NODE_LIMIT {
+                            truncated = true;
+                            return (edges, truncated);
+                        }
+                        edges.push(edge);
+                    }
+                    if visited.insert(callee.clone()) {
+                        next.push(callee.clone());
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+
+        (edges, truncated)
     }
 
     /// Find the symbol URI whose occurrence range contains `(line, col)` in `uri`.
@@ -2163,30 +2311,131 @@ impl LipDatabase {
 
     /// Symbol search across all tracked files and mounted slices.
     pub fn workspace_symbols(&mut self, query: &str, limit: usize) -> Vec<OwnedSymbolInfo> {
+        let (symbols, _) = self.workspace_symbols_ranked(query, limit, None, None, None);
+        symbols
+    }
+
+    /// Filtered + ranked workspace symbol search (v2.3 Feature #5).
+    ///
+    /// - `kind_filter`: if `Some`, only symbols whose kind is in the slice pass.
+    /// - `scope`: if `Some`, only symbols whose def-file URI starts with the prefix.
+    /// - `modifier_filter`: if `Some`, symbols must carry at least one modifier
+    ///   from the slice.
+    /// - Ranking tiers: `Exact` (case-sensitive equality) = 1.0;
+    ///   case-insensitive prefix = 0.8; case-insensitive substring = 0.5.
+    ///   An empty query is treated as "match all" with score 0.2 (no ranking
+    ///   intent) and produces an empty `ranked` list.
+    ///
+    /// The two returned vecs are parallel: `ranked[i]` describes `symbols[i]`.
+    /// When `query` is empty, `ranked` is empty (pre-v2.3 callers' behavior).
+    pub fn workspace_symbols_ranked(
+        &mut self,
+        query: &str,
+        limit: usize,
+        kind_filter: Option<&[crate::schema::SymbolKind]>,
+        scope: Option<&str>,
+        modifier_filter: Option<&[String]>,
+    ) -> (Vec<OwnedSymbolInfo>, Vec<crate::query_graph::types::RankedSymbol>) {
+        use crate::query_graph::types::{MatchType, RankedSymbol};
+
+        let q_lower = query.to_lowercase();
+        let has_query = !query.is_empty();
+
+        let passes_filters = |sym: &OwnedSymbolInfo, def_file: Option<&str>| -> bool {
+            if let Some(kinds) = kind_filter {
+                if !kinds.contains(&sym.kind) {
+                    return false;
+                }
+            }
+            if let Some(prefix) = scope {
+                let file = def_file.unwrap_or("");
+                if !file.starts_with(prefix) {
+                    return false;
+                }
+            }
+            if let Some(mods) = modifier_filter {
+                if !mods.iter().any(|m| sym.modifiers.iter().any(|sm| sm == m)) {
+                    return false;
+                }
+            }
+            true
+        };
+
+        let classify = |name: &str| -> Option<(f32, MatchType)> {
+            if !has_query {
+                return Some((0.2, MatchType::Fuzzy));
+            }
+            if name == query {
+                Some((1.0, MatchType::Exact))
+            } else if name.to_lowercase().starts_with(&q_lower) {
+                Some((0.8, MatchType::Prefix))
+            } else if name.to_lowercase().contains(&q_lower) {
+                Some((0.5, MatchType::Fuzzy))
+            } else {
+                None
+            }
+        };
+
+        #[derive(Clone)]
+        struct Hit {
+            sym: OwnedSymbolInfo,
+            score: f32,
+            match_type: MatchType,
+        }
+
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
-        let q = query.to_lowercase();
-        let mut matches = vec![];
-        'outer: for uri in &uris {
+        let mut hits: Vec<Hit> = Vec::new();
+        for uri in &uris {
             for sym in self.file_symbols(uri).iter() {
-                if sym.display_name.to_lowercase().contains(&q) {
-                    matches.push(sym.clone());
-                    if matches.len() >= limit {
-                        break 'outer;
-                    }
+                if !passes_filters(sym, Some(uri.as_str())) {
+                    continue;
+                }
+                if let Some((score, match_type)) = classify(&sym.display_name) {
+                    hits.push(Hit {
+                        sym: sym.clone(),
+                        score,
+                        match_type,
+                    });
                 }
             }
         }
-        if matches.len() < limit {
-            for sym in self.mounted_symbols.values() {
-                if sym.display_name.to_lowercase().contains(&q) {
-                    matches.push(sym.clone());
-                    if matches.len() >= limit {
-                        break;
-                    }
-                }
+        for sym in self.mounted_symbols.values() {
+            let def_file = self.def_index.get(&sym.uri).map(|(f, _)| f.as_str());
+            if !passes_filters(sym, def_file) {
+                continue;
+            }
+            if let Some((score, match_type)) = classify(&sym.display_name) {
+                hits.push(Hit {
+                    sym: sym.clone(),
+                    score,
+                    match_type,
+                });
             }
         }
-        matches
+
+        // Sort by score desc, then by display_name asc as a stable tiebreaker.
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.sym.display_name.cmp(&b.sym.display_name))
+        });
+        hits.truncate(limit);
+
+        let emit_ranked = has_query;
+        let mut symbols = Vec::with_capacity(hits.len());
+        let mut ranked = Vec::with_capacity(if emit_ranked { hits.len() } else { 0 });
+        for h in hits {
+            if emit_ranked {
+                ranked.push(RankedSymbol {
+                    symbol_uri: h.sym.uri.clone(),
+                    score: h.score,
+                    match_type: h.match_type,
+                });
+            }
+            symbols.push(h.sym);
+        }
+        (symbols, ranked)
     }
 
     /// Trigram fuzzy search across all tracked symbols and mounted slices.
@@ -2278,7 +2527,7 @@ impl Default for LipDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::SymbolKind;
+    use crate::schema::{ReferenceKind, SymbolKind};
 
     fn make_rust_file(content: &str) -> (String, String, String) {
         (
@@ -3103,6 +3352,7 @@ impl Greeter {
                     taint_labels: vec![],
                     blast_radius: 0,
                     is_exported: true,
+                    ..Default::default()
                 })
                 .collect(),
             slice_url: String::new(),
@@ -3399,6 +3649,7 @@ impl Greeter {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: true,
+            ..Default::default()
         };
         db.upsert_file_precomputed(
             uri.clone(),
@@ -3964,6 +4215,7 @@ impl Greeter {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         }];
         let occurrences = vec![OwnedOccurrence {
             symbol_uri: sym_uri.clone(),
@@ -3976,6 +4228,8 @@ impl Greeter {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         }];
 
         db.upsert_file_precomputed(
@@ -4021,6 +4275,7 @@ impl Greeter {
             taint_labels: vec![],
             blast_radius: 0,
             is_exported: false,
+            ..Default::default()
         };
         let occ = OwnedOccurrence {
             symbol_uri: "lip://local/lib.rs#Foo".into(),
@@ -4033,6 +4288,8 @@ impl Greeter {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
 
         db.upsert_file_precomputed(
@@ -4078,6 +4335,8 @@ impl Greeter {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
         db.upsert_file_precomputed(
             uri_a.clone(),
@@ -4101,6 +4360,8 @@ impl Greeter {
             confidence_score: 80,
             role: Role::Reference,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
         db.upsert_file_precomputed(
             uri_b.clone(),
@@ -4134,6 +4395,8 @@ impl Greeter {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
         db.upsert_file_precomputed(
             uri_c.clone(),
@@ -4171,6 +4434,8 @@ impl Greeter {
             confidence_score: 90,
             role: Role::Definition,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
         db.upsert_file_precomputed(
             uri_a.clone(),
@@ -4194,6 +4459,8 @@ impl Greeter {
             confidence_score: 80,
             role: Role::Reference,
             override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
         };
         db.upsert_file_precomputed(
             uri_b.clone(),
