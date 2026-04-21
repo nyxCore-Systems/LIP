@@ -1,6 +1,6 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v2.2"
+subtitle: "Design Document & Specification v2.3"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
@@ -564,6 +564,34 @@ to SCIP's escaping rules:
 lip://npm/lodash@4.17.21/lodash#`_.chunk`
 ```
 
+### 5.4 Local URIs and project roots (v2.3.1)
+
+For the `local` scope, the daemon stores each file under a single *canonical* URI.
+Two forms are accepted on the wire; both map to the same record:
+
+```
+absolute   lip://local//Users/lisa/repo/src/foo.rs
+relative   lip://local/src/foo.rs
+```
+
+The absolute form carries a doubled slash after `lip://local/` because the path
+component itself begins with `/`. This is the form the tier-1 indexer emits and
+the form the v2.3.1 SCIP importer produces (see §10.2). The relative form is
+resolved against whichever *project roots* the client has registered:
+
+```
+Client → Daemon:  RegisterProjectRoot { root: "/Users/lisa/repo" }
+Daemon → Client:  DeltaAck { accepted: true }
+```
+
+`RegisterProjectRoot` is idempotent — re-registering the same root is a no-op.
+Clients may register multiple roots; the daemon resolves relative URIs against
+the longest matching root first. The capability is advertised as
+`register_project_root` in `HandshakeResult.supported_messages`; pre-v2.3.1
+daemons reply with `UnknownMessage` and clients must fall back to sending
+absolute URIs. CKB relies on this contract to send `lip://local/<rel>` and have
+the daemon re-join them with the absolute records written by `lip import`.
+
 ---
 
 ## 6. Protocol Lifecycle
@@ -773,7 +801,16 @@ lip.query.blast_radius_batch(changed_file_uris, min_score?) → {
     risk_level:           "low" | "medium" | "high",
     truncated:            bool,
     semantic_items:       [SemanticItem],   // only when min_score is set
+    edges_source:         EdgesSource,      // v2.3.1, see below
   }]
+}
+
+enum EdgesSource {
+  "tier1",                  // edges came from the tree-sitter extractor
+  "scip_with_tier1_edges",  // SCIP import that had no edges; daemon back-filled
+                            // by running tier-1 over the file on disk
+  "scip_only",              // SCIP import that already carried call edges
+  "empty",                  // no edges in either source
 }
 ```
 
@@ -800,6 +837,51 @@ empty) will carry the matched symbol, with no wire format change required.
 **Consumer contract (CKB):** `UniqueCallerCount` (which drives review thresholds)
 stays structural-only. Semantic callers are additive — they inform the human reviewer
 ("8 callers (+3 semantically coupled)") but do not inflate risk scores.
+
+#### 8.1.2 Symbol-level blast radius
+
+```
+lip.query.blast_radius_symbol(symbol_uri, min_score?) → {
+  result: null | EnrichedBlastRadius
+}
+```
+
+Single-symbol variant of `blast_radius_batch`. Returns the same `EnrichedBlastRadius`
+shape — including the v2.3.1 `edges_source` field — or `null` when the symbol is
+unknown or not indexed, so callers can distinguish "zero impact" from "no data."
+Used by CKB's per-symbol change-impact summaries and by refactor planners that ask
+about one candidate at a time.
+
+**`edges_source` semantics (v2.3.1).** SCIP indexers disagree on whether call
+edges belong in the index: `scip-go` emits them inconsistently, `scip-clang`
+omits them entirely. The daemon therefore advertises the provenance of each
+result's structural edges so consumers can fall back when needed:
+
+- `tier1` — structural edges came from the tree-sitter extractor over the
+  stored source text. Authoritative for syntactic calls.
+- `scip_only` — the importer provided call edges and the daemon used them
+  verbatim. Trust but verify: scip-go is known to drop edges.
+- `scip_with_tier1_edges` — the importer's `edges` were empty, so the daemon
+  read the file from disk and ran tier-1 to back-fill. Structural edges are
+  present even though the upstream producer omitted them.
+- `empty` — neither source produced call edges. CKB should fall back to its
+  own SCIP backend for that file.
+
+#### 8.1.3 Outgoing calls (forward call graph)
+
+```
+lip.query.outgoing_calls(symbol_uri, depth) → {
+  edges:     [{ from_uri, to_uri }],
+  truncated: bool,
+}
+```
+
+Inverse of the blast-radius direction. BFS over the forward call graph from
+`symbol_uri` up to `depth` hops (clamped to `[1, 8]`). Implemented by a
+`caller_to_callees` index that mirrors the reverse edge map used for blast radius.
+Traversal is capped at 200 nodes; the `truncated` flag reports when the cap fires.
+Useful for "what does this function reach?" queries — tracing a public API's
+downstream behaviour, auditing service calls, generating call-graph visualisations.
 
 ### 8.2 Taint tracking
 
@@ -879,6 +961,70 @@ Taint tracking (§8.2) is implemented as a forward reachability query over
 `DataFlows` edges filtered by `taint_labels`. The same query engine drives both
 blast-radius analysis (§8.1) and taint analysis — they differ only in which edge
 kinds are traversed.
+
+### 8.6 Ranked workspace symbols
+
+```
+lip.query.workspace_symbols(
+  query:            string,
+  limit?:           int,
+  kind_filter?:     [SymbolKind],
+  scope?:           string,           // def-file URI prefix
+  modifier_filter?: [string],
+) → {
+  symbols: [SymbolInfo],                             // length n
+  ranked:  [{ symbol_uri, score, match_type }],      // length n, parallel (v2.3)
+}
+```
+
+`kind_filter`, `scope`, and `modifier_filter` are optional server-side narrowings
+that replace the client-side post-filter patterns CKB was running. `scope` is a
+def-file URI prefix (e.g. `lip://local/cli`); `modifier_filter` matches against the
+symbol's `modifiers` vector (e.g. `["async"]`, `["pub", "async"]`).
+
+`ranked[i]` describes `symbols[i]`. Scoring is tiered, not BM25:
+
+- **`exact`** (score `1.0`) — case-sensitive equality with `display_name`.
+- **`prefix`** (score `0.8`) — case-insensitive prefix of `display_name`.
+- **`fuzzy`** (score `0.5`) — case-insensitive substring of `display_name`.
+
+`match_type` is a discriminator for display only; callers should sort by `score`.
+Symbols are returned sorted by descending score, then ascending `display_name` for
+stability. When `query` is empty, `ranked` is empty (matches pre-v2.3 semantics).
+
+### 8.7 Structural metadata on symbols
+
+Every `SymbolInfo` carries the fields that previously required a parallel SCIP
+parse:
+
+- **`signature_normalized`** — parameter-name-stripped, whitespace-collapsed form
+  of the signature, stable across rename refactors.
+- **`modifiers: [string]`** — language-specific modifier keywords (`pub`, `async`,
+  `static`, `override`, `final`, …).
+- **`visibility` + `visibility_confidence`** — `Public` / `Internal` / `Private` /
+  `Protected`, plus 0–100 confidence. Conventions like Python's underscore prefix
+  yield lower confidence than an explicit `pub` keyword.
+- **`container_name`** — the enclosing class / struct / trait / namespace, or
+  `None` for top-level symbols.
+- **`extraction_tier`** — `Tier1` (tree-sitter), `Tier2Lsp` (language server),
+  `Tier3Scip` (SCIP import), or `Tier15Inferred` (Datalog inference, §3.3).
+- **`modifiers_source`** — `None` when produced by a tree-sitter extractor that
+  emits modifier tokens directly; `PrefixParse` when derived by the SCIP importer
+  from `signature_documentation[0]`. Clients that need compiler-grade modifier
+  provenance should branch on this.
+
+### 8.8 Reference classification
+
+Every `Occurrence` carries a `kind: ReferenceKind` discriminator:
+
+`Unknown` · `Call` · `Read` · `Write` · `Type` · `Implements` · `Extends`
+
+Plus an `is_test: bool` flag stamped by a file-path heuristic
+(`/tests/`, `_test.rs`, `_test.py`, `.spec.ts`, …). Tier-1 extractors classify
+via tree-sitter parent-node + field-name lookup; SCIP import maps
+`SymbolRole::ReadAccess | WriteAccess | Test` bits to the corresponding fields
+(Call has no SCIP equivalent). Both fields are `#[serde(default)]`; pre-v2.3
+occurrences decode with `Unknown` / `false`.
 
 ---
 
@@ -1207,6 +1353,15 @@ lip-protocol/
 - [x] **`ErrorCode`** enum — stable machine-readable error categories: `unknown_message_type`, `unknown_model`, `embedding_not_configured`, `no_embedding`, `cursor_out_of_range`, `index_locked`, `invalid_request`, `internal` (default).
 - [x] **`ClientMessage::variant_tag` + `supported_messages_covers_all_variants` test** — compile-time exhaustive match plus paired test that fails when a new variant is added without being advertised in `supported_messages()`.
 
+### v2.3 — CKB structural-parity bundle ✓
+
+- [x] **Rich symbol metadata** — `OwnedSymbolInfo` gains `signature_normalized`, `modifiers`, `visibility` + `visibility_confidence`, `container_name`, `extraction_tier`, and `modifiers_source`. Populated by all Tier-1 extractors (Rust / TypeScript / Python / Swift / Kotlin) and by the SCIP importer (via upstream-compatible `enclosing_symbol = 8` + prefix-parsed modifiers). See §8.7.
+- [x] **Reference classification** — `OwnedOccurrence` gains `kind: ReferenceKind` (`Unknown` / `Call` / `Read` / `Write` / `Type` / `Implements` / `Extends`) + `is_test: bool`. Tier-1 classifier uses tree-sitter parent/field lookup; SCIP import/export round-trips via `SymbolRole::ReadAccess | WriteAccess | Test`. See §8.8.
+- [x] **`QueryBlastRadiusSymbol { symbol_uri, min_score? } → BlastRadiusSymbolResult { result: Option<EnrichedBlastRadius> }`** — single-symbol wrapper around `blast_radius_for_symbol`. Returns `None` for unknown or unindexed symbols so callers can distinguish "zero impact" from "no data." Spec §8.1.2.
+- [x] **`QueryOutgoingCalls { symbol_uri, depth } → OutgoingCallsResult { edges, truncated }`** — forward call-graph BFS via a new `caller_to_callees` index. Depth clamped `[1, 8]`; NODE_LIMIT = 200. Spec §8.1.3.
+- [x] **Ranked & filtered workspace symbols** — `QueryWorkspaceSymbols` adds `kind_filter`, `scope`, `modifier_filter`; `WorkspaceSymbolsResult` adds `ranked: Vec<RankedSymbol>` (parallel to `symbols`) with tiered scoring (`Exact = 1.0` / `Prefix = 0.8` / `Fuzzy = 0.5`). `ranked` is `skip_if_empty`; empty query preserves pre-v2.3 semantics. Spec §8.6.
+- [x] **All additive.** `protocol_version` stays at `2`; every new field is `#[serde(default, skip_serializing_if = …)]`; every new message is advertised via `HandshakeResult.supported_messages`. Drift-guard test covers both new variants.
+
 ### v2.2 — Function-level blast radius + intelligence layer ✓
 
 - [x] **`NearestItem.embedding_model`** — every nearest-neighbour hit now carries the model name that produced its stored embedding. Optional / `skip_serializing_if = None`; older clients see no change. Populated by `nearest_by_vector`, `nearest_symbol_by_vector`, and `outliers`.
@@ -1329,5 +1484,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v2.2.0 · April 2026 · MIT License*
+*LIP Specification v2.3.0 · April 2026 · MIT License*
 *Lisa Welsch*

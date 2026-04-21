@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::query_graph::types::{
-    ApiSurface, BlastRadiusResult, EnrichedBlastRadius, ImpactItem, ImpactSource, RiskLevel,
-    SemanticImpactItem, SimilarSymbol,
+    ApiSurface, BlastRadiusResult, EdgesSource, EnrichedBlastRadius, ImpactItem, ImpactSource,
+    RiskLevel, SemanticImpactItem, SimilarSymbol,
 };
 use crate::schema::EdgeKind;
 use crate::schema::{
@@ -85,6 +85,37 @@ fn trigram_similarity(a: &str, b: &str) -> f32 {
     let intersection = a_tris.intersection(&b_tris).count();
     let union = a_tris.union(&b_tris).count();
     intersection as f32 / union as f32
+}
+
+/// Normalise a project-root string to an absolute filesystem path (v2.3.1).
+///
+/// Accepts `file:///abs`, `lip://local/abs`, and bare `/abs` forms. Trailing
+/// slashes are stripped. Returns `""` for unrecognised inputs or empty roots.
+fn normalise_root(raw: &str) -> String {
+    let stripped = if let Some(rest) = raw.strip_prefix("file://") {
+        // file:///abs — the first '/' is part of the path
+        let trimmed = rest.trim_start_matches('/');
+        format!("/{trimmed}")
+    } else if let Some(rest) = raw.strip_prefix("lip://local") {
+        // lip://local/abs → /abs; handle lip://local (no slash) as ""
+        let trimmed = rest.trim_start_matches('/');
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("/{trimmed}")
+        }
+    } else if raw.starts_with('/') {
+        raw.to_owned()
+    } else {
+        String::new()
+    };
+    let trimmed = stripped.trim_end_matches('/');
+    // Never leave the bare string "" ambiguous with root "/". Empty input → empty root.
+    if trimmed.is_empty() && !stripped.starts_with('/') {
+        String::new()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────
@@ -187,6 +218,17 @@ pub struct LipDatabase {
     /// `QueryIndexStatus` so clients can implement their own staleness
     /// policy; the daemon never reasons about freshness itself.
     tier3_sources: HashMap<String, crate::query_graph::types::Tier3Source>,
+    /// Absolute filesystem paths registered as project roots (v2.3.1).
+    /// Used by [`LipDatabase::canonicalize_uri`] to resolve relative
+    /// `lip://local/<rel>` URIs from clients against absolute keys
+    /// produced by SCIP import. Populated by `RegisterProjectRoot` and
+    /// implicitly by `RegisterTier3Source` when `project_root` is set.
+    /// Resolution prefers the longest prefix when multiple roots match.
+    registered_roots: HashSet<String>,
+    /// Per-file provenance of call edges (v2.3.1). Surfaced back to
+    /// clients through [`crate::query_graph::types::EnrichedBlastRadius::edges_source`]
+    /// so CKB can decide whether to fall back to its own SCIP backend.
+    file_edges_source: HashMap<String, EdgesSource>,
 }
 
 impl LipDatabase {
@@ -215,7 +257,94 @@ impl LipDatabase {
             symbol_embedding_models: HashMap::new(),
             file_indexed_at: HashMap::new(),
             tier3_sources: HashMap::new(),
+            registered_roots: HashSet::new(),
+            file_edges_source: HashMap::new(),
         }
+    }
+
+    // ── v2.3.1 project-root registration + URI canonicalisation ─────────
+
+    /// Register an absolute project root for URI canonicalisation.
+    ///
+    /// Accepts either a bare filesystem path (`/repo`), a `file:///` URI
+    /// (`file:///repo`), or a `lip://local/` URI (`lip://local/repo`).
+    /// Trailing slashes are trimmed. Duplicates are no-ops.
+    ///
+    /// Returns `true` when a new root was inserted, `false` when the root
+    /// was already registered (or the input normalised to an empty path).
+    pub fn register_project_root(&mut self, raw: &str) -> bool {
+        let path = normalise_root(raw);
+        if path.is_empty() {
+            return false;
+        }
+        self.registered_roots.insert(path)
+    }
+
+    /// All currently-registered project roots, sorted for deterministic
+    /// output. Primarily exposed for diagnostics and tests.
+    pub fn registered_roots(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.registered_roots.iter().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Canonicalise a URI for lookup inside the query graph (v2.3.1).
+    ///
+    /// Only `lip://local/<rel>` (a *relative* URI — no leading slash after
+    /// the scheme) is rewritten: the daemon prepends a registered project
+    /// root so `<rel>` lands on the absolute form that the tier-1 importer
+    /// and the v2.3.1 SCIP importer both emit (`lip://local//abs/path`).
+    /// All other URIs — including `file:///abs/path`, `lip://local//abs/...`,
+    /// `scip://external`, etc. — are returned unchanged.
+    ///
+    /// Fragments (`#symbol`) are preserved across the rewrite. Multiple
+    /// matching roots are tried longest-first; the longest root also wins
+    /// when no file-match exists so write paths still produce a stable key
+    /// before the file is first upserted.
+    ///
+    /// This method never mutates state — safe to call on the read path.
+    pub fn canonicalize_uri(&self, uri: &str) -> String {
+        let Some(body_and_frag) = uri.strip_prefix("lip://local/") else {
+            return uri.to_owned();
+        };
+        let (body, frag) = match body_and_frag.find('#') {
+            Some(i) => (&body_and_frag[..i], &body_and_frag[i..]),
+            None => (body_and_frag, ""),
+        };
+        if body.starts_with('/') {
+            // Already absolute — canonical.
+            return uri.to_owned();
+        }
+
+        // Relative path — try each registered root, longest first.
+        // Root starts with `/`, so the extra slash in the format string
+        // produces the double-slash convention used by tier-1 extractors
+        // (`lip://local//abs/path`).
+        let mut roots: Vec<&String> = self.registered_roots.iter().collect();
+        roots.sort_by(|a, b| b.len().cmp(&a.len()));
+        for root in &roots {
+            let candidate = format!("lip://local/{}/{}", root, body);
+            if self.file_inputs.contains_key(&candidate) {
+                return if frag.is_empty() {
+                    candidate
+                } else {
+                    format!("{}{}", candidate, frag)
+                };
+            }
+        }
+
+        // No file-match: fall back to the longest root anyway, so write
+        // paths still produce a stable canonical key even before the file
+        // is first upserted.
+        if let Some(longest) = roots.first() {
+            let candidate = format!("lip://local/{}/{}", longest, body);
+            return if frag.is_empty() {
+                candidate
+            } else {
+                format!("{}{}", candidate, frag)
+            };
+        }
+        uri.to_owned()
     }
 
     /// Record (or refresh) provenance for a Tier 3 ingestion batch.
@@ -245,10 +374,11 @@ impl LipDatabase {
     /// A change in hash means the public interface changed — safe as a
     /// downstream recompilation / re-verification trigger (Kotlin IC model).
     pub fn abi_hash(&mut self, uri: &str) -> Option<String> {
-        if !self.file_inputs.contains_key(uri) {
+        let uri = self.canonicalize_uri(uri);
+        if !self.file_inputs.contains_key(&uri) {
             return None;
         }
-        let syms = self.file_symbols(uri);
+        let syms = self.file_symbols(&uri);
         let mut surface: Vec<String> = syms
             .iter()
             .filter(|s| s.is_exported)
@@ -385,6 +515,7 @@ impl LipDatabase {
     /// Register or update a file. Bumps the global revision and invalidates
     /// cached derived data for `uri`.
     pub fn upsert_file(&mut self, uri: String, text: String, language: String) {
+        let uri = self.canonicalize_uri(&uri);
         self.revision += 1;
         let rev = self.revision;
         let content_hash = sha256_hex(text.as_bytes());
@@ -467,6 +598,12 @@ impl LipDatabase {
                 }
                 pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
             }
+            let src = if pairs.is_empty() {
+                EdgesSource::Empty
+            } else {
+                EdgesSource::Tier1
+            };
+            self.file_edges_source.insert(uri.clone(), src);
             self.file_call_edges.insert(uri.clone(), pairs);
         }
 
@@ -518,13 +655,14 @@ impl LipDatabase {
         occurrences: Vec<OwnedOccurrence>,
         edges: Vec<OwnedGraphEdge>,
     ) {
+        let uri = self.canonicalize_uri(&uri);
         self.revision += 1;
         let rev = self.revision;
         self.file_inputs.insert(
             uri.clone(),
             FileInput {
                 text: String::new(),
-                language,
+                language: language.clone(),
                 revision: rev,
                 precomputed: true,
                 content_hash,
@@ -614,6 +752,51 @@ impl LipDatabase {
             }
             pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
         }
+
+        // v2.3.1 Feature #5 — SCIP-imported files often have no call edges
+        // (scip-clang omits `SymbolRole::Call`; scip-go is inconsistent).
+        // When the disk source is reachable, re-run the Tier-1 tree-sitter
+        // edge extractor to populate the forward + reverse call graph so
+        // `QueryBlastRadiusSymbol` returns non-empty `direct_items`.
+        let edges_src = if !pairs.is_empty() {
+            EdgesSource::ScipOnly
+        } else if let Some(path) = crate::daemon::watcher::uri_to_path(&uri) {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let lang = Language::detect(&uri, &language);
+                    let tier1_edges = Tier1Indexer::new().edges_for_source(&uri, &text, lang);
+                    let mut filled = false;
+                    for edge in tier1_edges.iter().filter(|e| e.kind == EdgeKind::Calls) {
+                        self.callee_to_callers
+                            .entry(edge.to_uri.clone())
+                            .or_default()
+                            .push(edge.from_uri.clone());
+                        self.caller_to_callees
+                            .entry(edge.from_uri.clone())
+                            .or_default()
+                            .push(edge.to_uri.clone());
+                        let callee_name = extract_name(&edge.to_uri).to_owned();
+                        if !callee_name.is_empty() {
+                            self.callee_name_to_callers
+                                .entry(callee_name)
+                                .or_default()
+                                .push(edge.from_uri.clone());
+                        }
+                        pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
+                        filled = true;
+                    }
+                    if filled {
+                        EdgesSource::ScipWithTier1Edges
+                    } else {
+                        EdgesSource::Empty
+                    }
+                }
+                Err(_) => EdgesSource::Empty,
+            }
+        } else {
+            EdgesSource::Empty
+        };
+        self.file_edges_source.insert(uri.clone(), edges_src);
         self.file_call_edges.insert(uri.clone(), pairs);
 
         let now_ms = std::time::SystemTime::now()
@@ -625,6 +808,8 @@ impl LipDatabase {
     }
 
     pub fn remove_file(&mut self, uri: &str) {
+        let uri = self.canonicalize_uri(uri);
+        let uri = uri.as_str();
         self.revision += 1;
         self.file_inputs.remove(uri);
         self.sym_cache.remove(uri);
@@ -693,10 +878,11 @@ impl LipDatabase {
 
     /// Returns the source text stored for `uri`, or `None` if not indexed.
     pub fn file_source_text(&self, uri: &str) -> Option<String> {
-        let fi = self.file_inputs.get(uri)?;
+        let canon = self.canonicalize_uri(uri);
+        let fi = self.file_inputs.get(&canon)?;
         if fi.precomputed && fi.text.is_empty() {
-            if let Some(path) = uri.strip_prefix("file://") {
-                if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(path) = crate::daemon::watcher::uri_to_path(&canon) {
+                if let Ok(text) = std::fs::read_to_string(&path) {
                     return Some(text);
                 }
             }
@@ -724,6 +910,8 @@ impl LipDatabase {
         if upgrades.is_empty() {
             return;
         }
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let Some(cached) = self.sym_cache.get(uri) else {
             return;
         };
@@ -764,11 +952,13 @@ impl LipDatabase {
     // ── Raw accessors ─────────────────────────────────────────────────────
 
     pub fn file_text(&self, uri: &str) -> Option<&str> {
-        self.file_inputs.get(uri).map(|f| f.text.as_str())
+        let canon = self.canonicalize_uri(uri);
+        self.file_inputs.get(&canon).map(|f| f.text.as_str())
     }
 
     pub fn file_language(&self, uri: &str) -> Option<&str> {
-        self.file_inputs.get(uri).map(|f| f.language.as_str())
+        let canon = self.canonicalize_uri(uri);
+        self.file_inputs.get(&canon).map(|f| f.language.as_str())
     }
 
     pub fn tracked_uris(&self) -> Vec<String> {
@@ -776,11 +966,15 @@ impl LipDatabase {
     }
 
     pub fn is_precomputed(&self, uri: &str) -> bool {
-        self.file_inputs.get(uri).is_some_and(|f| f.precomputed)
+        let canon = self.canonicalize_uri(uri);
+        self.file_inputs.get(&canon).is_some_and(|f| f.precomputed)
     }
 
     pub fn file_content_hash(&self, uri: &str) -> Option<&str> {
-        self.file_inputs.get(uri).map(|f| f.content_hash.as_str())
+        let canon = self.canonicalize_uri(uri);
+        self.file_inputs
+            .get(&canon)
+            .map(|f| f.content_hash.as_str())
     }
 
     /// Read-only access to cached symbols (for journal compaction).
@@ -851,6 +1045,8 @@ impl LipDatabase {
 
     /// Tier 1 symbols for a file, lazily computed and cached.
     pub fn file_symbols(&mut self, uri: &str) -> Arc<Vec<OwnedSymbolInfo>> {
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
             None => return Arc::new(vec![]),
@@ -877,6 +1073,8 @@ impl LipDatabase {
 
     /// Tier 1 occurrences for a file, lazily computed and cached.
     pub fn file_occurrences(&mut self, uri: &str) -> Arc<Vec<OwnedOccurrence>> {
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
             None => return Arc::new(vec![]),
@@ -899,6 +1097,8 @@ impl LipDatabase {
     /// If `content_hash` is identical to the last-cached value, downstream
     /// callers can skip their own recomputation (see spec §3.1 "early cutoff").
     pub fn file_api_surface(&mut self, uri: &str) -> Arc<ApiSurface> {
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let file_rev = match self.file_inputs.get(uri) {
             Some(f) => f.revision,
             None => {
@@ -956,6 +1156,8 @@ impl LipDatabase {
 
     /// Files that directly reference any exported symbol from `uri`.
     pub fn reverse_deps(&mut self, uri: &str) -> Vec<String> {
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let uris: Vec<String> = self.file_inputs.keys().cloned().collect();
         let target = self.file_api_surface(uri);
         let target_uris: Vec<String> = target.symbols.iter().map(|s| s.uri.clone()).collect();
@@ -974,6 +1176,9 @@ impl LipDatabase {
         // BFS limits — keeps response time bounded on highly-connected symbols.
         const DEPTH_LIMIT: u32 = 4;
         const NODE_LIMIT: usize = 200;
+
+        let canon_symbol = self.canonicalize_uri(symbol_uri);
+        let symbol_uri = canon_symbol.as_str();
 
         let all_uris: Vec<String> = self.file_inputs.keys().cloned().collect();
         let def_uri = all_uris
@@ -1229,11 +1434,12 @@ impl LipDatabase {
         };
 
         for file_uri in changed_file_uris {
-            if !self.file_inputs.contains_key(file_uri.as_str()) {
+            let canon_file = self.canonicalize_uri(file_uri);
+            if !self.file_inputs.contains_key(canon_file.as_str()) {
                 not_indexed_uris.push(file_uri.clone());
                 continue;
             }
-            let syms = self.file_symbols(file_uri);
+            let syms = self.file_symbols(&canon_file);
             for sym in syms.iter() {
                 if !interesting(sym.kind) {
                     continue;
@@ -1277,12 +1483,13 @@ impl LipDatabase {
                                 source,
                             });
                         }
-                    } else if let Some(file_embedding) = self.file_embeddings.get(file_uri).cloned()
+                    } else if let Some(file_embedding) =
+                        self.file_embeddings.get(canon_file.as_str()).cloned()
                     {
                         let neighbours = self.nearest_by_vector(
                             &file_embedding,
                             20,
-                            Some(file_uri),
+                            Some(&canon_file),
                             None,
                             Some(threshold),
                         );
@@ -1302,10 +1509,12 @@ impl LipDatabase {
                     }
                 }
 
+                let edges_source = self.file_edges_source.get(&canon_file).copied();
                 results.push(EnrichedBlastRadius {
-                    file_uri: file_uri.clone(),
+                    file_uri: canon_file.clone(),
                     static_result,
                     semantic_items,
+                    edges_source,
                 });
             }
         }
@@ -1323,6 +1532,8 @@ impl LipDatabase {
         symbol_uri: &str,
         min_score: Option<f32>,
     ) -> Option<EnrichedBlastRadius> {
+        let canon_symbol = self.canonicalize_uri(symbol_uri);
+        let symbol_uri = canon_symbol.as_str();
         let file_uri = self.def_index.get(symbol_uri).map(|(f, _)| f.clone())?;
         if !self.file_inputs.contains_key(file_uri.as_str()) {
             return None;
@@ -1383,10 +1594,12 @@ impl LipDatabase {
             }
         }
 
+        let edges_source = self.file_edges_source.get(&file_uri).copied();
         Some(EnrichedBlastRadius {
             file_uri,
             static_result,
             semantic_items,
+            edges_source,
         })
     }
 
@@ -1402,6 +1615,9 @@ impl LipDatabase {
     ) -> (Vec<(String, String)>, bool) {
         const NODE_LIMIT: usize = 200;
         let depth = depth.clamp(1, 8);
+
+        let canon = self.canonicalize_uri(symbol_uri);
+        let symbol_uri = canon.as_str();
 
         let mut edges: Vec<(String, String)> = Vec::new();
         let mut seen_edges: HashSet<(String, String)> = HashSet::new();
@@ -1444,7 +1660,8 @@ impl LipDatabase {
     ///
     /// Returns `None` if no occurrence covers the given position.
     pub fn symbol_at_position(&mut self, uri: &str, line: i32, col: i32) -> Option<String> {
-        let occs = self.file_occurrences(uri);
+        let canon = self.canonicalize_uri(uri);
+        let occs = self.file_occurrences(&canon);
         occs.iter()
             .find(|occ| range_contains(&occ.range, line, col))
             .map(|occ| occ.symbol_uri.clone())
@@ -1454,7 +1671,8 @@ impl LipDatabase {
     ///
     /// O(1) via the definition reverse index maintained in `upsert_file`.
     pub fn symbol_definition_location(&self, symbol_uri: &str) -> Option<(String, OwnedRange)> {
-        self.def_index.get(symbol_uri).cloned()
+        let canon = self.canonicalize_uri(symbol_uri);
+        self.def_index.get(canon.as_str()).cloned()
     }
 
     /// Files that reference any of the given display-name strings (Kotlin IC model).
@@ -1494,32 +1712,38 @@ impl LipDatabase {
 
     /// Store a pre-computed embedding vector for a file, recording which model produced it.
     pub fn set_file_embedding(&mut self, uri: &str, vector: Vec<f32>, model: &str) {
-        self.file_embeddings.insert(uri.to_owned(), vector);
+        let uri = self.canonicalize_uri(uri);
+        self.file_embeddings.insert(uri.clone(), vector);
         self.file_embedding_models
-            .insert(uri.to_owned(), model.to_owned());
+            .insert(uri, model.to_owned());
     }
 
     /// Retrieve the stored embedding vector for a file, if any.
     pub fn get_file_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
-        self.file_embeddings.get(uri)
+        let canon = self.canonicalize_uri(uri);
+        self.file_embeddings.get(canon.as_str())
     }
 
     /// Retrieve the model that produced the stored embedding for a file, if any.
     pub fn file_embedding_model(&self, uri: &str) -> Option<&str> {
-        self.file_embedding_models.get(uri).map(String::as_str)
+        let canon = self.canonicalize_uri(uri);
+        self.file_embedding_models
+            .get(canon.as_str())
+            .map(String::as_str)
     }
 
     /// Store a pre-computed embedding vector for a symbol URI (`lip://` scheme),
     /// recording which model produced it.
     pub fn set_symbol_embedding(&mut self, uri: &str, vector: Vec<f32>, model: &str) {
-        self.symbol_embeddings.insert(uri.to_owned(), vector);
-        self.symbol_embedding_models
-            .insert(uri.to_owned(), model.to_owned());
+        let uri = self.canonicalize_uri(uri);
+        self.symbol_embeddings.insert(uri.clone(), vector);
+        self.symbol_embedding_models.insert(uri, model.to_owned());
     }
 
     /// Retrieve the stored embedding vector for a symbol URI, if any.
     pub fn get_symbol_embedding(&self, uri: &str) -> Option<&Vec<f32>> {
-        self.symbol_embeddings.get(uri)
+        let canon = self.canonicalize_uri(uri);
+        self.symbol_embeddings.get(canon.as_str())
     }
 
     /// Return the distinct model names present across all stored file embeddings.
@@ -1761,6 +1985,8 @@ impl LipDatabase {
     ///
     /// Returns `(indexed, has_embedding, age_seconds)`.
     pub fn file_status(&self, uri: &str) -> (bool, bool, Option<u64>) {
+        let canon = self.canonicalize_uri(uri);
+        let uri = canon.as_str();
         let indexed = self.file_inputs.contains_key(uri);
         let has_embedding = self.file_embeddings.contains_key(uri);
         let age_seconds = self.file_indexed_at.get(uri).and_then(|&ts_ms| {
@@ -2116,6 +2342,8 @@ impl LipDatabase {
 
     /// Find `OwnedSymbolInfo` for a given symbol URI across all tracked files and mounted slices.
     pub fn symbol_by_uri(&mut self, symbol_uri: &str) -> Option<OwnedSymbolInfo> {
+        let canon = self.canonicalize_uri(symbol_uri);
+        let symbol_uri = canon.as_str();
         // Fast path: check mounted slice symbols first (O(1)).
         if let Some(sym) = self.mounted_symbols.get(symbol_uri) {
             return Some(sym.clone());

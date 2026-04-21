@@ -26,6 +26,13 @@ mod scip {
 /// With `--push-to-daemon`, each document delta is streamed directly to a running
 /// LIP daemon — enabling nightly CI to push compiler-accurate symbols into the
 /// live graph without a daemon restart.
+///
+/// As of v2.3.1 imports use canonical `lip://local//<abs>/<rel>` URIs when the
+/// SCIP `Metadata.project_root` is present, or `lip://local/<rel>` when it is
+/// absent (the daemon resolves these against roots supplied via
+/// `RegisterProjectRoot`). This replaces the pre-2.3.1 `file:///<rel>` form,
+/// which silently mismatched CKB queries. Use `--verify` to round-trip a
+/// sample of the imported files after pushing.
 #[derive(Args)]
 pub struct ImportArgs {
     /// Path to the `.scip` file to import.
@@ -57,6 +64,17 @@ pub struct ImportArgs {
     /// EventStream-JSON output path.
     #[arg(long)]
     pub no_provenance: bool,
+
+    /// After pushing deltas, round-trip a sample of the imported files
+    /// against the daemon to catch URI/canonicalization regressions.
+    ///
+    /// Samples up to 10 files, issues `QueryFileStatus` (expects
+    /// `indexed=true`) and — when the file carries an exported
+    /// definition — `QueryWorkspaceSymbols` scoped to that file. Exits
+    /// non-zero on any mismatch so CI catches silent drops. Only
+    /// valid with `--push-to-daemon`.
+    #[arg(long, requires = "push_to_daemon")]
+    pub verify: bool,
 }
 
 pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
@@ -89,10 +107,20 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     };
 
     let confidence = args.confidence;
+    // SCIP metadata.project_root is a file:// URL identifying the source tree
+    // the producer indexed. We use it to promote per-document URIs from the
+    // old `file:///<relative>` form to canonical `lip://local/<abs>/<rel>`
+    // (spec §5). When absent, the daemon resolves relative URIs against any
+    // RegisterProjectRoot roots supplied by the client.
+    let project_root_abs = index
+        .metadata
+        .as_ref()
+        .map(|m| strip_file_scheme(&m.project_root))
+        .unwrap_or_default();
     let mut deltas: Vec<OwnedDelta> = index
         .documents
         .into_iter()
-        .map(|d| convert_document(d, confidence))
+        .map(|d| convert_document(d, confidence, &project_root_abs))
         .collect();
 
     // Also import external symbols as a synthetic document.
@@ -123,6 +151,15 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
     }
 
     // ── CI batch push: stream deltas directly to a running daemon ──────────────
+    // Snapshot up to 10 (uri, probe) pairs before the push loop consumes the
+    // Vec. We round-trip these against the daemon after pushing so CI catches
+    // the "printed success but nothing landed" class of bug.
+    let verify_samples: Vec<VerifySample> = if args.verify {
+        collect_verify_samples(&deltas, 10)
+    } else {
+        Vec::new()
+    };
+
     if let Some(socket_path) = args.push_to_daemon {
         let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
             anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
@@ -196,6 +233,10 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
             "pushed {total} deltas to daemon at {}",
             socket_path.display()
         );
+
+        if args.verify {
+            run_verification(&mut stream, &verify_samples).await?;
+        }
         return Ok(());
     }
 
@@ -255,10 +296,170 @@ fn build_tier3_source(index: &scip::Index, scip_path: &std::path::Path) -> Tier3
     }
 }
 
+// ─── --verify plumbing ────────────────────────────────────────────────────────
+
+/// A single file we will round-trip against the daemon after a push.
+struct VerifySample {
+    file_uri: String,
+    /// Display name + kind of an exported definition inside the file, when
+    /// one is available. Used to drive a `QueryWorkspaceSymbols` probe.
+    probe: Option<(String, SymbolKind)>,
+}
+
+/// Take at most `max` real document URIs (skipping the synthetic
+/// `scip://external` bundle) and pair each with the first suitable exported
+/// definition. Simple head-sample rather than random — deterministic and
+/// debuggable; CI catches drop-everything regressions before any sampling
+/// strategy matters.
+fn collect_verify_samples(deltas: &[OwnedDelta], max: usize) -> Vec<VerifySample> {
+    deltas
+        .iter()
+        .filter_map(|d| d.document.as_ref())
+        .filter(|doc| !doc.uri.starts_with("scip://"))
+        .take(max)
+        .map(|doc| {
+            let probe = doc
+                .symbols
+                .iter()
+                .find(|s| {
+                    s.is_exported
+                        && matches!(
+                            s.kind,
+                            SymbolKind::Function | SymbolKind::Class | SymbolKind::Interface
+                        )
+                })
+                .map(|s| (s.display_name.clone(), s.kind));
+            VerifySample {
+                file_uri: doc.uri.clone(),
+                probe,
+            }
+        })
+        .collect()
+}
+
+async fn run_verification(
+    stream: &mut UnixStream,
+    samples: &[VerifySample],
+) -> anyhow::Result<()> {
+    if samples.is_empty() {
+        eprintln!("verify: no documents to sample");
+        return Ok(());
+    }
+
+    let mut failures: usize = 0;
+    for sample in samples {
+        let fs = round_trip(
+            stream,
+            &ClientMessage::QueryFileStatus {
+                uri: sample.file_uri.clone(),
+            },
+        )
+        .await?;
+        match fs {
+            ServerMessage::FileStatusResult { indexed: true, .. } => {}
+            ServerMessage::FileStatusResult { indexed: false, .. } => {
+                eprintln!("verify: not indexed: {}", sample.file_uri);
+                failures += 1;
+                continue;
+            }
+            other => {
+                eprintln!(
+                    "verify: unexpected reply to QueryFileStatus({}): {other:?}",
+                    sample.file_uri
+                );
+                failures += 1;
+                continue;
+            }
+        }
+
+        let Some((name, kind)) = &sample.probe else {
+            continue;
+        };
+        let ws = round_trip(
+            stream,
+            &ClientMessage::QueryWorkspaceSymbols {
+                query: name.clone(),
+                limit: Some(10),
+                kind_filter: Some(vec![*kind]),
+                scope: Some(sample.file_uri.clone()),
+                modifier_filter: None,
+            },
+        )
+        .await?;
+        match ws {
+            ServerMessage::WorkspaceSymbolsResult { symbols, .. } if !symbols.is_empty() => {}
+            ServerMessage::WorkspaceSymbolsResult { .. } => {
+                eprintln!(
+                    "verify: probe '{name}' missing in {}",
+                    sample.file_uri
+                );
+                failures += 1;
+            }
+            other => {
+                eprintln!(
+                    "verify: unexpected reply to QueryWorkspaceSymbols({name}): {other:?}"
+                );
+                failures += 1;
+            }
+        }
+    }
+
+    if failures > 0 {
+        anyhow::bail!(
+            "verify: {failures}/{} sample(s) failed round-trip",
+            samples.len()
+        );
+    }
+    eprintln!("verify: {} sample(s) OK", samples.len());
+    Ok(())
+}
+
+async fn round_trip(
+    stream: &mut UnixStream,
+    msg: &ClientMessage,
+) -> anyhow::Result<ServerMessage> {
+    let body = serde_json::to_vec(msg)?;
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    stream.write_all(&body).await?;
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let n = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; n];
+    stream.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
 // ─── Conversion helpers ───────────────────────────────────────────────────────
 
-fn convert_document(doc: scip::Document, confidence: u8) -> OwnedDelta {
-    let uri = format!("file:///{}", doc.relative_path.trim_start_matches('/'));
+/// Strip the `file://` scheme from a SCIP-style URL, returning the absolute
+/// filesystem path (including leading `/`) or the original string when no
+/// scheme is present. An empty input returns an empty string.
+fn strip_file_scheme(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("file://") {
+        rest.trim_end_matches('/').to_owned()
+    } else {
+        url.trim_end_matches('/').to_owned()
+    }
+}
+
+/// Build a canonical LIP document URI from a SCIP project root + relative path.
+///
+/// When `project_root_abs` is non-empty, emits the absolute form
+/// `lip://local/<root>/<rel>` — and because `<root>` already starts with `/`,
+/// the result has the canonical double-slash that tier-1 produces
+/// (`lip://local//abs/path`). When it is empty, emits the relative form
+/// `lip://local/<rel>`, which the daemon resolves via registered roots.
+fn build_document_uri(project_root_abs: &str, relative_path: &str) -> String {
+    let rel = relative_path.trim_start_matches('/');
+    if project_root_abs.is_empty() {
+        format!("lip://local/{rel}")
+    } else {
+        format!("lip://local/{project_root_abs}/{rel}")
+    }
+}
+
+fn convert_document(doc: scip::Document, confidence: u8, project_root_abs: &str) -> OwnedDelta {
+    let uri = build_document_uri(project_root_abs, &doc.relative_path);
     let content_hash = sha256_hex(doc.relative_path.as_bytes());
     let lang = scip_language_to_lip(&doc.language);
 
@@ -1019,5 +1220,36 @@ mod tests {
         assert_eq!(o.role, Role::Reference);
         assert_eq!(o.kind, ReferenceKind::Unknown);
         assert!(!o.is_test);
+    }
+
+    // ── v2.3.1 URI construction ──────────────────────────────────────────────
+
+    #[test]
+    fn strip_file_scheme_trims_scheme_and_trailing_slash() {
+        assert_eq!(strip_file_scheme("file:///Users/lisa/repo"), "/Users/lisa/repo");
+        assert_eq!(strip_file_scheme("file:///Users/lisa/repo/"), "/Users/lisa/repo");
+        // Non-file URLs are returned verbatim (minus trailing slash).
+        assert_eq!(strip_file_scheme("/already/absolute"), "/already/absolute");
+        assert_eq!(strip_file_scheme(""), "");
+    }
+
+    #[test]
+    fn build_document_uri_absolute_preserves_double_slash() {
+        // Canonical tier-1 form: `lip://local//abs/path` (two slashes).
+        let uri = build_document_uri("/Users/lisa/repo", "src/foo.rs");
+        assert_eq!(uri, "lip://local//Users/lisa/repo/src/foo.rs");
+    }
+
+    #[test]
+    fn build_document_uri_empty_root_emits_relative_form() {
+        // Without a project root, the daemon resolves against registered roots.
+        let uri = build_document_uri("", "src/foo.rs");
+        assert_eq!(uri, "lip://local/src/foo.rs");
+    }
+
+    #[test]
+    fn build_document_uri_strips_leading_slash_from_relative_path() {
+        let uri = build_document_uri("/repo", "/src/foo.rs");
+        assert_eq!(uri, "lip://local//repo/src/foo.rs");
     }
 }

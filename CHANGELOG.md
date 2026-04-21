@@ -6,6 +6,56 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-04-21
+
+**CKB import landing fix.** Addresses the "`lip import --push-to-daemon` prints success but every file shows `indexed: false`" class of bug by making client- and daemon-side URI conventions converge, and by back-filling call edges when SCIP imports carry none. `protocol_version` stays at `2`; every change is either additive or limited to CLI behaviour.
+
+### Added
+
+- **`RegisterProjectRoot { root: String }`** — idempotent client message that registers a filesystem root with the daemon. The daemon uses its registered roots to resolve relative `lip://local/<rel>` URIs against the absolute-form records emitted by the tier-1 indexer and by `lip import` (`lip://local//<abs>/<rel>`). Longest matching root wins when multiple are registered. Advertised as `register_project_root` in `HandshakeResult.supported_messages`; pre-v2.3.1 daemons reply `UnknownMessage`, in which case clients must send absolute URIs. `RegisterTier3Source` now auto-registers its `source.project_root` when non-empty, so SCIP imports that carry a project root need no second round-trip.
+
+- **`EdgesSource` provenance on blast radius results** — `EnrichedBlastRadius` gains `edges_source: Option<EdgesSource>` with four variants (`Tier1 | ScipWithTier1Edges | ScipOnly | Empty`). Consumers that maintain their own fallback path (e.g. CKB's native SCIP backend) can now detect when LIP has no structural edges for a file and route around us. `#[serde(default, skip_serializing_if = Option::is_none)]`, so the field is invisible to pre-v2.3.1 clients.
+
+- **Tier-1 edge back-fill on SCIP imports** — `upsert_file_precomputed` now falls back to running the tree-sitter tier-1 extractor over the file on disk when the incoming SCIP document has no call edges. Produces `edges_source = ScipWithTier1Edges` when the fallback succeeds, `Empty` when the file is unreadable or yields no calls. Fills the gap where `scip-go` inconsistently emits call edges and `scip-clang` omits them entirely.
+
+- **`lip import --verify`** — after pushing deltas, samples up to 10 documents and round-trips `QueryFileStatus` (expecting `indexed = true`) plus a `QueryWorkspaceSymbols` probe scoped to the file when the document carries an exported `Function` / `Class` / `Interface` definition. Exits non-zero on any mismatch so CI catches silent import drops instead of printing success and returning 0. Requires `--push-to-daemon`.
+
+### Changed
+
+- **`lip import` URI scheme** — imported documents now use `lip://local/<rel>` (when `Metadata.project_root` is absent) or `lip://local/<abs>/<rel>` with the canonical doubled slash (when it is present), replacing the previous `file:///<rel>` form that silently failed to match any CKB query. Requires CKB to call `RegisterProjectRoot` for its workspace root before querying by relative path.
+
+- **`LipDatabase::canonicalize_uri`** — every public query- and mutation-surface method now canonicalises its URI argument through `registered_roots` before hitting the input/embedding/def/sym/occ maps, so relative and absolute lip-local forms of the same file resolve to the same record. Non-lip-local URIs (`file://…`, `scip://external`, bare paths) are returned unchanged.
+
+### Fixed
+
+- **CKB "printed success but nothing landed"** — the combined effect of the import URI change + `RegisterProjectRoot` + daemon-side canonicalisation means `lip import` records are now discoverable by a CKB client that queries `lip://local/<rel>`, which was the class of bug reported after v2.3.0.
+
+---
+
+## [2.3.0] — 2026-04-21
+
+**CKB structural-parity bundle.** Five additive features so CKB (and any other consumer) can retire its duplicate SCIP parser and query LIP for everything structural. `protocol_version` stays at `2`; every new field is `#[serde(default, skip_serializing_if = …)]` and every new message is advertised via `HandshakeResult.supported_messages`, so older clients see no change.
+
+### Added
+
+- **Rich symbol metadata** — `OwnedSymbolInfo` now carries `signature_normalized`, `modifiers: Vec<String>`, `visibility: Option<Visibility>` + `visibility_confidence: Option<u8>`, `container_name: Option<String>`, `extraction_tier: ExtractionTier`, and `modifiers_source: Option<ModifiersSource>`. Tier-1 extractors populate the structural fields for Rust / TypeScript / Python / Swift / Kotlin (`extraction_tier = Tier1`, `modifiers_source = None`). The SCIP importer (`lip import --from-scip`) parses upstream-compatible `enclosing_symbol = 8` and derives modifiers via prefix-parse (`extraction_tier = Tier3Scip`, `modifiers_source = PrefixParse`). Wire round-trip covered end-to-end by `daemon_tier1_emits_v23_metadata` and `daemon_precomputed_preserves_v23_metadata`.
+
+- **Reference classification** — `OwnedOccurrence` gains `kind: ReferenceKind` (`Unknown` / `Call` / `Read` / `Write` / `Type` / `Implements` / `Extends`) and `is_test: bool`. Tier-1 classifier in `symbol_extractor::classify_ref_kind` uses tree-sitter parent-node and field-name lookup — call / method targets → `Call`, assignment-LHS → `Write`, otherwise `Read`; `is_test` stamps occurrences from paths under `/tests/`, `_test.rs`, `_test.py`, `.spec.ts`, etc. SCIP import/export round-trips via `SymbolRole::ReadAccess | WriteAccess | Test` (Call has no SCIP equivalent and maps to `Unknown` on re-export).
+
+- **`QueryBlastRadiusSymbol { symbol_uri, min_score?: f32 } → BlastRadiusSymbolResult { result: Option<EnrichedBlastRadius> }`** — single-symbol wrapper around `blast_radius_for_symbol`. Resolves the symbol's `def_index` entry, runs the same structural BFS + semantic-enrichment loop as `QueryBlastRadiusBatch`, and returns `None` for unknown or unindexed symbols so the caller can distinguish "zero impact" from "no data." Safe inside `BatchQuery`.
+
+- **`QueryOutgoingCalls { symbol_uri, depth: u32 } → OutgoingCallsResult { edges: Vec<OutgoingCallEdge>, truncated: bool }`** — forward call-graph traversal. New `caller_to_callees: HashMap<String, Vec<String>>` index mirrors the existing reverse map, populated in both `upsert_file` and `upsert_file_precomputed` and cleaned in `remove_file_call_edges`. BFS is depth-clamped to `[1, 8]` with `NODE_LIMIT = 200`; the `truncated` flag reports when the cap fired. Safe inside `BatchQuery`.
+
+- **Ranked & filtered workspace symbols** — `QueryWorkspaceSymbols` adds three optional filters (`kind_filter: Option<Vec<SymbolKind>>`, `scope: Option<String>`, `modifier_filter: Option<Vec<String>>`); `WorkspaceSymbolsResult` adds `ranked: Vec<RankedSymbol>` (parallel to `symbols`). Tiered scoring: `Exact = 1.0`, case-insensitive `Prefix = 0.8`, case-insensitive substring `Fuzzy = 0.5` — not BM25. `MatchType` is a discriminator only, not a ranking signal; callers sort by `score`. `ranked` is `skip_if_empty`, and an empty query preserves pre-v2.3 behaviour (empty `ranked`). Pre-v2.3 clients that pattern-match `{ symbols }` keep working unchanged.
+
+- **`OutgoingCallEdge`, `RankedSymbol`, `MatchType`** — new public types in `lip_core::query_graph::types`.
+
+- **Drift guard** — the two new client messages (`query_blast_radius_symbol`, `query_outgoing_calls`) are registered in both `supported_messages()` and `variant_tag()`; the `supported_messages_covers_all_variants` test now covers them.
+
+### Changed
+
+- **`LipDatabase::workspace_symbols`** now delegates to `workspace_symbols_ranked`; the old signature is preserved for callers that do not need the ranked tier (LSP bridge, MCP adapter, legacy CLI). No behaviour change for existing callers.
+
 ---
 
 ## [2.2.0] — 2026-04-21

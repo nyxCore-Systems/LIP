@@ -75,6 +75,28 @@ pub enum ImpactSource {
     Both,
 }
 
+/// Provenance for the call edges backing a blast-radius result (v2.3.1).
+///
+/// Reported to clients so they can decide how much to trust the static
+/// graph: Tier-1 tree-sitter edges are reliable, SCIP-only edges depend
+/// on the emitter's accuracy (scip-clang omits calls, scip-go is
+/// inconsistent), and `Empty` means no edges were available at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgesSource {
+    /// Edges produced by the Tier-1 tree-sitter pass on the file's source.
+    Tier1,
+    /// SCIP import provided symbols/occurrences but no edges, so the
+    /// daemon re-ran the Tier-1 tree-sitter pass against the file on disk
+    /// to fill the static call graph (v2.3.1 Feature #5).
+    ScipWithTier1Edges,
+    /// SCIP import provided edges via `SymbolRole::Call`, used as-is.
+    ScipOnly,
+    /// No call edges are available for this symbol/file. Clients should
+    /// treat the static blast-radius as best-effort only.
+    Empty,
+}
+
 /// A single entry in a batch blast-radius result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedBlastRadius {
@@ -86,6 +108,11 @@ pub struct EnrichedBlastRadius {
     /// Semantically coupled files/symbols not in the static call graph.
     /// Empty when `include_semantic` was false or embeddings are unavailable.
     pub semantic_items: Vec<SemanticImpactItem>,
+    /// Provenance for the call edges used to compute `static_result`
+    /// (v2.3.1). `None` when older daemons serialise this field without
+    /// any signal — deserialisers default to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_source: Option<EdgesSource>,
 }
 
 /// A single forward call edge returned by `QueryOutgoingCalls` (v2.3).
@@ -1309,6 +1336,24 @@ pub enum ClientMessage {
     QueryAbiHash {
         uri: String,
     },
+
+    // ── v2.3.1 — URI canonicalisation ─────────────────────────────────────
+    /// Register a project root so the daemon can resolve relative
+    /// `lip://local/<rel>` URIs (from clients like CKB) against absolute
+    /// `lip://local/<abs>` keys (how SCIP imports are stored).
+    ///
+    /// Idempotent: re-registering the same root is a no-op. Callers may
+    /// issue this unconditionally at startup regardless of whether a prior
+    /// `lip import` already registered the same root.
+    ///
+    /// With multiple registered roots, URI resolution matches the
+    /// longest-prefix first. Acknowledged with `DeltaAck`.
+    RegisterProjectRoot {
+        /// Absolute filesystem path or `file:///…` / `lip://local/…` URI
+        /// of the project root. Normalised to an absolute path by the
+        /// daemon before insertion.
+        root: String,
+    },
 }
 
 impl ClientMessage {
@@ -1377,6 +1422,7 @@ impl ClientMessage {
             "reindex_stale",
             "batch_file_status",
             "query_abi_hash",
+            "register_project_root",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -1453,6 +1499,7 @@ impl ClientMessage {
             ClientMessage::ReindexStale { .. } => "reindex_stale",
             ClientMessage::BatchFileStatus { .. } => "batch_file_status",
             ClientMessage::QueryAbiHash { .. } => "query_abi_hash",
+            ClientMessage::RegisterProjectRoot { .. } => "register_project_root",
         }
     }
 
@@ -1676,6 +1723,27 @@ mod tests {
             panic!("wrong variant");
         };
         assert_eq!(uri, "file:///src/lib.rs");
+    }
+
+    // ── v2.3.1 round-trip tests ───────────────────────────────────────
+    #[test]
+    fn register_project_root_round_trips() {
+        let msg = ClientMessage::RegisterProjectRoot {
+            root: "file:///repo".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::RegisterProjectRoot { root } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(root, "file:///repo");
+    }
+
+    #[test]
+    fn register_project_root_not_batchable() {
+        assert!(ClientMessage::RegisterProjectRoot {
+            root: String::new()
+        }
+        .is_batchable());
     }
 
     #[test]
@@ -2008,6 +2076,9 @@ mod tests {
             },
             ClientMessage::BatchFileStatus { uris: vec![] },
             ClientMessage::QueryAbiHash { uri: String::new() },
+            ClientMessage::RegisterProjectRoot {
+                root: String::new(),
+            },
         ];
 
         let supported = ClientMessage::supported_messages();

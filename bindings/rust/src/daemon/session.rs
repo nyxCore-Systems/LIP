@@ -1640,7 +1640,22 @@ impl Session {
             // ── v2.1: Tier 3 provenance registration ──────────────────────
             ClientMessage::RegisterTier3Source { source } => {
                 let mut db = self.db.lock().await;
+                // Auto-register the source's project root for URI resolution (v2.3.1).
+                if !source.project_root.is_empty() {
+                    db.register_project_root(&source.project_root);
+                }
                 db.register_tier3_source(source);
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
+            }
+
+            // ── v2.3.1: standalone project-root registration ──────────────
+            ClientMessage::RegisterProjectRoot { root } => {
+                let mut db = self.db.lock().await;
+                db.register_project_root(&root);
                 ServerMessage::DeltaAck {
                     seq: 0,
                     accepted: true,
@@ -2531,6 +2546,10 @@ fn process_query_sync(
 
         ClientMessage::RegisterTier3Source { .. } => {
             err("RegisterTier3Source is a mutation; not permitted in BatchQuery")
+        }
+
+        ClientMessage::RegisterProjectRoot { .. } => {
+            err("RegisterProjectRoot is a mutation; not permitted in BatchQuery")
         }
 
         // ── v2.2: new variants ───────────────────────────────────────────────

@@ -1872,3 +1872,309 @@ pub async fn handle() {}
     task.abort();
     let _ = task.await;
 }
+
+// ─── v2.3.1: URI canonicalization + edges_source provenance ──────────────────
+
+/// Register a project root, upsert a file under its absolute-form URI, then
+/// query it back via the relative-form URI. The daemon must resolve the
+/// relative URI against the registered root and return `indexed = true`.
+///
+/// This is the core of the CKB "printed success but nothing landed" fix:
+/// import writes `lip://local//abs/path`, CKB queries `lip://local/rel/path`,
+/// both must land on the same stored record.
+#[tokio::test]
+async fn daemon_register_project_root_canonicalizes_relative_uri() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_canon.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    let root = "/workspaces/demo";
+    send(
+        &mut client,
+        &ClientMessage::RegisterProjectRoot {
+            root: root.to_owned(),
+        },
+    )
+    .await
+    .expect("send register");
+    match recv(&mut client).await.expect("recv register ack") {
+        ServerMessage::DeltaAck { accepted: true, .. } => {}
+        other => panic!("expected accepting DeltaAck, got {other:?}"),
+    }
+
+    let abs_uri = "lip://local//workspaces/demo/src/lib.rs";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(abs_uri, "pub fn hello() {}"),
+        },
+    )
+    .await
+    .expect("send upsert");
+    let _ = recv(&mut client).await.expect("recv upsert ack");
+
+    let rel_uri = "lip://local/src/lib.rs";
+    send(
+        &mut client,
+        &ClientMessage::QueryFileStatus {
+            uri: rel_uri.to_owned(),
+        },
+    )
+    .await
+    .expect("send file status");
+    match recv(&mut client).await.expect("recv file status") {
+        ServerMessage::FileStatusResult { indexed, .. } => assert!(
+            indexed,
+            "relative URI {rel_uri} must canonicalize to the absolute-form record"
+        ),
+        other => panic!("expected FileStatusResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Sending `RegisterProjectRoot` twice for the same root is idempotent.
+/// Handshake advertises the capability.
+#[tokio::test]
+async fn daemon_register_project_root_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_reg_idem.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    send(
+        &mut client,
+        &ClientMessage::Handshake {
+            client_version: Some("test".into()),
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::HandshakeResult {
+            supported_messages, ..
+        } => assert!(
+            supported_messages.contains(&"register_project_root".to_string()),
+            "register_project_root must be advertised in handshake capabilities"
+        ),
+        other => panic!("expected HandshakeResult, got {other:?}"),
+    }
+
+    for _ in 0..2 {
+        send(
+            &mut client,
+            &ClientMessage::RegisterProjectRoot {
+                root: "/tmp/demo".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        match recv(&mut client).await.unwrap() {
+            ServerMessage::DeltaAck { accepted: true, .. } => {}
+            other => panic!("expected DeltaAck(true), got {other:?}"),
+        }
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Tier-1 upsert (real source_text) must advertise `edges_source = Tier1` in
+/// both `BlastRadiusSymbolResult` and `BlastRadiusBatchResult`.
+#[tokio::test]
+async fn daemon_blast_radius_edges_source_tier1() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_es_tier1.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    let a_uri = "lip://local/es@0.1/a.rs";
+    // `target` must call something so the tier-1 extractor records ≥1 edge;
+    // zero edges would produce `EdgesSource::Empty`.
+    let a_src = "pub fn helper() {}\npub fn target() { helper(); }";
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: make_doc(a_uri, a_src),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    send(
+        &mut client,
+        &ClientMessage::QueryWorkspaceSymbols {
+            query: "target".into(),
+            limit: Some(5),
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
+        },
+    )
+    .await
+    .unwrap();
+    let target_uri = match recv(&mut client).await.unwrap() {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
+            .into_iter()
+            .find(|s| s.display_name == "target")
+            .expect("target not in workspace")
+            .uri,
+        other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
+    };
+
+    use lip_core::query_graph::types::EdgesSource;
+
+    send(
+        &mut client,
+        &ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri: target_uri,
+            min_score: None,
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::BlastRadiusSymbolResult { result } => {
+            let e = result.expect("expected Some result");
+            assert_eq!(
+                e.edges_source,
+                Some(EdgesSource::Tier1),
+                "Tier-1 upsert must set edges_source = Tier1"
+            );
+        }
+        other => panic!("expected BlastRadiusSymbolResult, got {other:?}"),
+    }
+
+    send(
+        &mut client,
+        &ClientMessage::QueryBlastRadiusBatch {
+            changed_file_uris: vec![a_uri.to_owned()],
+            min_score: None,
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::BlastRadiusBatchResult { results, .. } => {
+            assert!(!results.is_empty(), "batch should yield ≥1 entry");
+            assert!(
+                results
+                    .iter()
+                    .all(|e| e.edges_source == Some(EdgesSource::Tier1)),
+                "every batch entry must carry edges_source = Tier1; got {:?}",
+                results.iter().map(|e| e.edges_source).collect::<Vec<_>>(),
+            );
+        }
+        other => panic!("expected BlastRadiusBatchResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Pre-computed (SCIP-style) delta with no edges and `source_text = None`:
+/// the daemon must read the file from disk and back-fill Tier-1 call edges,
+/// tagging the result `ScipWithTier1Edges`.
+#[tokio::test]
+async fn daemon_precomputed_tier1_edge_fill_on_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("lip_es_fill.sock");
+    let daemon = LipDaemon::new(&socket);
+    let task = tokio::spawn(async move { daemon.run().await.ok() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+
+    let src_path = dir.path().join("chain.rs");
+    std::fs::write(&src_path, "fn a() { b(); }\nfn b() {}\n").unwrap();
+    let abs = src_path.to_string_lossy();
+    let file_uri = format!("lip://local//{}", abs.trim_start_matches('/'));
+    let sym_a = format!("{file_uri}#a");
+
+    let doc = OwnedDocument {
+        uri: file_uri.clone(),
+        content_hash: "feedbeef".to_owned(),
+        language: "rust".to_owned(),
+        symbols: vec![OwnedSymbolInfo {
+            uri: sym_a.clone(),
+            display_name: "a".to_owned(),
+            kind: SymbolKind::Function,
+            is_exported: true,
+            confidence_score: 90,
+            extraction_tier: ExtractionTier::Tier3Scip,
+            modifiers_source: Some(ModifiersSource::PrefixParse),
+            ..Default::default()
+        }],
+        occurrences: vec![OwnedOccurrence {
+            symbol_uri: sym_a.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 3,
+                end_line: 0,
+                end_char: 4,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        }],
+        merkle_path: file_uri.clone(),
+        edges: vec![],
+        source_text: None,
+    };
+
+    send(
+        &mut client,
+        &ClientMessage::Delta {
+            seq: 1,
+            action: Action::Upsert,
+            document: doc,
+        },
+    )
+    .await
+    .unwrap();
+    let _ = recv(&mut client).await.unwrap();
+
+    use lip_core::query_graph::types::EdgesSource;
+
+    send(
+        &mut client,
+        &ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri: sym_a,
+            min_score: None,
+        },
+    )
+    .await
+    .unwrap();
+    match recv(&mut client).await.unwrap() {
+        ServerMessage::BlastRadiusSymbolResult { result } => {
+            let e = result.expect("expected Some result");
+            assert_eq!(
+                e.edges_source,
+                Some(EdgesSource::ScipWithTier1Edges),
+                "precomputed + on-disk source should back-fill tier-1 edges"
+            );
+        }
+        other => panic!("expected BlastRadiusSymbolResult, got {other:?}"),
+    }
+
+    task.abort();
+    let _ = task.await;
+}
