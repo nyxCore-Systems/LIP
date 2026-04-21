@@ -2178,3 +2178,101 @@ async fn daemon_precomputed_tier1_edge_fill_on_disk() {
     task.abort();
     let _ = task.await;
 }
+
+// ─── Regression: bulk precomputed import does not deadlock on self-echo ──────
+//
+// Before the v2.3.1 hang fix the session emitted `IndexChanged` back to its
+// own subscriber for every upsert, writing two frames per delta while the
+// import loop read only one. After ~65 iterations the 8 KB macOS AF_UNIX
+// send buffer filled and the daemon blocked mid-write, freezing the push.
+//
+// This test pushes 200 precomputed deltas through a single session — more
+// than the buffer-fill threshold — and asserts the loop completes within a
+// generous timeout. Without the `Notification.source_session` filter the
+// assertion fires; with it every delta round-trips in microseconds.
+#[tokio::test]
+async fn daemon_bulk_precomputed_import_does_not_deadlock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("bulk.sock");
+
+    let daemon = LipDaemon::new(&socket_path).without_file_watcher();
+    let task = tokio::spawn(async move {
+        let _ = daemon.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+
+    const N: u64 = 200;
+    let push = async {
+        for seq in 0..N {
+            let uri = format!("lip://local//tmp/bulk/file_{seq:04}.rs");
+            // A precomputed delta: no source_text, one occurrence, one symbol.
+            // Triggers the IndexChanged broadcast on every upsert — the exact
+            // path that used to deadlock.
+            let sym_uri = format!("{uri}#sym_{seq}");
+            let doc = OwnedDocument {
+                uri: uri.clone(),
+                content_hash: format!("hash_{seq}"),
+                language: "rust".to_owned(),
+                occurrences: vec![OwnedOccurrence {
+                    symbol_uri: sym_uri.clone(),
+                    range: OwnedRange {
+                        start_line: 0,
+                        start_char: 0,
+                        end_line: 0,
+                        end_char: 3,
+                    },
+                    confidence_score: 95,
+                    role: Role::Definition,
+                    override_doc: None,
+                    kind: ReferenceKind::Unknown,
+                    is_test: false,
+                }],
+                symbols: vec![OwnedSymbolInfo {
+                    uri: sym_uri,
+                    display_name: format!("sym_{seq}"),
+                    kind: SymbolKind::Function,
+                    confidence_score: 95,
+                    ..Default::default()
+                }],
+                merkle_path: uri.clone(),
+                edges: vec![],
+                source_text: None,
+            };
+            send(
+                &mut client,
+                &ClientMessage::Delta {
+                    seq,
+                    action: Action::Upsert,
+                    document: doc,
+                },
+            )
+            .await
+            .unwrap();
+            // Drain exactly one frame per iteration — same pattern as lip import.
+            // `recv_raw` so IndexChanged notifications (if any leak through) are
+            // surfaced as failures rather than silently skipped.
+            match recv_raw(&mut client).await.unwrap() {
+                ServerMessage::DeltaAck { accepted, .. } => {
+                    assert!(accepted, "delta {seq} was not accepted");
+                }
+                ServerMessage::IndexChanged { .. } => {
+                    panic!(
+                        "session {seq}: received IndexChanged echo of own emission \
+                         — Notification.source_session filter is not engaged"
+                    );
+                }
+                other => panic!("unexpected response to delta {seq}: {other:?}"),
+            }
+        }
+    };
+
+    // 30 s gives plenty of headroom on CI; a deadlocked run never completes.
+    tokio::time::timeout(Duration::from_secs(30), push)
+        .await
+        .expect("bulk push must not hang (self-echo deadlock regression)");
+
+    task.abort();
+    let _ = task.await;
+}

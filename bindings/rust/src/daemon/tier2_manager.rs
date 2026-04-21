@@ -26,6 +26,8 @@ use crate::indexer::tier2::swift_ls::SwiftBackend;
 use crate::indexer::tier2::ts_server::TypeScriptBackend;
 use crate::query_graph::{LipDatabase, ServerMessage};
 
+use super::session::Notification;
+
 pub const CHANNEL_CAPACITY: usize = 64;
 
 // ─── Job ──────────────────────────────────────────────────────────────────────
@@ -160,14 +162,14 @@ pub struct Tier2Manager {
     rx: mpsc::Receiver<VerificationJob>,
     backends: Tier2Backends,
     /// Broadcast sender for push notifications. `None` when notifications are disabled.
-    notify_tx: Option<broadcast::Sender<ServerMessage>>,
+    notify_tx: Option<broadcast::Sender<Notification>>,
 }
 
 impl Tier2Manager {
     pub fn new(
         db: Arc<Mutex<LipDatabase>>,
         rx: mpsc::Receiver<VerificationJob>,
-        notify_tx: broadcast::Sender<ServerMessage>,
+        notify_tx: broadcast::Sender<Notification>,
     ) -> Self {
         Self {
             db,
@@ -745,8 +747,12 @@ impl Tier2Manager {
                     old_confidence,
                     new_confidence: up.confidence_score,
                 };
+                // System-originated: no source_session, so every session forwards it.
                 // `send` fails only when there are no receivers; that's fine.
-                let _ = tx.send(msg);
+                let _ = tx.send(Notification {
+                    source_session: None,
+                    message: msg,
+                });
             }
         }
     }
@@ -992,8 +998,9 @@ mod tests {
             mgr.broadcast_upgrades(file_uri, &upgrades, &mut db);
         }
 
-        let msg = notify_rx.try_recv().expect("should receive a broadcast");
-        match msg {
+        let envelope = notify_rx.try_recv().expect("should receive a broadcast");
+        assert_eq!(envelope.source_session, None, "Tier 2 upgrades are system-originated");
+        match envelope.message {
             ServerMessage::SymbolUpgraded {
                 uri,
                 old_confidence,
@@ -1055,7 +1062,7 @@ mod tests {
     /// short-circuit without reading from the db (the receiver_count check).
     #[tokio::test]
     async fn broadcast_upgrades_noop_without_receivers() {
-        let (notify_tx, _) = broadcast::channel::<ServerMessage>(16);
+        let (notify_tx, _) = broadcast::channel::<Notification>(16);
         let db = Arc::new(Mutex::new(LipDatabase::new()));
 
         // Drop the only receiver so receiver_count == 0.

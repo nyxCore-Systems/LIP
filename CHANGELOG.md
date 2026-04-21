@@ -30,6 +30,8 @@ All notable changes to this project are documented here.
 
 - **CKB "printed success but nothing landed"** — the combined effect of the import URI change + `RegisterProjectRoot` + daemon-side canonicalisation means `lip import` records are now discoverable by a CKB client that queries `lip://local/<rel>`, which was the class of bug reported after v2.3.0.
 
+- **Self-echo deadlock on bulk precomputed imports.** Each session subscribes to the daemon's push-notification broadcast and, in the drain loop that runs after every response, writes every pending notification back to its client. Every `Delta { Upsert }` also emitted an `IndexChanged` onto that same broadcast — so the session received an echo of its own emission and wrote it as a *second* frame on top of the `DeltaAck`. The import loop read one frame per iteration, so frame production ran one frame ahead of consumption; after ~65 deltas the 8 KB macOS `AF_UNIX` send buffer filled, `write_message` parked mid-frame, `read_message` never ran, and every worker sat idle with both processes at 0 % CPU. Fixed by tagging every broadcast message with the emitting session's id (`Notification { source_session: Option<u64>, message: ServerMessage }`) and having the drain loop skip envelopes whose `source_session` matches its own. Tier 2 upgrades emit with `source_session: None` so they still reach every session. Regression test `daemon_bulk_precomputed_import_does_not_deadlock` pushes 200 precomputed deltas through a single session and fails fast if any `IndexChanged` echo reaches the client.
+
 ---
 
 ## [2.3.0] — 2026-04-21

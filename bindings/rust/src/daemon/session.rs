@@ -19,6 +19,20 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 /// Clients can detect drift by comparing against this value in `HandshakeResult`.
 const PROTOCOL_VERSION: u32 = 2;
 
+/// Broadcast envelope that tags every push notification with the session
+/// that produced it. A session skips messages whose `source_session`
+/// matches its own id so an importer never receives echoes of the
+/// `IndexChanged` it just emitted — that self-echo doubled the daemon's
+/// outbound frame rate and filled the 8 KB macOS AF_UNIX send buffer
+/// around delta ~65, freezing bulk SCIP imports. System-originated
+/// messages (Tier 2 upgrades) use `source_session: None` so every session
+/// still receives them.
+#[derive(Clone, Debug)]
+pub struct Notification {
+    pub source_session: Option<u64>,
+    pub message: ServerMessage,
+}
+
 /// Convert a classified [`EmbedError`] into the appropriate wire-level
 /// error response. Centralises the mapping so every embedding call site
 /// reports the same [`ErrorCode`] category for the same failure mode.
@@ -37,6 +51,11 @@ fn embed_error_response(e: EmbedError) -> ServerMessage {
 
 /// Per-connection session state.
 pub struct Session {
+    /// Unique id for this connection, assigned by the daemon at accept time.
+    /// Used to filter broadcast echoes: when a session emits a notification
+    /// tagged with its own id, the drain loop skips it rather than writing
+    /// it back to the client.
+    pub session_id: u64,
     pub db: Arc<Mutex<LipDatabase>>,
     /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
     pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
@@ -46,21 +65,23 @@ pub struct Session {
     pub watcher: Option<FileWatcherHandle>,
     /// Broadcast sender for push notifications (e.g. `SymbolUpgraded`).
     /// Kept so we can subscribe receivers for newly forked sessions.
-    pub notify_tx: Option<broadcast::Sender<ServerMessage>>,
+    pub notify_tx: Option<broadcast::Sender<Notification>>,
     /// HTTP embedding client. `None` when `LIP_EMBEDDING_URL` is not configured.
     pub embedding_client: Arc<Option<EmbeddingClient>>,
 }
 
 impl Session {
     pub fn new(
+        session_id: u64,
         db: Arc<Mutex<LipDatabase>>,
         tier2_tx: Option<mpsc::Sender<VerificationJob>>,
         journal: Option<Arc<StdMutex<Journal>>>,
         watcher: Option<FileWatcherHandle>,
-        notify_tx: Option<broadcast::Sender<ServerMessage>>,
+        notify_tx: Option<broadcast::Sender<Notification>>,
         embedding_client: Arc<Option<EmbeddingClient>>,
     ) -> Self {
         Self {
+            session_id,
             db,
             tier2_tx,
             journal,
@@ -82,9 +103,9 @@ impl Session {
 
     /// Drive the session loop for a single connected client.
     pub async fn run(self: Arc<Self>, mut stream: UnixStream) -> anyhow::Result<()> {
-        info!("new client session");
+        info!("new client session id={}", self.session_id);
         // Subscribe to push notifications for this session's lifetime.
-        let mut notify_rx: Option<broadcast::Receiver<ServerMessage>> =
+        let mut notify_rx: Option<broadcast::Receiver<Notification>> =
             self.notify_tx.as_ref().map(|tx| tx.subscribe());
 
         loop {
@@ -157,11 +178,21 @@ impl Session {
             }
 
             // Drain any pending push notifications before blocking on the next read.
+            // Skip envelopes whose `source_session` matches our own id — those
+            // are echoes of notifications this same session just emitted, and
+            // writing them back to the client doubles the daemon's outbound
+            // frame rate. Filling the 8 KB macOS AF_UNIX send buffer with that
+            // excess hung bulk SCIP imports around delta ~65 before this fix.
             if let Some(ref mut rx) = notify_rx {
                 loop {
                     match rx.try_recv() {
                         Ok(notification) => {
-                            if let Err(e) = write_message(&mut stream, &notification).await {
+                            if notification.source_session == Some(self.session_id) {
+                                continue;
+                            }
+                            if let Err(e) =
+                                write_message(&mut stream, &notification.message).await
+                            {
                                 error!("write error (notification): {e}");
                                 break;
                             }
@@ -326,10 +357,15 @@ impl Session {
                 if matches!(action, Action::Upsert) {
                     if let Some(tx) = &self.notify_tx {
                         let indexed_files = self.db.lock().await.file_count();
+                        // Tag with our session id so the drain loop in THIS session
+                        // skips the echo — only other sessions forward it to their clients.
                         // SendError only occurs when there are zero active receivers — benign.
-                        let _ = tx.send(ServerMessage::IndexChanged {
-                            indexed_files,
-                            affected_uris: vec![uri.clone()],
+                        let _ = tx.send(Notification {
+                            source_session: Some(self.session_id),
+                            message: ServerMessage::IndexChanged {
+                                indexed_files,
+                                affected_uris: vec![uri.clone()],
+                            },
                         });
                     }
                 }
@@ -1450,9 +1486,12 @@ impl Session {
                     }
                     if let Some(tx) = &self.notify_tx {
                         let indexed_files = db.file_count();
-                        let _ = tx.send(ServerMessage::IndexChanged {
-                            indexed_files,
-                            affected_uris: removed.clone(),
+                        let _ = tx.send(Notification {
+                            source_session: Some(self.session_id),
+                            message: ServerMessage::IndexChanged {
+                                indexed_files,
+                                affected_uris: removed.clone(),
+                            },
                         });
                     }
                 }
