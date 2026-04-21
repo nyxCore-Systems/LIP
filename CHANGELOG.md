@@ -6,6 +6,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+---
+
+## [2.2.0] — 2026-04-21
+
 ### Added
 
 - **`NearestItem.embedding_model`** — every nearest-neighbour hit now carries the model name that produced its stored embedding. Field is optional / `skip_serializing_if = None`; older clients see no change. Populated by `nearest_by_vector`, `nearest_symbol_by_vector`, and `outliers`. Useful for debugging mixed-model indexes and confirming which model was used for a specific result.
