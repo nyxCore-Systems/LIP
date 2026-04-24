@@ -832,6 +832,10 @@ impl LipDatabase {
         // already in `def_index`, so we can look them up by name and rewrite
         // the tier-1 caller URI in-place. Callees stay tier-1 because the BFS
         // walks `callee_name_to_callers` via name fragment regardless.
+        // Snapshot the SCIP-origin count before any back-fill can append.
+        // The diagnostic at the end splits scip_pairs vs tier1_pairs so the
+        // log unambiguously explains which branch produced which edges.
+        let scip_pairs = pairs.len();
         let edges_src = if !pairs.is_empty() {
             EdgesSource::ScipOnly
         } else if let Some(path) = crate::daemon::watcher::uri_to_path(&uri) {
@@ -933,11 +937,14 @@ impl LipDatabase {
             .map(|v| v == "1")
             .unwrap_or(false)
         {
+            let tier1_pairs = pairs.len().saturating_sub(scip_pairs);
             eprintln!(
-                "[lip-debug-edges] upsert_precomputed uri={} edges_src={:?} pairs={}",
+                "[lip-debug-edges] upsert_precomputed uri={} edges_src={:?} pairs={} scip_pairs={} tier1_pairs={}",
                 uri,
                 edges_src,
-                pairs.len()
+                pairs.len(),
+                scip_pairs,
+                tier1_pairs
             );
         }
         self.file_edges_source.insert(uri.clone(), edges_src);
@@ -1504,10 +1511,31 @@ impl LipDatabase {
             if caller_sym == symbol_uri {
                 continue; // skip the target itself
             }
-            if let Some((file_uri, _)) = self.def_index.get(caller_sym) {
-                let prev_dist = file_distance.get(file_uri).copied().unwrap_or(u32::MAX);
+            // Prefer def_index when present — it's the authoritative mapping.
+            // Fall back to deriving the file URI from the caller URI itself when
+            // the caller came from tier-1 back-fill (which inserts edges keyed
+            // by `lip://local/<abs>#<name>` without populating def_index).
+            let file_uri_opt = self
+                .def_index
+                .get(caller_sym)
+                .map(|(f, _)| f.clone())
+                .or_else(|| {
+                    if caller_sym.starts_with("lip://local/") {
+                        let hash_idx = caller_sym.rfind('#')?;
+                        let candidate = &caller_sym[..hash_idx];
+                        if self.file_inputs.contains_key(candidate) {
+                            Some(candidate.to_owned())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+            if let Some(file_uri) = file_uri_opt {
+                let prev_dist = file_distance.get(&file_uri).copied().unwrap_or(u32::MAX);
                 file_distance.insert(file_uri.clone(), sym_dist.min(prev_dist));
-                sym_items.push((caller_sym.clone(), file_uri.clone(), sym_dist));
+                sym_items.push((caller_sym.clone(), file_uri, sym_dist));
             }
         }
 
@@ -4328,6 +4356,107 @@ impl Greeter {
             caller_edges_src,
             Some(EdgesSource::ScipWithTier1Edges),
             "caller file's back-fill must register ScipWithTier1Edges"
+        );
+    }
+
+    // v2.3.2 Issue #2 / Bug D — Phase-3 fallback for tier-1-form caller URIs.
+    //
+    // When the tier-1 back-fill resolver's `translate` map AND the global
+    // `name_to_symbols` index both miss for a caller name, the back-fill
+    // preserves the raw tier-1 URI (`lip://local//<abs>#<name>`) as the
+    // caller key in `callee_to_callers`. That URI is NOT in `def_index`
+    // (def_index is populated only from SCIP occurrences). Phase 3 must
+    // therefore fall back to deriving the file URI by stripping the
+    // `#<name>` fragment, or the caller gets dropped and every ImpactItem
+    // degrades to the file-level fallback with a blank `symbol_uri`.
+    #[test]
+    fn blast_radius_phase3_fallback_for_tier1_caller_uri() {
+        use crate::schema::{OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let caller_path = dir.path().join("caller.rs");
+        let target_path = dir.path().join("target.rs");
+        // `orphan` is picked up by the tier-1 extractor but deliberately
+        // omitted from the caller file's SCIP symbols below, so the back-fill
+        // resolver for the caller side must fall back to the raw tier-1 URI.
+        std::fs::write(&caller_path, "fn orphan() { target(); }\n").unwrap();
+        std::fs::write(&target_path, "pub fn target() {}\n").unwrap();
+        let caller_abs = caller_path.to_string_lossy();
+        let target_abs = target_path.to_string_lossy();
+        let caller_uri = format!("lip://local//{}", caller_abs.trim_start_matches('/'));
+        let target_uri = format!("lip://local//{}", target_abs.trim_start_matches('/'));
+        // SCIP descriptor form for target — matches what scip-go/scip-clang emit.
+        let sym_target = format!("{target_uri}#target()");
+        // The raw tier-1 URI that the back-fill will keep for the caller
+        // because `orphan` is neither in caller's display_name set nor in
+        // `name_to_symbols` from any other file.
+        let tier1_caller_sym = format!("{caller_uri}#orphan");
+
+        let target_syms = vec![OwnedSymbolInfo {
+            uri: sym_target.clone(),
+            kind: SymbolKind::Function,
+            display_name: "target".to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        }];
+        let target_occs = vec![OwnedOccurrence {
+            symbol_uri: sym_target.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 7,
+                end_line: 0,
+                end_char: 13,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        }];
+
+        let mut db = LipDatabase::new();
+        db.upsert_file_precomputed(
+            target_uri.clone(),
+            "rust".to_owned(),
+            "t1".to_owned(),
+            target_syms,
+            target_occs,
+            vec![],
+        );
+        // Caller imported with NO SCIP symbols — forces the back-fill
+        // resolver to miss for `orphan` and keep the raw tier-1 URI.
+        db.upsert_file_precomputed(
+            caller_uri.clone(),
+            "rust".to_owned(),
+            "c1".to_owned(),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let result = db.blast_radius_for(&sym_target);
+        let all_items: Vec<_> = result
+            .direct_items
+            .iter()
+            .chain(result.transitive_items.iter())
+            .collect();
+
+        // Option (b) fallback: the tier-1 caller URI survives Phase 3 and
+        // is emitted as a symbol-level ImpactItem, not a file-level blank.
+        assert!(
+            all_items
+                .iter()
+                .any(|i| i.symbol_uri == tier1_caller_sym && i.file_uri == caller_uri),
+            "Phase 3 must fall back to stripping `#<name>` when def_index misses \
+             for a tier-1-form caller URI; got items: {:?}",
+            all_items
+        );
+        assert!(
+            all_items.iter().all(|i| !i.symbol_uri.is_empty()),
+            "no ImpactItem should carry a blank symbol_uri under the option-(b) \
+             fallback; got items: {:?}",
+            all_items
         );
     }
 

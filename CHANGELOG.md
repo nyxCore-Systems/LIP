@@ -8,7 +8,7 @@ All notable changes to this project are documented here.
 
 ## [2.3.2] — 2026-04-24
 
-**CKB testdrive follow-up.** Five correctness fixes discovered after v2.3.1 shipped and CKB began consuming `EnrichedBlastRadius` end-to-end. `protocol_version` stays at `2`; the only schema change moves an existing field between structurally-nested records and is wire-compatible via `#[serde(flatten)]`.
+**CKB testdrive follow-up.** Six correctness fixes discovered after v2.3.1 shipped and CKB began consuming `EnrichedBlastRadius` end-to-end. `protocol_version` stays at `2`; the only schema change moves an existing field between structurally-nested records and is wire-compatible via `#[serde(flatten)]`.
 
 ### Changed
 
@@ -23,6 +23,8 @@ All notable changes to this project are documented here.
 - **Double `lip://local/` prefix in `callee_to_callers` keys.** `SymbolExtractor::lip_uri` stripped the `file://` scheme but not an existing `lip://local/` prefix. When `upsert_file_precomputed`'s tier-1 back-fill replayed the tree-sitter extractor against a file imported with its canonical key (`lip://local//<abs>/<rel>`), every emitted edge URI was double-prefixed (`lip://local/lip://local//<abs>/<rel>#name`), making URI-exact BFS lookups impossible in `blast_radius_for` Phase 2. Fixed by detecting the `lip://local/` prefix and appending `#<name>` directly; the `file://` / bare-path branch is unchanged for tier-1 callers that pass raw paths. Confirmed via `LIP_DEBUG_EDGES=1` diagnostic trace from a CKB testdrive.
 
 - **SCIP-descriptor / tier-1-identifier name-fragment mismatch in `callee_name_to_callers`.** Tier-1 extractor indexes plain identifiers (`SearchSymbols`); SCIP descriptors carry suffix sigils (`SearchSymbols().`, `MyField.`, `Foo:`). Phase-2 BFS in `blast_radius_for` did `extract_name(callee)` without stripping the sigils, so cross-provider lookups always missed even when both providers had indexed the same function. Added `normalize_callee_name(fragment)` — truncates at the first `(`, then trims trailing non-identifier chars — and applied it at all four `callee_name_to_callers` insert sites plus the BFS lookup site, so SCIP and tier-1 callees now share keys. Unit test `normalize_callee_name_strips_scip_descriptor_suffixes` covers the six canonical SCIP descriptor shapes.
+
+- **Blank `symbol_uri` when tier-1 back-fill preserves a raw caller URI.** After the back-fill resolver falls back to `edge.from_uri` (both `translate` and `name_to_symbols` miss for the caller name — e.g. a caller function not captured as a SCIP `SymbolInformation`), `callee_to_callers` stores the raw tier-1 URI `lip://local//<abs>#<name>`. `def_index` was never populated for that URI (it only records SCIP occurrences), so Phase 3 of `blast_radius_for` skipped every such caller and Phase 4 fell through to the file-level fallback — producing 100 % blank `symbol_uri` in the CKB testdrive against real projects. Phase 3 now derives the file URI by stripping the `#<name>` fragment when `def_index` misses and the caller URI has the `lip://local/` scheme, using the caller URI verbatim as `symbol_uri`. No double-indexing required. Regression test `blast_radius_phase3_fallback_for_tier1_caller_uri` imports a caller file with no SCIP symbols (forcing the resolver miss) against an on-disk source whose tier-1 edge walks to a SCIP-indexed target, then asserts the `ImpactItem` carries the full tier-1 caller URI rather than a blank.
 
 ### Added
 
