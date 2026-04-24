@@ -119,6 +119,40 @@ pub struct OutgoingCallEdge {
     pub to_uri: String,
 }
 
+/// Static forward-impact result for `QueryOutgoingImpact` (v2.3.3).
+///
+/// Symmetric to [`BlastRadiusResult`] — runs a forward BFS over
+/// `caller_to_callees` starting at `target_uri`, groups callees by
+/// distance (direct = 1, transitive >= 2), and surfaces the same
+/// [`EdgesSource`] provenance the incoming-direction query carries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutgoingImpactStatic {
+    /// Symbol URI the forward BFS started from.
+    pub target_uri: String,
+    /// Direct callees (distance = 1).
+    pub direct_items: Vec<ImpactItem>,
+    /// Transitive callees (distance >= 2).
+    pub transitive_items: Vec<ImpactItem>,
+    /// Call-edge provenance for the *target's defining file*. `None`
+    /// when the daemon has no edges recorded for that file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_source: Option<EdgesSource>,
+    /// `true` when BFS hit the depth or node cap.
+    pub truncated: bool,
+}
+
+/// Forward-impact result with optional semantic enrichment (v2.3.3).
+/// Symmetric envelope to [`EnrichedBlastRadius`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedOutgoingImpact {
+    #[serde(flatten)]
+    pub static_result: OutgoingImpactStatic,
+    /// Callees/files surfaced via embedding similarity to the target.
+    /// `source: Static | Semantic | Both` marks overlap with the static
+    /// call graph the same way [`EnrichedBlastRadius`] does.
+    pub semantic_items: Vec<SemanticImpactItem>,
+}
+
 /// How the client's query matched a workspace symbol's display name (v2.3 #5).
 /// Discriminator only — not a ranking signal; the numeric `score` on
 /// [`RankedSymbol`] is what callers sort by.
@@ -322,6 +356,12 @@ pub enum ServerMessage {
     OutgoingCallsResult {
         edges: Vec<OutgoingCallEdge>,
         truncated: bool,
+    },
+    /// Response to [`ClientMessage::QueryOutgoingImpact`] (v2.3.3).
+    /// `result` is `None` when the symbol's defining file is not indexed.
+    OutgoingImpactResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<EnrichedOutgoingImpact>,
     },
     WorkspaceSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
@@ -868,6 +908,22 @@ pub enum ClientMessage {
         /// to bound response size on pathological graphs.
         depth: u32,
     },
+    /// Forward-direction symbol impact with optional semantic enrichment
+    /// (v2.3.3). Symmetric to [`ClientMessage::QueryBlastRadiusSymbol`] —
+    /// same envelope shape, same threshold semantics, same `edges_source`
+    /// provenance. Walks `caller_to_callees` instead of `callee_to_callers`.
+    QueryOutgoingImpact {
+        symbol_uri: String,
+        /// BFS depth. `None` or values outside [1,8] clamp to 8 (the safety
+        /// ceiling). Clients pass smaller depths to bound response size in
+        /// latency-sensitive workflows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+        /// Cosine-similarity threshold for semantic enrichment. `None`
+        /// skips enrichment entirely. Matches `QueryBlastRadiusSymbol`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_score: Option<f32>,
+    },
     QueryWorkspaceSymbols {
         query: String,
         limit: Option<usize>,
@@ -1377,6 +1433,7 @@ impl ClientMessage {
             "query_blast_radius_batch",
             "query_blast_radius_symbol",
             "query_outgoing_calls",
+            "query_outgoing_impact",
             "query_workspace_symbols",
             "query_document_symbols",
             "query_dead_symbols",
@@ -1454,6 +1511,7 @@ impl ClientMessage {
             ClientMessage::QueryBlastRadiusBatch { .. } => "query_blast_radius_batch",
             ClientMessage::QueryBlastRadiusSymbol { .. } => "query_blast_radius_symbol",
             ClientMessage::QueryOutgoingCalls { .. } => "query_outgoing_calls",
+            ClientMessage::QueryOutgoingImpact { .. } => "query_outgoing_impact",
             ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
             ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
             ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
@@ -1803,6 +1861,76 @@ mod tests {
         assert_eq!(uri, "file:///src/lib.rs");
     }
 
+    // ── v2.3.3 round-trip tests ───────────────────────────────────────
+    #[test]
+    fn query_outgoing_impact_round_trips() {
+        let msg = ClientMessage::QueryOutgoingImpact {
+            symbol_uri: "lip://local/src/lib.rs#foo".into(),
+            depth: Some(3),
+            min_score: Some(0.7),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryOutgoingImpact {
+            symbol_uri,
+            depth,
+            min_score,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(symbol_uri, "lip://local/src/lib.rs#foo");
+        assert_eq!(depth, Some(3));
+        assert_eq!(min_score, Some(0.7));
+    }
+
+    #[test]
+    fn query_outgoing_impact_is_batchable() {
+        assert!(ClientMessage::QueryOutgoingImpact {
+            symbol_uri: String::new(),
+            depth: None,
+            min_score: None,
+        }
+        .is_batchable());
+    }
+
+    #[test]
+    fn outgoing_impact_result_round_trips() {
+        let msg = ServerMessage::OutgoingImpactResult {
+            result: Some(EnrichedOutgoingImpact {
+                static_result: OutgoingImpactStatic {
+                    target_uri: "lip://local//abs/lib.rs#foo".into(),
+                    direct_items: vec![ImpactItem {
+                        file_uri: "lip://local//abs/callee.rs".into(),
+                        symbol_uri: "lip://local//abs/callee.rs#bar".into(),
+                        distance: 1,
+                        confidence: ImpactItem::confidence_at(1),
+                    }],
+                    transitive_items: vec![],
+                    edges_source: Some(EdgesSource::ScipWithTier1Edges),
+                    truncated: false,
+                },
+                semantic_items: vec![SemanticImpactItem {
+                    file_uri: "lip://local//abs/other.rs".into(),
+                    symbol_uri: "lip://local//abs/other.rs#baz".into(),
+                    similarity: 0.82,
+                    source: ImpactSource::Semantic,
+                }],
+            }),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        let rt: ServerMessage = serde_json::from_str(&json).expect("deserialise");
+        let ServerMessage::OutgoingImpactResult { result: Some(r) } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.static_result.direct_items.len(), 1);
+        assert_eq!(
+            r.static_result.edges_source,
+            Some(EdgesSource::ScipWithTier1Edges)
+        );
+        assert_eq!(r.semantic_items.len(), 1);
+        assert_eq!(r.semantic_items[0].source, ImpactSource::Semantic);
+    }
+
     // ── v2.3.1 round-trip tests ───────────────────────────────────────
     #[test]
     fn register_project_root_round_trips() {
@@ -1966,6 +2094,11 @@ mod tests {
             ClientMessage::QueryOutgoingCalls {
                 symbol_uri: String::new(),
                 depth: 1,
+            },
+            ClientMessage::QueryOutgoingImpact {
+                symbol_uri: String::new(),
+                depth: None,
+                min_score: None,
             },
             ClientMessage::QueryWorkspaceSymbols {
                 query: String::new(),

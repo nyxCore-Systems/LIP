@@ -6,6 +6,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-04-24
+
+**Outgoing-impact symmetry.** Adds a single additive RPC so CKB can query the forward direction of the call graph with the same enriched envelope and provenance gating that `QueryBlastRadiusSymbol` already provides for the reverse direction. `protocol_version` stays at `2`; pre-v2.3.3 daemons reply `UnknownMessage`.
+
+### Added
+
+- **`QueryOutgoingImpact { symbol_uri, depth?, min_score? }` → `OutgoingImpactResult { result: Option<EnrichedOutgoingImpact> }`** — forward-direction twin of `QueryBlastRadiusSymbol`. BFS walks `caller_to_callees` starting from `symbol_uri`, splits direct vs. transitive hops, and wraps the static result in an envelope flattened with `#[serde(flatten)] static_result: OutgoingImpactStatic` so `edges_source` lives on the inner struct (matching the v2.3.2 shape for blast radius). `depth` is clamped to `1..=8` with a default of 8; `NODE_LIMIT=200` bounds the BFS frontier and trips `truncated: true` on overflow. Semantic enrichment reuses `SemanticImpactItem { source: Static | Semantic | Both }`: symbol-level embedding is preferred, with file-level embedding as the fallback seed, and static-hit files are tagged `Both` when their URI also appears in the nearest-embedding set. The Bug-D-style `#<name>`-strip fallback from v2.3.2 Phase 3 is applied symmetrically on the callee side, so tier-1 URIs with no `def_index` entry still resolve to their file URI instead of producing blank `symbol_uri`. `edges_source: Option<EdgesSource>` on `OutgoingImpactStatic` mirrors blast radius so CKB can apply the same `EdgesSourceEmpty → skip fold` provenance gate. Advertised as `query_outgoing_impact` in `HandshakeResult.supported_messages`; round-trip tests `query_outgoing_impact_round_trips`, `query_outgoing_impact_is_batchable`, `outgoing_impact_result_round_trips` cover the wire shape, and db-level tests `outgoing_impact_direct_and_transitive` + `outgoing_impact_phase3_fallback_for_tier1_callee_uri` cover BFS correctness and the Phase-3 fallback.
+
+---
+
 ## [2.3.2] — 2026-04-24
 
 **CKB testdrive follow-up.** Six correctness fixes discovered after v2.3.1 shipped and CKB began consuming `EnrichedBlastRadius` end-to-end. `protocol_version` stays at `2`; the only schema change moves an existing field between structurally-nested records and is wire-compatible via `#[serde(flatten)]`.

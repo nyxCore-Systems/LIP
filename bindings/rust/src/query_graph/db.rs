@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::indexer::{language::Language, Tier1Indexer};
 use crate::query_graph::types::{
-    ApiSurface, BlastRadiusResult, EdgesSource, EnrichedBlastRadius, ImpactItem, ImpactSource,
-    RiskLevel, SemanticImpactItem, SimilarSymbol,
+    ApiSurface, BlastRadiusResult, EdgesSource, EnrichedBlastRadius, EnrichedOutgoingImpact,
+    ImpactItem, ImpactSource, OutgoingImpactStatic, RiskLevel, SemanticImpactItem, SimilarSymbol,
 };
 use crate::schema::EdgeKind;
 use crate::schema::{
@@ -1917,6 +1917,219 @@ impl LipDatabase {
         }
 
         (edges, truncated)
+    }
+
+    /// Forward-direction symbol impact with optional semantic enrichment (v2.3.3).
+    ///
+    /// Symmetric to [`Self::blast_radius_for_symbol`]. Runs a forward BFS
+    /// over `caller_to_callees` starting at `symbol_uri`, groups callees
+    /// by distance (direct = 1, transitive >= 2), and surfaces the same
+    /// [`EdgesSource`] provenance as the incoming-direction query.
+    ///
+    /// `depth` clamps to `[1, 8]`; `None` defaults to 8. `min_score` gates
+    /// semantic enrichment (embedding NN on the target's embedding). The
+    /// same tier-1-URI fallback used in Phase 3 of `blast_radius_for`
+    /// (strip `#<name>` when `def_index` misses) applies here so callees
+    /// emitted by the Tier-1 back-fill resolve to `ImpactItem` rows with
+    /// a non-empty `symbol_uri`.
+    ///
+    /// Returns `None` when the symbol has no known defining file.
+    pub fn outgoing_impact_for(
+        &mut self,
+        symbol_uri: &str,
+        depth: Option<u32>,
+        min_score: Option<f32>,
+    ) -> Option<EnrichedOutgoingImpact> {
+        const NODE_LIMIT: usize = 200;
+        let depth = depth.unwrap_or(8).clamp(1, 8);
+
+        let canon_symbol = self.canonicalize_uri(symbol_uri);
+        let symbol_uri = canon_symbol.as_str();
+
+        // Resolve the symbol's defining file. Fail closed if we can't —
+        // downstream enrichment needs it, and the caller can't distinguish
+        // "zero callees" from "unknown symbol" without this signal.
+        let file_uri = self.def_index.get(symbol_uri).map(|(f, _)| f.clone())?;
+        if !self.file_inputs.contains_key(file_uri.as_str()) {
+            return None;
+        }
+        let threshold = min_score.unwrap_or(0.6);
+
+        // ── Forward BFS over caller_to_callees ───────────────────────────
+        let mut callee_distance: HashMap<String, u32> = HashMap::new();
+        let mut truncated = false;
+        {
+            let mut frontier: Vec<String> = vec![symbol_uri.to_owned()];
+            let mut visited: HashSet<String> = HashSet::new();
+            visited.insert(symbol_uri.to_owned());
+
+            'bfs: for hop in 1..=depth {
+                let mut next: Vec<String> = Vec::new();
+                for caller in &frontier {
+                    let Some(callees) = self.caller_to_callees.get(caller) else {
+                        continue;
+                    };
+                    for callee in callees {
+                        if callee == symbol_uri {
+                            continue; // skip self-cycles back to the seed
+                        }
+                        if callee_distance.len() > NODE_LIMIT {
+                            truncated = true;
+                            break 'bfs;
+                        }
+                        let prev = callee_distance.get(callee).copied().unwrap_or(u32::MAX);
+                        if hop < prev {
+                            callee_distance.insert(callee.clone(), hop);
+                        }
+                        if visited.insert(callee.clone()) {
+                            next.push(callee.clone());
+                        }
+                    }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                frontier = next;
+            }
+        }
+
+        // ── Map each callee to its defining file ─────────────────────────
+        //
+        // Mirrors Phase 3 of `blast_radius_for`: prefer `def_index`, fall
+        // back to stripping `#<name>` from a `lip://local/` URI when the
+        // tier-1 back-fill kept a raw caller/callee URI that was never
+        // registered in `def_index` (v2.3.2 Bug D, symmetric direction).
+        let mut direct_items: Vec<ImpactItem> = Vec::new();
+        let mut transitive_items: Vec<ImpactItem> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (callee_sym, &dist) in &callee_distance {
+            let resolved_file = self
+                .def_index
+                .get(callee_sym)
+                .map(|(f, _)| f.clone())
+                .or_else(|| {
+                    if callee_sym.starts_with("lip://local/") {
+                        let hash_idx = callee_sym.rfind('#')?;
+                        let candidate = &callee_sym[..hash_idx];
+                        if self.file_inputs.contains_key(candidate) {
+                            Some(candidate.to_owned())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+            let Some(callee_file) = resolved_file else {
+                continue; // unresolved external symbol — drop rather than emit blank
+            };
+            if !seen.insert((callee_file.clone(), callee_sym.clone())) {
+                continue;
+            }
+            let item = ImpactItem {
+                file_uri: callee_file,
+                symbol_uri: callee_sym.clone(),
+                distance: dist,
+                confidence: ImpactItem::confidence_at(dist),
+            };
+            if dist == 1 {
+                direct_items.push(item);
+            } else {
+                transitive_items.push(item);
+            }
+        }
+
+        // Deterministic ordering.
+        direct_items.sort_by(|a, b| {
+            a.file_uri
+                .cmp(&b.file_uri)
+                .then(a.symbol_uri.cmp(&b.symbol_uri))
+        });
+        transitive_items.sort_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then(a.file_uri.cmp(&b.file_uri))
+                .then(a.symbol_uri.cmp(&b.symbol_uri))
+        });
+
+        let edges_source = self.file_edges_source.get(&file_uri).copied();
+
+        let static_result = OutgoingImpactStatic {
+            target_uri: symbol_uri.to_owned(),
+            direct_items,
+            transitive_items,
+            edges_source,
+            truncated,
+        };
+
+        // ── Semantic enrichment ──────────────────────────────────────────
+        //
+        // Same seed as `blast_radius_for_symbol`: the target's own
+        // embedding. Per-symbol preferred, file-level fallback. The
+        // `source` tagging (`Static | Semantic | Both`) references the set
+        // of *callee files* we already reached statically, so a semantic
+        // hit already confirmed by the call graph flips to `Both`.
+        let mut semantic_items: Vec<SemanticImpactItem> = Vec::new();
+        if min_score.is_some() {
+            let static_files: HashSet<String> = static_result
+                .direct_items
+                .iter()
+                .chain(static_result.transitive_items.iter())
+                .map(|i| i.file_uri.clone())
+                .collect();
+
+            if let Some(sym_embedding) = self.symbol_embeddings.get(symbol_uri).cloned() {
+                let neighbours =
+                    self.nearest_symbol_by_vector(&sym_embedding, 20, Some(symbol_uri), None);
+                for n in neighbours {
+                    if n.score < threshold {
+                        continue;
+                    }
+                    let hit_file = self
+                        .def_index
+                        .get(&n.uri)
+                        .map(|(f, _)| f.clone())
+                        .unwrap_or_else(|| n.uri.clone());
+                    let source = if static_files.contains(&hit_file) {
+                        ImpactSource::Both
+                    } else {
+                        ImpactSource::Semantic
+                    };
+                    semantic_items.push(SemanticImpactItem {
+                        file_uri: hit_file,
+                        symbol_uri: n.uri,
+                        similarity: n.score,
+                        source,
+                    });
+                }
+            } else if let Some(file_embedding) = self.file_embeddings.get(&file_uri).cloned() {
+                let neighbours = self.nearest_by_vector(
+                    &file_embedding,
+                    20,
+                    Some(&file_uri),
+                    None,
+                    Some(threshold),
+                );
+                for neighbour in neighbours {
+                    let source = if static_files.contains(&neighbour.uri) {
+                        ImpactSource::Both
+                    } else {
+                        ImpactSource::Semantic
+                    };
+                    semantic_items.push(SemanticImpactItem {
+                        file_uri: neighbour.uri,
+                        symbol_uri: String::new(),
+                        similarity: neighbour.score,
+                        source,
+                    });
+                }
+            }
+        }
+
+        Some(EnrichedOutgoingImpact {
+            static_result,
+            semantic_items,
+        })
     }
 
     /// Find the symbol URI whose occurrence range contains `(line, col)` in `uri`.
@@ -4457,6 +4670,176 @@ impl Greeter {
             "no ImpactItem should carry a blank symbol_uri under the option-(b) \
              fallback; got items: {:?}",
             all_items
+        );
+    }
+
+    // v2.3.3 — QueryOutgoingImpact basic forward-BFS test. Two files with
+    // a single cross-file call chain; assert direct vs transitive split
+    // and that `edges_source` is surfaced from the target's file.
+    #[test]
+    fn outgoing_impact_direct_and_transitive() {
+        use crate::schema::{OwnedGraphEdge, OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let mut db = LipDatabase::new();
+        let root_uri = "lip://local//abs/root.rs".to_owned();
+        let mid_uri = "lip://local//abs/mid.rs".to_owned();
+        let leaf_uri = "lip://local//abs/leaf.rs".to_owned();
+        let sym_root = format!("{root_uri}#root");
+        let sym_mid = format!("{mid_uri}#mid");
+        let sym_leaf = format!("{leaf_uri}#leaf");
+
+        let defn_occ = |sym: &str, range: OwnedRange| OwnedOccurrence {
+            symbol_uri: sym.to_owned(),
+            range,
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+        let mk_sym = |uri: &str, name: &str| OwnedSymbolInfo {
+            uri: uri.to_owned(),
+            kind: SymbolKind::Function,
+            display_name: name.to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        };
+        let range = OwnedRange {
+            start_line: 0,
+            start_char: 0,
+            end_line: 0,
+            end_char: 1,
+        };
+        // root → mid → leaf
+        let root_edge = OwnedGraphEdge {
+            from_uri: sym_root.clone(),
+            to_uri: sym_mid.clone(),
+            kind: EdgeKind::Calls,
+            at_range: range.clone(),
+        };
+        let mid_edge = OwnedGraphEdge {
+            from_uri: sym_mid.clone(),
+            to_uri: sym_leaf.clone(),
+            kind: EdgeKind::Calls,
+            at_range: range.clone(),
+        };
+
+        db.upsert_file_precomputed(
+            leaf_uri.clone(),
+            "rust".to_owned(),
+            "l1".to_owned(),
+            vec![mk_sym(&sym_leaf, "leaf")],
+            vec![defn_occ(&sym_leaf, range.clone())],
+            vec![],
+        );
+        db.upsert_file_precomputed(
+            mid_uri.clone(),
+            "rust".to_owned(),
+            "m1".to_owned(),
+            vec![mk_sym(&sym_mid, "mid")],
+            vec![defn_occ(&sym_mid, range.clone())],
+            vec![mid_edge],
+        );
+        db.upsert_file_precomputed(
+            root_uri.clone(),
+            "rust".to_owned(),
+            "r1".to_owned(),
+            vec![mk_sym(&sym_root, "root")],
+            vec![defn_occ(&sym_root, range.clone())],
+            vec![root_edge],
+        );
+
+        let result = db
+            .outgoing_impact_for(&sym_root, Some(4), None)
+            .expect("root should resolve");
+
+        let direct: Vec<_> = result.static_result.direct_items.iter().collect();
+        let trans: Vec<_> = result.static_result.transitive_items.iter().collect();
+        assert_eq!(direct.len(), 1, "expected one direct callee (mid)");
+        assert_eq!(direct[0].symbol_uri, sym_mid);
+        assert_eq!(direct[0].distance, 1);
+        assert_eq!(trans.len(), 1, "expected one transitive callee (leaf)");
+        assert_eq!(trans[0].symbol_uri, sym_leaf);
+        assert_eq!(trans[0].distance, 2);
+        assert_eq!(
+            result.static_result.edges_source,
+            Some(EdgesSource::ScipOnly),
+            "edges_source should reflect root.rs (ScipOnly — pre-computed edges)"
+        );
+        assert!(result.semantic_items.is_empty(), "min_score=None → no enrichment");
+    }
+
+    // v2.3.3 — Bug-D-symmetric test: when the tier-1 back-fill keeps a
+    // callee in raw `lip://local//<abs>#<name>` form (resolver misses in
+    // both translate + name_to_symbols), outgoing_impact_for must strip
+    // the `#<name>` fragment to derive file_uri instead of dropping the
+    // callee entirely.
+    #[test]
+    fn outgoing_impact_phase3_fallback_for_tier1_callee_uri() {
+        use crate::schema::{OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let caller_path = dir.path().join("caller.rs");
+        // `orphan` is a free-standing callee name unknown to name_to_symbols,
+        // so the tier-1 back-fill resolver must fall through to the raw
+        // tier-1 URI `caller_uri#orphan` as the callee key.
+        std::fs::write(&caller_path, "fn entry() { orphan(); }\n").unwrap();
+        let caller_abs = caller_path.to_string_lossy();
+        let caller_uri = format!("lip://local//{}", caller_abs.trim_start_matches('/'));
+        let sym_entry = format!("{caller_uri}#entry()");
+        let tier1_callee = format!("{caller_uri}#orphan");
+
+        let caller_syms = vec![OwnedSymbolInfo {
+            uri: sym_entry.clone(),
+            kind: SymbolKind::Function,
+            display_name: "entry".to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        }];
+        let caller_occs = vec![OwnedOccurrence {
+            symbol_uri: sym_entry.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 3,
+                end_line: 0,
+                end_char: 8,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        }];
+
+        let mut db = LipDatabase::new();
+        // Caller: empty SCIP edges → tier-1 back-fill runs over on-disk
+        // source, keeps `orphan` as a raw tier-1 URI since resolver misses.
+        db.upsert_file_precomputed(
+            caller_uri.clone(),
+            "rust".to_owned(),
+            "c1".to_owned(),
+            caller_syms,
+            caller_occs,
+            vec![],
+        );
+
+        let result = db
+            .outgoing_impact_for(&sym_entry, Some(2), None)
+            .expect("caller entry symbol should resolve");
+        let direct = &result.static_result.direct_items;
+        assert!(
+            direct
+                .iter()
+                .any(|i| i.symbol_uri == tier1_callee && i.file_uri == caller_uri),
+            "tier-1-form callee must survive via #-strip fallback; got: {:?}",
+            direct
+        );
+        assert!(
+            direct.iter().all(|i| !i.symbol_uri.is_empty()),
+            "outgoing direct items must never carry blank symbol_uri; got: {:?}",
+            direct
         );
     }
 

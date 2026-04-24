@@ -469,6 +469,16 @@ impl Session {
                 ServerMessage::OutgoingCallsResult { edges, truncated }
             }
 
+            ClientMessage::QueryOutgoingImpact {
+                symbol_uri,
+                depth,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let result = db.outgoing_impact_for(&symbol_uri, depth, min_score);
+                ServerMessage::OutgoingImpactResult { result }
+            }
+
             ClientMessage::QueryWorkspaceSymbols {
                 query,
                 limit,
@@ -2084,6 +2094,15 @@ fn process_query_sync(
                 })
                 .collect();
             ok(ServerMessage::OutgoingCallsResult { edges, truncated })
+        }
+
+        ClientMessage::QueryOutgoingImpact {
+            symbol_uri,
+            depth,
+            min_score,
+        } => {
+            let result = db.outgoing_impact_for(&symbol_uri, depth, min_score);
+            ok(ServerMessage::OutgoingImpactResult { result })
         }
 
         ClientMessage::QueryWorkspaceSymbols {
