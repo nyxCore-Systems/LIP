@@ -303,7 +303,10 @@ mod tests {
 
     #[test]
     fn rust_signature_and_normalized() {
-        let syms = sym("pub fn add(x: i32, y: i32) -> i32 { x + y }", Language::Rust);
+        let syms = sym(
+            "pub fn add(x: i32, y: i32) -> i32 { x + y }",
+            Language::Rust,
+        );
         let s = find(&syms, "add");
         assert_eq!(
             s.signature.as_deref(),
@@ -919,7 +922,10 @@ mod tests {
     #[test]
     fn ts_exported_function_modifier() {
         use crate::schema::Visibility;
-        let syms = sym("export function send(x: number): void {}", Language::TypeScript);
+        let syms = sym(
+            "export function send(x: number): void {}",
+            Language::TypeScript,
+        );
         let s = find(&syms, "send");
         assert!(s.modifiers.iter().any(|m| m == "export"));
         assert_eq!(s.visibility, Some(Visibility::Public));
@@ -944,13 +950,13 @@ mod tests {
     #[test]
     fn go_func_visibility_from_name() {
         use crate::schema::Visibility;
-        let syms = sym("package p\nfunc Exported(x int) bool { return true }", Language::Go);
+        let syms = sym(
+            "package p\nfunc Exported(x int) bool { return true }",
+            Language::Go,
+        );
         let s = find(&syms, "Exported");
         assert_eq!(s.visibility, Some(Visibility::Public));
-        assert_eq!(
-            s.signature.as_deref(),
-            Some("func Exported(x int) bool")
-        );
+        assert_eq!(s.signature.as_deref(), Some("func Exported(x int) bool"));
     }
 
     #[test]
@@ -1041,9 +1047,7 @@ mod tests {
         // `obj.method()` — the property identifier is the callee.
         let src = "function demo(obj: any) { obj.method(); }";
         let occs_list = occs(src, Language::TypeScript);
-        let callee = occs_list
-            .iter()
-            .find(|o| o.symbol_uri.contains("#method"));
+        let callee = occs_list.iter().find(|o| o.symbol_uri.contains("#method"));
         if let Some(c) = callee {
             assert_eq!(
                 c.kind,

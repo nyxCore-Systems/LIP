@@ -293,7 +293,12 @@ impl DartBackend {
                 is_exported,
                 ..Default::default()
             };
-            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Dart);
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Dart,
+            );
             symbols.push(info);
         }
 

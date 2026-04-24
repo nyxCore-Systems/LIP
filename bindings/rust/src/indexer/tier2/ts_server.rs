@@ -289,7 +289,8 @@ impl TypeScriptBackend {
                 .as_deref()
                 .map(|s| s.starts_with("export"))
                 .unwrap_or(false);
-            let ts_lang = if uri.ends_with(".js") || uri.ends_with(".mjs") || uri.ends_with(".cjs") {
+            let ts_lang = if uri.ends_with(".js") || uri.ends_with(".mjs") || uri.ends_with(".cjs")
+            {
                 Language::JavaScript
             } else if uri.ends_with(".jsx") {
                 Language::JavaScriptReact

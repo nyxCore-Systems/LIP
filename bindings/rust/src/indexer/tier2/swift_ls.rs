@@ -249,7 +249,12 @@ impl SwiftBackend {
                 is_exported,
                 ..Default::default()
             };
-            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Swift);
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Swift,
+            );
             symbols.push(info);
         }
 

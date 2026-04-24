@@ -323,7 +323,12 @@ impl PythonBackend {
                 is_exported,
                 ..Default::default()
             };
-            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Python);
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Python,
+            );
             symbols.push(info);
         }
 

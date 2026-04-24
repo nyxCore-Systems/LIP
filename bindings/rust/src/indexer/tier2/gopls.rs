@@ -246,7 +246,12 @@ impl GoplsBackend {
                 is_exported,
                 ..Default::default()
             };
-            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Go);
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Go,
+            );
             symbols.push(info);
         }
 

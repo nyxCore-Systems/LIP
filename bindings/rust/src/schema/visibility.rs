@@ -18,9 +18,9 @@ use crate::schema::Visibility;
 pub fn infer(name: &str, modifiers: &[String], lang: Language) -> (Visibility, u8) {
     match lang {
         Language::Rust => infer_rust(modifiers),
-        Language::TypeScript
-        | Language::JavaScript
-        | Language::JavaScriptReact => infer_ts_js(modifiers),
+        Language::TypeScript | Language::JavaScript | Language::JavaScriptReact => {
+            infer_ts_js(modifiers)
+        }
         Language::Python => infer_python(name),
         Language::Dart => infer_dart(name),
         Language::Go => infer_go(name),
@@ -172,10 +172,7 @@ mod tests {
 
     #[test]
     fn rust_no_modifier_is_private() {
-        assert_eq!(
-            infer("foo", &[], Language::Rust),
-            (Visibility::Private, 50)
-        );
+        assert_eq!(infer("foo", &[], Language::Rust), (Visibility::Private, 50));
     }
 
     // TypeScript / JavaScript
@@ -264,18 +261,12 @@ mod tests {
     // Go
     #[test]
     fn go_capital_is_public() {
-        assert_eq!(
-            infer("Foo", &[], Language::Go),
-            (Visibility::Public, 80)
-        );
+        assert_eq!(infer("Foo", &[], Language::Go), (Visibility::Public, 80));
     }
 
     #[test]
     fn go_lowercase_is_private() {
-        assert_eq!(
-            infer("foo", &[], Language::Go),
-            (Visibility::Private, 80)
-        );
+        assert_eq!(infer("foo", &[], Language::Go), (Visibility::Private, 80));
     }
 
     // Kotlin
@@ -339,10 +330,7 @@ mod tests {
 
     #[test]
     fn c_no_modifier_is_public_lowconf() {
-        assert_eq!(
-            infer("foo", &[], Language::C),
-            (Visibility::Public, 50)
-        );
+        assert_eq!(infer("foo", &[], Language::C), (Visibility::Public, 50));
     }
 
     // Unknown

@@ -413,7 +413,12 @@ impl RustAnalyzerBackend {
                 is_exported,
                 ..Default::default()
             };
-            enrich_v23(&mut info, sig.as_deref(), sym.container.clone(), Language::Rust);
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Rust,
+            );
             symbols.push(info);
         }
 

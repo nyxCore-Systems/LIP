@@ -310,9 +310,9 @@ async fn daemon_restart_restores_journal() {
         send(
             &mut client,
             &ClientMessage::QueryWorkspaceSymbols {
-            kind_filter: None,
-            scope: None,
-            modifier_filter: None,
+                kind_filter: None,
+                scope: None,
+                modifier_filter: None,
                 query: "persisted".into(),
                 limit: Some(10),
             },
@@ -1292,11 +1292,13 @@ pub fn caller() {
     .await
     .expect("send workspace query");
     let callee_uri = match recv(&mut client).await.expect("recv workspace") {
-        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
-            .into_iter()
-            .find(|s| s.display_name == "callee")
-            .expect("expected 'callee' in workspace symbols")
-            .uri,
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
+            symbols
+                .into_iter()
+                .find(|s| s.display_name == "callee")
+                .expect("expected 'callee' in workspace symbols")
+                .uri
+        }
         other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
     };
 
@@ -1374,11 +1376,13 @@ async fn daemon_tier1_test_file_stamps_is_test() {
     .await
     .expect("send workspace query");
     let helper_uri = match recv(&mut client).await.expect("recv workspace") {
-        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
-            .into_iter()
-            .find(|s| s.display_name == "helper")
-            .expect("expected 'helper' in workspace symbols")
-            .uri,
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
+            symbols
+                .into_iter()
+                .find(|s| s.display_name == "helper")
+                .expect("expected 'helper' in workspace symbols")
+                .uri
+        }
         other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
     };
 
@@ -1472,11 +1476,13 @@ pub fn caller() {
     .await
     .expect("send workspace");
     let victim_uri = match recv(&mut client).await.expect("recv workspace") {
-        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
-            .into_iter()
-            .find(|s| s.display_name == "victim")
-            .expect("expected `victim` in workspace")
-            .uri,
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
+            symbols
+                .into_iter()
+                .find(|s| s.display_name == "victim")
+                .expect("expected `victim` in workspace")
+                .uri
+        }
         other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
     };
 
@@ -1499,7 +1505,11 @@ pub fn caller() {
     // The file that defines `victim` — the enrichment's anchor.
     assert_eq!(enriched.file_uri, a_uri);
     assert!(
-        enriched.static_result.affected_files.iter().any(|f| f == b_uri),
+        enriched
+            .static_result
+            .affected_files
+            .iter()
+            .any(|f| f == b_uri),
         "expected caller file {b_uri} in affected_files, got {:?}",
         enriched.static_result.affected_files
     );
@@ -1577,11 +1587,13 @@ fn c() {}
     .await
     .expect("send workspace");
     let a_uri = match recv(&mut client).await.expect("recv workspace") {
-        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
-            .into_iter()
-            .find(|s| s.display_name == "a")
-            .expect("expected `a` in workspace symbols")
-            .uri,
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
+            symbols
+                .into_iter()
+                .find(|s| s.display_name == "a")
+                .expect("expected `a` in workspace symbols")
+                .uri
+        }
         other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
     };
 
@@ -1601,11 +1613,15 @@ fn c() {}
     };
     assert!(!truncated, "chain is tiny; truncated must be false");
     assert!(
-        edges.iter().any(|e| e.from_uri == a_uri && e.to_uri.ends_with("#b")),
+        edges
+            .iter()
+            .any(|e| e.from_uri == a_uri && e.to_uri.ends_with("#b")),
         "expected A→B edge; got {edges:?}",
     );
     assert!(
-        edges.iter().any(|e| e.from_uri.ends_with("#b") && e.to_uri.ends_with("#c")),
+        edges
+            .iter()
+            .any(|e| e.from_uri.ends_with("#b") && e.to_uri.ends_with("#c")),
         "expected B→C edge at depth=2; got {edges:?}",
     );
 
@@ -1721,7 +1737,10 @@ pub async fn handle() {}
         .map(|(r, _)| r)
         .expect("expected Handler in ranked list");
     assert!(
-        matches!(exact.match_type, lip_core::query_graph::types::MatchType::Exact),
+        matches!(
+            exact.match_type,
+            lip_core::query_graph::types::MatchType::Exact
+        ),
         "Handler should be Exact match, got {:?}",
         exact.match_type,
     );
@@ -1733,7 +1752,10 @@ pub async fn handle() {}
         .map(|(r, _)| r)
         .expect("expected HandlerFactory in ranked list");
     assert!(
-        matches!(prefix.match_type, lip_core::query_graph::types::MatchType::Prefix),
+        matches!(
+            prefix.match_type,
+            lip_core::query_graph::types::MatchType::Prefix
+        ),
         "HandlerFactory should be Prefix match, got {:?}",
         prefix.match_type,
     );
@@ -2030,11 +2052,13 @@ async fn daemon_blast_radius_edges_source_tier1() {
     .await
     .unwrap();
     let target_uri = match recv(&mut client).await.unwrap() {
-        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => symbols
-            .into_iter()
-            .find(|s| s.display_name == "target")
-            .expect("target not in workspace")
-            .uri,
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
+            symbols
+                .into_iter()
+                .find(|s| s.display_name == "target")
+                .expect("target not in workspace")
+                .uri
+        }
         other => panic!("expected WorkspaceSymbolsResult, got {other:?}"),
     };
 

@@ -350,10 +350,7 @@ fn collect_verify_samples(deltas: &[OwnedDelta], max: usize) -> Vec<VerifySample
         .collect()
 }
 
-async fn run_verification(
-    stream: &mut UnixStream,
-    samples: &[VerifySample],
-) -> anyhow::Result<()> {
+async fn run_verification(stream: &mut UnixStream, samples: &[VerifySample]) -> anyhow::Result<()> {
     if samples.is_empty() {
         eprintln!("verify: no documents to sample");
         return Ok(());
@@ -402,16 +399,11 @@ async fn run_verification(
         match ws {
             ServerMessage::WorkspaceSymbolsResult { symbols, .. } if !symbols.is_empty() => {}
             ServerMessage::WorkspaceSymbolsResult { .. } => {
-                eprintln!(
-                    "verify: probe '{name}' missing in {}",
-                    sample.file_uri
-                );
+                eprintln!("verify: probe '{name}' missing in {}", sample.file_uri);
                 failures += 1;
             }
             other => {
-                eprintln!(
-                    "verify: unexpected reply to QueryWorkspaceSymbols({name}): {other:?}"
-                );
+                eprintln!("verify: unexpected reply to QueryWorkspaceSymbols({name}): {other:?}");
                 failures += 1;
             }
         }
@@ -427,10 +419,7 @@ async fn run_verification(
     Ok(())
 }
 
-async fn round_trip(
-    stream: &mut UnixStream,
-    msg: &ClientMessage,
-) -> anyhow::Result<ServerMessage> {
+async fn round_trip(stream: &mut UnixStream, msg: &ClientMessage) -> anyhow::Result<ServerMessage> {
     let body = serde_json::to_vec(msg)?;
     stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
     stream.write_all(&body).await?;
@@ -583,9 +572,7 @@ fn convert_symbol_info(
         (Some(v), Some(c as f32 / 100.0))
     };
 
-    let signature_normalized = signature
-        .as_deref()
-        .map(|s| normalize_signature(s, lang));
+    let signature_normalized = signature.as_deref().map(|s| normalize_signature(s, lang));
 
     let container_name = Some(sym.enclosing_symbol.clone())
         .filter(|s| !s.is_empty())
@@ -640,28 +627,83 @@ fn scip_language_to_lip(lang: &str) -> Language {
 fn parse_modifiers_from_signature(signature: &str, lang: Language) -> Vec<String> {
     let keywords: &[&str] = match lang {
         Language::Rust => &["pub", "const", "async", "unsafe", "extern", "static", "mut"],
-        Language::TypeScript
-        | Language::JavaScript
-        | Language::JavaScriptReact => &[
-            "export", "default", "async", "static", "readonly", "public", "private", "protected",
-            "abstract", "declare", "override",
+        Language::TypeScript | Language::JavaScript | Language::JavaScriptReact => &[
+            "export",
+            "default",
+            "async",
+            "static",
+            "readonly",
+            "public",
+            "private",
+            "protected",
+            "abstract",
+            "declare",
+            "override",
         ],
         Language::Dart => &[
-            "static", "abstract", "final", "const", "external", "factory", "late", "covariant",
+            "static",
+            "abstract",
+            "final",
+            "const",
+            "external",
+            "factory",
+            "late",
+            "covariant",
         ],
         Language::Kotlin => &[
-            "private", "protected", "internal", "public", "abstract", "final", "open", "override",
-            "suspend", "inline", "external", "data", "sealed", "companion", "lateinit", "const",
-            "operator", "infix", "tailrec",
+            "private",
+            "protected",
+            "internal",
+            "public",
+            "abstract",
+            "final",
+            "open",
+            "override",
+            "suspend",
+            "inline",
+            "external",
+            "data",
+            "sealed",
+            "companion",
+            "lateinit",
+            "const",
+            "operator",
+            "infix",
+            "tailrec",
         ],
         Language::Swift => &[
-            "private", "fileprivate", "internal", "public", "open", "static", "final", "override",
-            "mutating", "nonmutating", "required", "convenience", "lazy", "weak", "unowned",
+            "private",
+            "fileprivate",
+            "internal",
+            "public",
+            "open",
+            "static",
+            "final",
+            "override",
+            "mutating",
+            "nonmutating",
+            "required",
+            "convenience",
+            "lazy",
+            "weak",
+            "unowned",
             "dynamic",
         ],
         Language::C | Language::Cpp => &[
-            "static", "extern", "const", "virtual", "override", "explicit", "inline", "constexpr",
-            "private", "protected", "public", "friend", "mutable", "volatile",
+            "static",
+            "extern",
+            "const",
+            "virtual",
+            "override",
+            "explicit",
+            "inline",
+            "constexpr",
+            "private",
+            "protected",
+            "public",
+            "friend",
+            "mutable",
+            "volatile",
         ],
         // Python / Go / Unknown: prefix-parse not meaningful; rely on name rules.
         _ => &[],
@@ -1087,8 +1129,7 @@ mod tests {
             documentation: vec!["render(): void".to_owned()],
             relationships: vec![],
             kind: scip::Kind::KMethod as i32,
-            enclosing_symbol:
-                "scip-typescript npm react 18.2.0 src/App.ts`App#".to_owned(),
+            enclosing_symbol: "scip-typescript npm react 18.2.0 src/App.ts`App#".to_owned(),
         };
         let out = sym_with("typescript", proto);
         // Last descriptor segment of the enclosing symbol becomes container name.
@@ -1175,8 +1216,7 @@ mod tests {
                     documentation: vec!["pub fn bar()".to_owned()],
                     relationships: vec![],
                     kind: scip::Kind::KMethod as i32,
-                    enclosing_symbol:
-                        "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#".to_owned(),
+                    enclosing_symbol: "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#".to_owned(),
                 }],
             }],
             external_symbols: vec![],
@@ -1189,8 +1229,7 @@ mod tests {
         let doc = &decoded.documents[0];
         let sym = &doc.symbols[0];
         assert_eq!(
-            sym.enclosing_symbol,
-            "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#",
+            sym.enclosing_symbol, "rust-analyzer cargo mycrate 1.0 Mod/MyStruct#",
             "field 8 enclosing_symbol lost across prost encode/decode"
         );
 
@@ -1232,16 +1271,14 @@ mod tests {
 
     #[test]
     fn scip_write_wins_over_read_when_both_set() {
-        let bits =
-            scip::SymbolRole::WriteAccess as i32 | scip::SymbolRole::ReadAccess as i32;
+        let bits = scip::SymbolRole::WriteAccess as i32 | scip::SymbolRole::ReadAccess as i32;
         let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
         assert_eq!(o.kind, ReferenceKind::Write);
     }
 
     #[test]
     fn scip_test_bit_sets_is_test() {
-        let bits =
-            scip::SymbolRole::Test as i32 | scip::SymbolRole::ReadAccess as i32;
+        let bits = scip::SymbolRole::Test as i32 | scip::SymbolRole::ReadAccess as i32;
         let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
         assert!(o.is_test);
         assert_eq!(o.kind, ReferenceKind::Read);
@@ -1250,8 +1287,7 @@ mod tests {
     #[test]
     fn scip_definition_keeps_kind_unknown() {
         // SCIP does not set read/write on definitions; kind stays Unknown.
-        let bits =
-            scip::SymbolRole::Definition as i32 | scip::SymbolRole::WriteAccess as i32;
+        let bits = scip::SymbolRole::Definition as i32 | scip::SymbolRole::WriteAccess as i32;
         let o = convert_occurrence(&occ_with_roles(bits)).expect("occurrence converts");
         assert_eq!(o.role, Role::Definition);
         assert_eq!(o.kind, ReferenceKind::Unknown);
@@ -1269,8 +1305,14 @@ mod tests {
 
     #[test]
     fn strip_file_scheme_trims_scheme_and_trailing_slash() {
-        assert_eq!(strip_file_scheme("file:///Users/lisa/repo"), "/Users/lisa/repo");
-        assert_eq!(strip_file_scheme("file:///Users/lisa/repo/"), "/Users/lisa/repo");
+        assert_eq!(
+            strip_file_scheme("file:///Users/lisa/repo"),
+            "/Users/lisa/repo"
+        );
+        assert_eq!(
+            strip_file_scheme("file:///Users/lisa/repo/"),
+            "/Users/lisa/repo"
+        );
         // Non-file URLs are returned verbatim (minus trailing slash).
         assert_eq!(strip_file_scheme("/already/absolute"), "/already/absolute");
         assert_eq!(strip_file_scheme(""), "");

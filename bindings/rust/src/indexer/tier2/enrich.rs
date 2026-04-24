@@ -89,31 +89,92 @@ fn modifier_keywords(lang: Language) -> &'static [&'static str] {
         Language::Rust => &[
             "pub", "const", "async", "unsafe", "extern", "static", "mut", "default", "move",
         ],
-        Language::TypeScript
-        | Language::JavaScript
-        | Language::JavaScriptReact => &[
-            "export", "default", "async", "static", "readonly", "public", "private", "protected",
-            "abstract", "declare", "override", "const", "let", "var",
+        Language::TypeScript | Language::JavaScript | Language::JavaScriptReact => &[
+            "export",
+            "default",
+            "async",
+            "static",
+            "readonly",
+            "public",
+            "private",
+            "protected",
+            "abstract",
+            "declare",
+            "override",
+            "const",
+            "let",
+            "var",
         ],
         Language::Python => &["async", "def"],
         Language::Dart => &[
-            "static", "abstract", "final", "const", "external", "factory", "late", "covariant",
+            "static",
+            "abstract",
+            "final",
+            "const",
+            "external",
+            "factory",
+            "late",
+            "covariant",
             "async",
         ],
         Language::Go => &["func"],
         Language::Kotlin => &[
-            "private", "protected", "internal", "public", "abstract", "final", "open", "override",
-            "suspend", "inline", "external", "data", "sealed", "enum", "companion", "lateinit",
-            "const", "operator", "infix", "tailrec",
+            "private",
+            "protected",
+            "internal",
+            "public",
+            "abstract",
+            "final",
+            "open",
+            "override",
+            "suspend",
+            "inline",
+            "external",
+            "data",
+            "sealed",
+            "enum",
+            "companion",
+            "lateinit",
+            "const",
+            "operator",
+            "infix",
+            "tailrec",
         ],
         Language::Swift => &[
-            "private", "fileprivate", "internal", "public", "open", "static", "final", "override",
-            "mutating", "nonmutating", "class", "required", "convenience", "lazy", "weak",
-            "unowned", "dynamic",
+            "private",
+            "fileprivate",
+            "internal",
+            "public",
+            "open",
+            "static",
+            "final",
+            "override",
+            "mutating",
+            "nonmutating",
+            "class",
+            "required",
+            "convenience",
+            "lazy",
+            "weak",
+            "unowned",
+            "dynamic",
         ],
         Language::C | Language::Cpp => &[
-            "static", "extern", "const", "virtual", "override", "explicit", "inline", "constexpr",
-            "private", "protected", "public", "friend", "mutable", "volatile", "register",
+            "static",
+            "extern",
+            "const",
+            "virtual",
+            "override",
+            "explicit",
+            "inline",
+            "constexpr",
+            "private",
+            "protected",
+            "public",
+            "friend",
+            "mutable",
+            "volatile",
+            "register",
             "typedef",
         ],
         Language::Unknown => &[],
@@ -158,7 +219,10 @@ mod tests {
 
     #[test]
     fn ts_export_async() {
-        let mods = extract_modifiers("export async function foo(): Promise<T>", Language::TypeScript);
+        let mods = extract_modifiers(
+            "export async function foo(): Promise<T>",
+            Language::TypeScript,
+        );
         assert_eq!(mods, vec!["export", "async"]);
     }
 
@@ -188,7 +252,10 @@ mod tests {
         assert_eq!(s.visibility, Some(Visibility::Public));
         assert_eq!(s.visibility_confidence, Some(1.0));
         assert_eq!(s.modifiers, vec!["pub".to_owned()]);
-        assert_eq!(s.signature_normalized.as_deref(), Some("pub fn foo() -> i32"));
+        assert_eq!(
+            s.signature_normalized.as_deref(),
+            Some("pub fn foo() -> i32")
+        );
     }
 
     #[test]
@@ -217,21 +284,36 @@ mod tests {
     #[test]
     fn enrich_skips_empty_container() {
         let mut s = sym("foo");
-        enrich_v23(&mut s, Some("fn foo()"), Some(String::new()), Language::Rust);
+        enrich_v23(
+            &mut s,
+            Some("fn foo()"),
+            Some(String::new()),
+            Language::Rust,
+        );
         assert!(s.container_name.is_none());
     }
 
     #[test]
     fn enrich_python_name_convention() {
         let mut s = sym("_helper");
-        enrich_v23(&mut s, Some("def _helper() -> None"), None, Language::Python);
+        enrich_v23(
+            &mut s,
+            Some("def _helper() -> None"),
+            None,
+            Language::Python,
+        );
         assert_eq!(s.visibility, Some(Visibility::Private));
     }
 
     #[test]
     fn enrich_ts_no_modifier_is_low_conf_internal() {
         let mut s = sym("foo");
-        enrich_v23(&mut s, Some("function foo(): void"), None, Language::TypeScript);
+        enrich_v23(
+            &mut s,
+            Some("function foo(): void"),
+            None,
+            Language::TypeScript,
+        );
         assert_eq!(s.visibility, Some(Visibility::Internal));
         assert_eq!(s.visibility_confidence, Some(0.5));
     }

@@ -333,10 +333,7 @@ mod tests {
     fn nested_parens_in_fn_type_arg() {
         // Callback params inside generic arg: outer paren strip only
         // at depth 1; inner should still get name stripped.
-        let got = normalize_signature(
-            "fn foo(cb: fn(x: i32) -> bool) -> ()",
-            Language::Rust,
-        );
+        let got = normalize_signature("fn foo(cb: fn(x: i32) -> bool) -> ()", Language::Rust);
         // Inner `x:` is at paren depth 2, so NOT stripped by the current
         // depth-1-only rule. Record this limitation as the expected output.
         assert_eq!(got, "fn foo(_: fn(x: i32) -> bool) -> ()");

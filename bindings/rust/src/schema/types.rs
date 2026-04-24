@@ -624,7 +624,10 @@ mod tests {
             is_test: false,
         };
         let json = serde_json::to_string(&occ).unwrap();
-        assert!(!json.contains("\"kind\""), "kind:unknown must be skipped: {json}");
+        assert!(
+            !json.contains("\"kind\""),
+            "kind:unknown must be skipped: {json}"
+        );
         assert!(
             !json.contains("\"is_test\""),
             "is_test:false must be skipped: {json}"

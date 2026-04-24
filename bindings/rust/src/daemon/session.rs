@@ -190,8 +190,7 @@ impl Session {
                             if notification.source_session == Some(self.session_id) {
                                 continue;
                             }
-                            if let Err(e) =
-                                write_message(&mut stream, &notification.message).await
+                            if let Err(e) = write_message(&mut stream, &notification.message).await
                             {
                                 error!("write error (notification): {e}");
                                 break;
@@ -462,9 +461,12 @@ impl Session {
                 let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
                 let edges = pairs
                     .into_iter()
-                    .map(|(from_uri, to_uri)| {
-                        crate::query_graph::types::OutgoingCallEdge { from_uri, to_uri }
-                    })
+                    .map(
+                        |(from_uri, to_uri)| crate::query_graph::types::OutgoingCallEdge {
+                            from_uri,
+                            to_uri,
+                        },
+                    )
                     .collect();
                 ServerMessage::OutgoingCallsResult { edges, truncated }
             }
@@ -2069,8 +2071,7 @@ fn process_query_sync(
             changed_file_uris,
             min_score,
         } => {
-            let (results, not_indexed_uris) =
-                db.blast_radius_batch(&changed_file_uris, min_score);
+            let (results, not_indexed_uris) = db.blast_radius_batch(&changed_file_uris, min_score);
             ok(ServerMessage::BlastRadiusBatchResult {
                 results,
                 not_indexed_uris,
@@ -2089,9 +2090,12 @@ fn process_query_sync(
             let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
             let edges = pairs
                 .into_iter()
-                .map(|(from_uri, to_uri)| {
-                    crate::query_graph::types::OutgoingCallEdge { from_uri, to_uri }
-                })
+                .map(
+                    |(from_uri, to_uri)| crate::query_graph::types::OutgoingCallEdge {
+                        from_uri,
+                        to_uri,
+                    },
+                )
                 .collect();
             ok(ServerMessage::OutgoingCallsResult { edges, truncated })
         }

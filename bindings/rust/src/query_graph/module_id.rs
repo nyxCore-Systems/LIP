@@ -64,7 +64,7 @@ fn from_slice_uri(uri: &str) -> Option<String> {
     let after_manager = &rest[first_slash + 1..];
     // Package extends to the first `@` (version marker) or `/` (path) — whichever comes first.
     let pkg_end = after_manager
-        .find(|c: char| c == '@' || c == '/')
+        .find(['@', '/'])
         .unwrap_or(after_manager.len());
     let package = &after_manager[..pkg_end];
     if manager.is_empty() || package.is_empty() {
@@ -385,13 +385,18 @@ mod tests {
     #[test]
     fn slice_uri_rejects_local_scheme() {
         assert_eq!(from_slice_uri("lip://local/src/main.rs"), None);
-        assert_eq!(from_slice_uri("lip://local//Users/a/proj/src/main.rs"), None);
+        assert_eq!(
+            from_slice_uri("lip://local//Users/a/proj/src/main.rs"),
+            None
+        );
     }
 
     #[test]
     fn scip_symbol_extracts_manager_and_name() {
         assert_eq!(
-            from_scip_symbol("scip-go gomod github.com/foo/bar v1.0 internal/query/SearchSymbols()."),
+            from_scip_symbol(
+                "scip-go gomod github.com/foo/bar v1.0 internal/query/SearchSymbols()."
+            ),
             Some("gomod/github.com/foo/bar".to_owned())
         );
         assert_eq!(
@@ -442,10 +447,7 @@ members = ["a", "b"]
     #[test]
     fn parse_go_mod_extracts_module_path() {
         let gomod = "module github.com/foo/bar\n\ngo 1.21\n";
-        assert_eq!(
-            parse_go_mod(gomod),
-            Some("github.com/foo/bar".to_owned())
-        );
+        assert_eq!(parse_go_mod(gomod), Some("github.com/foo/bar".to_owned()));
     }
 
     #[test]
@@ -513,11 +515,7 @@ name = "poetry-pkg"
     #[test]
     fn resolve_prefers_slice_uri_over_scip() {
         let scip_sym = sym("scip-go gomod github.com/foo/bar v1.0 pkg/Baz().");
-        let id = resolve_module_id(
-            "lip://cargo/serde@1.0.0/src/lib.rs",
-            "rust",
-            &[scip_sym],
-        );
+        let id = resolve_module_id("lip://cargo/serde@1.0.0/src/lib.rs", "rust", &[scip_sym]);
         assert_eq!(id, Some("cargo/serde".to_owned()));
     }
 

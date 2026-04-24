@@ -132,9 +132,7 @@ impl<'a> SymbolExtractor<'a> {
             (self.language, pk),
             (Language::Rust, "call_expression" | "macro_invocation")
                 | (
-                    Language::TypeScript
-                        | Language::JavaScript
-                        | Language::JavaScriptReact,
+                    Language::TypeScript | Language::JavaScript | Language::JavaScriptReact,
                     "call_expression" | "new_expression"
                 )
                 | (Language::Python, "call")
@@ -266,8 +264,9 @@ impl<'a> SymbolExtractor<'a> {
             let name = self.node_text(&name_node);
             if !name.is_empty() {
                 let modifiers = self.rust_modifiers(&node);
-                let is_exported =
-                    modifiers.iter().any(|m| m == "pub" || m.starts_with("pub("));
+                let is_exported = modifiers
+                    .iter()
+                    .any(|m| m == "pub" || m.starts_with("pub("));
                 let (vis, vc) = visibility::infer(name, &modifiers, self.language);
                 let container = self.rust_container(&node);
                 let signature = self.rust_signature(&node);
@@ -364,8 +363,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -559,8 +557,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -681,8 +678,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         // Strip the trailing `:` that separates signature from body.
         let trimmed = text.trim().trim_end_matches(':').trim_end();
         Some(trimmed.to_owned())
@@ -815,7 +811,14 @@ impl<'a> SymbolExtractor<'a> {
     /// Collect Dart modifier keywords from a declaration node's direct children.
     fn dart_modifiers(&self, node: &Node) -> Vec<String> {
         const KEYWORDS: &[&str] = &[
-            "static", "abstract", "final", "const", "external", "factory", "late", "covariant",
+            "static",
+            "abstract",
+            "final",
+            "const",
+            "external",
+            "factory",
+            "late",
+            "covariant",
         ];
         collect_matching_keywords(*node, KEYWORDS)
     }
@@ -835,7 +838,7 @@ impl<'a> SymbolExtractor<'a> {
                         .filter_map(|i| n.named_child(i))
                         .find(|c| c.kind() == "identifier")
                         .map(|c| self.node_text(&c).trim().to_owned());
-                    if name.as_deref().map_or(false, |s| !s.is_empty()) {
+                    if name.as_deref().is_some_and(|s| !s.is_empty()) {
                         return name;
                     }
                 }
@@ -851,8 +854,7 @@ impl<'a> SymbolExtractor<'a> {
         let body = node
             .child_by_field_name("body")
             .or_else(|| node.child_by_field_name("function_body"))?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -1107,7 +1109,9 @@ impl<'a> SymbolExtractor<'a> {
                     return self.c_declarator_name(child);
                 }
                 for i in 0..node.named_child_count() {
-                    let Some(c) = node.named_child(i) else { continue };
+                    let Some(c) = node.named_child(i) else {
+                        continue;
+                    };
                     if matches!(
                         c.kind(),
                         "identifier"
@@ -1251,8 +1255,11 @@ impl<'a> SymbolExtractor<'a> {
         for i in 0..node.child_count() {
             let Some(child) = node.child(i) else { continue };
             match child.kind() {
-                "storage_class_specifier" | "type_qualifier" | "function_specifier"
-                | "virtual_function_specifier" | "explicit_function_specifier" => {
+                "storage_class_specifier"
+                | "type_qualifier"
+                | "function_specifier"
+                | "virtual_function_specifier"
+                | "explicit_function_specifier" => {
                     let t = self.node_text(&child).trim().to_owned();
                     if !t.is_empty() {
                         mods.push(t);
@@ -1271,8 +1278,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -1672,8 +1678,7 @@ impl<'a> SymbolExtractor<'a> {
                                             _ => SymbolKind::TypeAlias,
                                         })
                                         .unwrap_or(SymbolKind::TypeAlias);
-                                    let (vis, vc) =
-                                        visibility::infer(&name, &[], self.language);
+                                    let (vis, vc) = visibility::infer(&name, &[], self.language);
                                     out.push(OwnedSymbolInfo {
                                         uri: self.lip_uri(&name),
                                         display_name: name.clone(),
@@ -1699,8 +1704,7 @@ impl<'a> SymbolExtractor<'a> {
                             if let Some(name_node) = spec.child_by_field_name("name") {
                                 let name = self.node_text(&name_node).to_owned();
                                 if !name.is_empty() {
-                                    let (vis, vc) =
-                                        visibility::infer(&name, &[], self.language);
+                                    let (vis, vc) = visibility::infer(&name, &[], self.language);
                                     out.push(OwnedSymbolInfo {
                                         uri: self.lip_uri(&name),
                                         display_name: name.clone(),
@@ -1734,8 +1738,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -1753,9 +1756,7 @@ impl<'a> SymbolExtractor<'a> {
             let ty = p.child_by_field_name("type")?;
             let ident = match ty.kind() {
                 "type_identifier" => Some(ty),
-                "pointer_type" => ty
-                    .named_child(0)
-                    .filter(|c| c.kind() == "type_identifier"),
+                "pointer_type" => ty.named_child(0).filter(|c| c.kind() == "type_identifier"),
                 _ => None,
             };
             return ident.map(|n| self.node_text(&n).trim().to_owned());
@@ -1945,8 +1946,7 @@ impl<'a> SymbolExtractor<'a> {
         }
         // Kotlin bodies come via field "body" (block or expression).
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         // Strip trailing `=` that introduces an expression body.
         let trimmed = text.trim().trim_end_matches('=').trim_end();
         Some(trimmed.to_owned())
@@ -2113,8 +2113,7 @@ impl<'a> SymbolExtractor<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let text =
-            std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
+        let text = std::str::from_utf8(&self.source[node.start_byte()..body.start_byte()]).ok()?;
         Some(text.trim().to_owned())
     }
 
@@ -2272,9 +2271,26 @@ fn kotlin_is_exported(node: Node) -> bool {
 /// Collect Kotlin modifier keywords from the `modifiers` child node.
 fn kotlin_modifiers(node: Node) -> Vec<String> {
     const KEYWORDS: &[&str] = &[
-        "private", "protected", "internal", "public", "abstract", "final", "open", "override",
-        "suspend", "inline", "external", "data", "sealed", "enum", "companion", "lateinit",
-        "const", "operator", "infix", "tailrec",
+        "private",
+        "protected",
+        "internal",
+        "public",
+        "abstract",
+        "final",
+        "open",
+        "override",
+        "suspend",
+        "inline",
+        "external",
+        "data",
+        "sealed",
+        "enum",
+        "companion",
+        "lateinit",
+        "const",
+        "operator",
+        "infix",
+        "tailrec",
     ];
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {

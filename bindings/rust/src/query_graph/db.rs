@@ -355,7 +355,7 @@ impl LipDatabase {
         // produces the double-slash convention used by tier-1 extractors
         // (`lip://local//abs/path`).
         let mut roots: Vec<&String> = self.registered_roots.iter().collect();
-        roots.sort_by(|a, b| b.len().cmp(&a.len()));
+        roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
         for root in &roots {
             let candidate = format!("lip://local/{}/{}", root, body);
             if self.file_inputs.contains_key(&candidate) {
@@ -644,8 +644,7 @@ impl LipDatabase {
                 // Forward twin: enables outgoing_impact_for to seed from a
                 // SCIP descriptor URI when the back-fill kept the raw
                 // tier-1 caller URI. v2.3.5.
-                let caller_name =
-                    normalize_callee_name(extract_name(&edge.from_uri)).to_owned();
+                let caller_name = normalize_callee_name(extract_name(&edge.from_uri)).to_owned();
                 if !caller_name.is_empty() {
                     self.caller_name_to_callees
                         .entry(caller_name)
@@ -714,8 +713,7 @@ impl LipDatabase {
         let uri = self.canonicalize_uri(&uri);
         self.revision += 1;
         let rev = self.revision;
-        let module_id =
-            crate::query_graph::module_id::resolve_module_id(&uri, &language, &symbols);
+        let module_id = crate::query_graph::module_id::resolve_module_id(&uri, &language, &symbols);
         self.file_inputs.insert(
             uri.clone(),
             FileInput {
@@ -791,7 +789,8 @@ impl LipDatabase {
 
         // Seed sym_cache so file_symbols() returns the pre-computed symbols.
         let syms = Arc::new(symbols);
-        self.sym_cache.insert(uri.clone(), Cached::new(syms.clone(), rev));
+        self.sym_cache
+            .insert(uri.clone(), Cached::new(syms.clone(), rev));
 
         // v2.3.2 Issue #1 — also index SCIP defs by their `display_name`
         // (not just URI fragment) so tier-1 back-fill's cross-file callee
@@ -954,16 +953,14 @@ impl LipDatabase {
                             .entry(from_uri.clone())
                             .or_default()
                             .push(to_uri.clone());
-                        let callee_name =
-                            normalize_callee_name(extract_name(&to_uri)).to_owned();
+                        let callee_name = normalize_callee_name(extract_name(&to_uri)).to_owned();
                         if !callee_name.is_empty() {
                             self.callee_name_to_callers
                                 .entry(callee_name)
                                 .or_default()
                                 .push(from_uri.clone());
                         }
-                        let caller_name =
-                            normalize_callee_name(extract_name(&from_uri)).to_owned();
+                        let caller_name = normalize_callee_name(extract_name(&from_uri)).to_owned();
                         if !caller_name.is_empty() {
                             self.caller_name_to_callees
                                 .entry(caller_name)
@@ -1541,8 +1538,7 @@ impl LipDatabase {
             // so we can eyeball the URI-form mismatch.
             if uri_hits == 0 && name_hits == 0 {
                 let uri_keys: Vec<&String> = self.callee_to_callers.keys().take(3).collect();
-                let name_keys: Vec<&String> =
-                    self.callee_name_to_callers.keys().take(10).collect();
+                let name_keys: Vec<&String> = self.callee_name_to_callers.keys().take(10).collect();
                 let raw = extract_name(symbol_uri);
                 let normalized = normalize_callee_name(raw);
                 eprintln!(
@@ -1710,8 +1706,7 @@ impl LipDatabase {
             );
             if !has {
                 // Dump up to 5 keys so we can compare against the insert log.
-                let keys: Vec<&String> =
-                    self.file_edges_source.keys().take(5).collect();
+                let keys: Vec<&String> = self.file_edges_source.keys().take(5).collect();
                 eprintln!(
                     "[lip-debug-edges]   file_edges_source sample keys (total={}): {:?}",
                     self.file_edges_source.len(),
@@ -1943,11 +1938,7 @@ impl LipDatabase {
     /// Walks `caller_to_callees` up to `depth` hops. Returns a flat
     /// `(caller, callee)` edge list and a `truncated` flag that is `true`
     /// when the node cap was hit.
-    pub fn outgoing_calls(
-        &self,
-        symbol_uri: &str,
-        depth: u32,
-    ) -> (Vec<(String, String)>, bool) {
+    pub fn outgoing_calls(&self, symbol_uri: &str, depth: u32) -> (Vec<(String, String)>, bool) {
         const NODE_LIMIT: usize = 200;
         let depth = depth.clamp(1, 8);
 
@@ -2288,8 +2279,7 @@ impl LipDatabase {
     pub fn set_file_embedding(&mut self, uri: &str, vector: Vec<f32>, model: &str) {
         let uri = self.canonicalize_uri(uri);
         self.file_embeddings.insert(uri.clone(), vector);
-        self.file_embedding_models
-            .insert(uri, model.to_owned());
+        self.file_embedding_models.insert(uri, model.to_owned());
     }
 
     /// Retrieve the stored embedding vector for a file, if any.
@@ -3137,7 +3127,10 @@ impl LipDatabase {
         kind_filter: Option<&[crate::schema::SymbolKind]>,
         scope: Option<&str>,
         modifier_filter: Option<&[String]>,
-    ) -> (Vec<OwnedSymbolInfo>, Vec<crate::query_graph::types::RankedSymbol>) {
+    ) -> (
+        Vec<OwnedSymbolInfo>,
+        Vec<crate::query_graph::types::RankedSymbol>,
+    ) {
         use crate::query_graph::types::{MatchType, RankedSymbol};
 
         let q_lower = query.to_lowercase();
@@ -4430,8 +4423,7 @@ impl Greeter {
             "rust".to_owned(),
         );
         let unknown = "file:///project/ghost.rs".to_owned();
-        let (results, not_indexed) =
-            db.blast_radius_batch(&[unknown.clone()], None);
+        let (results, not_indexed) = db.blast_radius_batch(std::slice::from_ref(&unknown), None);
         assert!(results.is_empty());
         assert_eq!(not_indexed, vec![unknown]);
     }
@@ -4865,7 +4857,10 @@ impl Greeter {
             Some(EdgesSource::ScipOnly),
             "edges_source should reflect root.rs (ScipOnly — pre-computed edges)"
         );
-        assert!(result.semantic_items.is_empty(), "min_score=None → no enrichment");
+        assert!(
+            result.semantic_items.is_empty(),
+            "min_score=None → no enrichment"
+        );
     }
 
     // v2.3.3 — Bug-D-symmetric test: when the tier-1 back-fill keeps a
@@ -5041,8 +5036,7 @@ impl Greeter {
             "pub fn exported() {}".to_owned(),
             "rust".to_owned(),
         );
-        let (results, not_indexed) =
-            db.blast_radius_batch(&[lib_uri.clone()], None);
+        let (results, not_indexed) = db.blast_radius_batch(std::slice::from_ref(&lib_uri), None);
         assert!(not_indexed.is_empty());
         for entry in &results {
             assert_eq!(entry.file_uri, lib_uri, "file_uri must trace back to input");
@@ -5085,7 +5079,10 @@ impl Greeter {
         db.sym_cache.remove(&uri);
         let syms_cold = db.file_symbols(&uri);
         // Must not fall through to Tier 1 (which would parse empty text).
-        assert!(syms_cold.is_empty(), "cold precomputed cache must not run Tier-1 parser");
+        assert!(
+            syms_cold.is_empty(),
+            "cold precomputed cache must not run Tier-1 parser"
+        );
     }
 
     // ── WS3: name consumption index ───────────────────────────────────────────

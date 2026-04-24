@@ -999,7 +999,10 @@ mod tests {
         }
 
         let envelope = notify_rx.try_recv().expect("should receive a broadcast");
-        assert_eq!(envelope.source_session, None, "Tier 2 upgrades are system-originated");
+        assert_eq!(
+            envelope.source_session, None,
+            "Tier 2 upgrades are system-originated"
+        );
         match envelope.message {
             ServerMessage::SymbolUpgraded {
                 uri,
