@@ -149,6 +149,12 @@ struct FileInput {
     /// Content hash supplied by the caller (e.g. from `OwnedDocument.content_hash`).
     /// Used by `stale_files` so Merkle sync works even when `text` is empty.
     content_hash: String,
+    /// v2.3.4 — module grouping identifier, resolved at upsert time.
+    /// Source priority: slice URI > SCIP descriptor > language-appropriate
+    /// manifest walk. See [`crate::query_graph::module_id`]. `None` for
+    /// files whose language has no manifest convention and whose URI carries
+    /// no slice or SCIP metadata.
+    module_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -531,11 +537,19 @@ impl LipDatabase {
 
     /// Register or update a file. Bumps the global revision and invalidates
     /// cached derived data for `uri`.
+    /// Return the module grouping id stored for `file_uri`, if any (v2.3.4).
+    fn module_id_for(&self, file_uri: &str) -> Option<String> {
+        self.file_inputs
+            .get(file_uri)
+            .and_then(|fi| fi.module_id.clone())
+    }
+
     pub fn upsert_file(&mut self, uri: String, text: String, language: String) {
         let uri = self.canonicalize_uri(&uri);
         self.revision += 1;
         let rev = self.revision;
         let content_hash = sha256_hex(text.as_bytes());
+        let module_id = crate::query_graph::module_id::resolve_module_id(&uri, &language, &[]);
         self.file_inputs.insert(
             uri.clone(),
             FileInput {
@@ -544,6 +558,7 @@ impl LipDatabase {
                 revision: rev,
                 precomputed: false,
                 content_hash,
+                module_id,
             },
         );
         // Invalidate the direct derived caches. api_cache is intentionally kept
@@ -677,6 +692,8 @@ impl LipDatabase {
         let uri = self.canonicalize_uri(&uri);
         self.revision += 1;
         let rev = self.revision;
+        let module_id =
+            crate::query_graph::module_id::resolve_module_id(&uri, &language, &symbols);
         self.file_inputs.insert(
             uri.clone(),
             FileInput {
@@ -685,6 +702,7 @@ impl LipDatabase {
                 revision: rev,
                 precomputed: true,
                 content_hash,
+                module_id,
             },
         );
 
@@ -1556,6 +1574,7 @@ impl LipDatabase {
                     symbol_uri: sym.clone(),
                     distance: *dist,
                     confidence: ImpactItem::confidence_at(*dist),
+                    module_id: self.module_id_for(file),
                 };
                 affected_files_set.insert(file.clone());
                 if *dist == 1 {
@@ -1579,6 +1598,7 @@ impl LipDatabase {
                 symbol_uri: String::new(),
                 distance,
                 confidence: ImpactItem::confidence_at(distance),
+                module_id: self.module_id_for(file_uri),
             };
             affected_files_set.insert(file_uri.clone());
             if distance == 1 {
@@ -1743,11 +1763,13 @@ impl LipDatabase {
                             } else {
                                 ImpactSource::Semantic
                             };
+                            let module_id = self.module_id_for(&hit_file);
                             semantic_items.push(SemanticImpactItem {
                                 file_uri: hit_file,
                                 symbol_uri: n.uri,
                                 similarity: n.score,
                                 source,
+                                module_id,
                             });
                         }
                     } else if let Some(file_embedding) =
@@ -1766,11 +1788,13 @@ impl LipDatabase {
                             } else {
                                 ImpactSource::Semantic
                             };
+                            let module_id = self.module_id_for(&neighbour.uri);
                             semantic_items.push(SemanticImpactItem {
                                 file_uri: neighbour.uri,
                                 symbol_uri: String::new(),
                                 similarity: neighbour.score,
                                 source,
+                                module_id,
                             });
                         }
                     }
@@ -1828,11 +1852,13 @@ impl LipDatabase {
                     } else {
                         ImpactSource::Semantic
                     };
+                    let module_id = self.module_id_for(&hit_file);
                     semantic_items.push(SemanticImpactItem {
                         file_uri: hit_file,
                         symbol_uri: n.uri,
                         similarity: n.score,
                         source,
+                        module_id,
                     });
                 }
             } else if let Some(file_embedding) = self.file_embeddings.get(&file_uri).cloned() {
@@ -1849,11 +1875,13 @@ impl LipDatabase {
                     } else {
                         ImpactSource::Semantic
                     };
+                    let module_id = self.module_id_for(&neighbour.uri);
                     semantic_items.push(SemanticImpactItem {
                         file_uri: neighbour.uri,
                         symbol_uri: String::new(),
                         similarity: neighbour.score,
                         source,
+                        module_id,
                     });
                 }
             }
@@ -2026,11 +2054,13 @@ impl LipDatabase {
             if !seen.insert((callee_file.clone(), callee_sym.clone())) {
                 continue;
             }
+            let module_id = self.module_id_for(&callee_file);
             let item = ImpactItem {
                 file_uri: callee_file,
                 symbol_uri: callee_sym.clone(),
                 distance: dist,
                 confidence: ImpactItem::confidence_at(dist),
+                module_id,
             };
             if dist == 1 {
                 direct_items.push(item);
@@ -2095,11 +2125,13 @@ impl LipDatabase {
                     } else {
                         ImpactSource::Semantic
                     };
+                    let module_id = self.module_id_for(&hit_file);
                     semantic_items.push(SemanticImpactItem {
                         file_uri: hit_file,
                         symbol_uri: n.uri,
                         similarity: n.score,
                         source,
+                        module_id,
                     });
                 }
             } else if let Some(file_embedding) = self.file_embeddings.get(&file_uri).cloned() {
@@ -2116,11 +2148,13 @@ impl LipDatabase {
                     } else {
                         ImpactSource::Semantic
                     };
+                    let module_id = self.module_id_for(&neighbour.uri);
                     semantic_items.push(SemanticImpactItem {
                         file_uri: neighbour.uri,
                         symbol_uri: String::new(),
                         similarity: neighbour.score,
                         source,
+                        module_id,
                     });
                 }
             }
@@ -5713,6 +5747,235 @@ impl Greeter {
         assert!(
             invalidated.is_empty(),
             "removed file must not appear in invalidation results"
+        );
+    }
+
+    // v2.3.4 — ImpactItem.module_id surfaces on blast-radius results when
+    // the file was imported via SCIP with a parseable package descriptor.
+    #[test]
+    fn blast_radius_surfaces_module_id_from_scip_descriptor() {
+        use crate::schema::{OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let caller_uri = "lip://local//abs/caller.rs".to_owned();
+        let target_uri = "lip://local//abs/target.rs".to_owned();
+        // SCIP-descriptor-form symbols: the package component ("cargo my-crate")
+        // is what `resolve_module_id` tier-2 parses.
+        let sym_caller = "scip-rs cargo my-crate 0.1.0 caller.rs#caller().".to_owned();
+        let sym_target = "scip-rs cargo my-crate 0.1.0 target.rs#target().".to_owned();
+
+        let mk_sym = |uri: &str| OwnedSymbolInfo {
+            uri: uri.to_owned(),
+            kind: SymbolKind::Function,
+            display_name: uri
+                .rsplit('#')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches("().")
+                .to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        };
+        let defn_occ = |sym: &str| OwnedOccurrence {
+            symbol_uri: sym.to_owned(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 1,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+        let edge = OwnedGraphEdge {
+            from_uri: sym_caller.clone(),
+            to_uri: sym_target.clone(),
+            kind: EdgeKind::Calls,
+            at_range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 1,
+            },
+        };
+
+        let mut db = LipDatabase::new();
+        db.upsert_file_precomputed(
+            caller_uri.clone(),
+            "rust".to_owned(),
+            "c1".to_owned(),
+            vec![mk_sym(&sym_caller)],
+            vec![defn_occ(&sym_caller)],
+            vec![edge],
+        );
+        db.upsert_file_precomputed(
+            target_uri.clone(),
+            "rust".to_owned(),
+            "t1".to_owned(),
+            vec![mk_sym(&sym_target)],
+            vec![defn_occ(&sym_target)],
+            vec![],
+        );
+
+        let result = db.blast_radius_for(&sym_target);
+        let direct = result
+            .direct_items
+            .iter()
+            .find(|i| i.file_uri == caller_uri)
+            .expect("caller should appear as direct impact");
+        assert_eq!(
+            direct.module_id.as_deref(),
+            Some("cargo/my-crate"),
+            "module_id must be derived from the SCIP package descriptor; got {:?}",
+            direct.module_id
+        );
+    }
+
+    // v2.3.4 — when no SCIP or slice metadata is present, the manifest walk
+    // fills module_id from Cargo.toml for tier-1-indexed Rust files.
+    #[test]
+    fn blast_radius_surfaces_module_id_from_cargo_toml_walk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-local-crate\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        let caller_path = src_dir.join("caller.rs");
+        let target_path = src_dir.join("target.rs");
+        std::fs::write(&caller_path, "fn caller() { target(); }\n").unwrap();
+        std::fs::write(&target_path, "pub fn target() {}\n").unwrap();
+        let caller_uri = format!(
+            "lip://local/{}",
+            caller_path.to_string_lossy().trim_start_matches('/')
+        );
+        let target_uri = format!(
+            "lip://local/{}",
+            target_path.to_string_lossy().trim_start_matches('/')
+        );
+        let caller_uri = format!("lip://local//{}", &caller_uri["lip://local/".len()..]);
+        let target_uri = format!("lip://local//{}", &target_uri["lip://local/".len()..]);
+
+        let mut db = LipDatabase::new();
+        db.upsert_file(
+            target_uri.clone(),
+            std::fs::read_to_string(&target_path).unwrap(),
+            "rust".to_owned(),
+        );
+        db.upsert_file(
+            caller_uri.clone(),
+            std::fs::read_to_string(&caller_path).unwrap(),
+            "rust".to_owned(),
+        );
+
+        // Look up target's symbol — the tier-1 extractor emits `#target`.
+        let sym_target = format!("{target_uri}#target");
+        let result = db.blast_radius_for(&sym_target);
+        let all_items: Vec<_> = result
+            .direct_items
+            .iter()
+            .chain(result.transitive_items.iter())
+            .collect();
+        assert!(
+            !all_items.is_empty(),
+            "tier-1 blast radius should include caller.rs"
+        );
+        // Every item in this test comes from a file under the crate root,
+        // so all module_ids must resolve to "my-local-crate".
+        for item in &all_items {
+            assert_eq!(
+                item.module_id.as_deref(),
+                Some("my-local-crate"),
+                "manifest-walk should fill module_id for tier-1-indexed Rust files; got {:?}",
+                item
+            );
+        }
+    }
+
+    // v2.3.4 — the forward twin (QueryOutgoingImpact) also fills module_id,
+    // confirming the lookup is symmetric with blast radius.
+    #[test]
+    fn outgoing_impact_surfaces_module_id() {
+        use crate::schema::{OwnedGraphEdge, OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let root_uri = "lip://local//abs/root.rs".to_owned();
+        let leaf_uri = "lip://local//abs/leaf.rs".to_owned();
+        // SCIP descriptors differ per file so we can verify the lookup is
+        // per-file, not per-query.
+        let sym_root = "scip-rs cargo pkg-a 0.1.0 root.rs#root().".to_owned();
+        let sym_leaf = "scip-rs cargo pkg-b 0.1.0 leaf.rs#leaf().".to_owned();
+
+        let mk_sym = |uri: &str, name: &str| OwnedSymbolInfo {
+            uri: uri.to_owned(),
+            kind: SymbolKind::Function,
+            display_name: name.to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        };
+        let defn_occ = |sym: &str| OwnedOccurrence {
+            symbol_uri: sym.to_owned(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 1,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+        let edge = OwnedGraphEdge {
+            from_uri: sym_root.clone(),
+            to_uri: sym_leaf.clone(),
+            kind: EdgeKind::Calls,
+            at_range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 1,
+            },
+        };
+
+        let mut db = LipDatabase::new();
+        db.upsert_file_precomputed(
+            root_uri.clone(),
+            "rust".to_owned(),
+            "r1".to_owned(),
+            vec![mk_sym(&sym_root, "root")],
+            vec![defn_occ(&sym_root)],
+            vec![edge],
+        );
+        db.upsert_file_precomputed(
+            leaf_uri.clone(),
+            "rust".to_owned(),
+            "l1".to_owned(),
+            vec![mk_sym(&sym_leaf, "leaf")],
+            vec![defn_occ(&sym_leaf)],
+            vec![],
+        );
+
+        let result = db
+            .outgoing_impact_for(&sym_root, Some(4), None)
+            .expect("root resolves");
+        let leaf_item = result
+            .static_result
+            .direct_items
+            .iter()
+            .find(|i| i.file_uri == leaf_uri)
+            .expect("leaf is a direct callee");
+        assert_eq!(
+            leaf_item.module_id.as_deref(),
+            Some("cargo/pkg-b"),
+            "outgoing_impact must carry the callee's module_id; got {:?}",
+            leaf_item.module_id
         );
     }
 }

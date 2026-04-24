@@ -49,6 +49,13 @@ pub struct ImpactItem {
     /// Confidence that this dependency is real.
     /// Decreases with distance: 0.95 → 0.85 → 0.75 → 0.50 (floor).
     pub confidence: f32,
+    /// v2.3.4 — stable module grouping key for this file, used by risk
+    /// classifiers that weight cross-module blast. Resolved at upsert time
+    /// from the slice URI prefix, the SCIP symbol's package descriptor, or
+    /// a language-appropriate manifest (Cargo.toml, go.mod, package.json,
+    /// pyproject.toml, pubspec.yaml). `None` when no source yields a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<String>,
 }
 
 impl ImpactItem {
@@ -183,6 +190,9 @@ pub struct SemanticImpactItem {
     /// Cosine similarity in [0.0, 1.0].
     pub similarity: f32,
     pub source: ImpactSource,
+    /// v2.3.4 — module grouping key for this file. See [`ImpactItem::module_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<String>,
 }
 
 /// A single nearest-neighbor hit returned by `ServerMessage::NearestResult`.
@@ -1904,6 +1914,7 @@ mod tests {
                         symbol_uri: "lip://local//abs/callee.rs#bar".into(),
                         distance: 1,
                         confidence: ImpactItem::confidence_at(1),
+                        module_id: None,
                     }],
                     transitive_items: vec![],
                     edges_source: Some(EdgesSource::ScipWithTier1Edges),
@@ -1914,6 +1925,7 @@ mod tests {
                     symbol_uri: "lip://local//abs/other.rs#baz".into(),
                     similarity: 0.82,
                     source: ImpactSource::Semantic,
+                    module_id: None,
                 }],
             }),
         };

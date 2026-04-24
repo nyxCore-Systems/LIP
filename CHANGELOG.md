@@ -6,6 +6,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.3.4] — 2026-04-24
+
+**Module-level grouping on impact items.** Adds `module_id: Option<String>` to `ImpactItem` and `SemanticImpactItem` so consumers whose risk classifier weights cross-module blast (CKB's `RecomputeBlastRadius.ModuleCount`) get a useful value instead of the conservative zero that the unioned static-plus-LIP set previously collapsed to. `protocol_version` stays at `2`; the field is `#[serde(default, skip_serializing_if = "Option::is_none")]`, so the wire shape stays byte-identical for emitters that don't populate it and deserialises cleanly on pre-v2.3.4 clients.
+
+### Added
+
+- **`ImpactItem.module_id` and `SemanticImpactItem.module_id`** — resolved once at upsert time, stored on `FileInput`, surfaced on every `ImpactItem` / `SemanticImpactItem` built by `blast_radius_for`, `blast_radius_for_symbol`, `blast_radius_batch`, and `outgoing_impact_for`. Three-tier resolution, first hit wins:
+
+  1. **Slice URI prefix** — `lip://<manager>/<package>@<version>/...` → `"<manager>/<package>"`. Covers mounted dependency slices.
+  2. **SCIP package descriptor** — the first `<manager> <name>` pair parsed from any SCIP symbol attached to the file → `"<manager>/<name>"`. Covers every file imported via `upsert_file_precomputed` whose symbols carry real SCIP metadata (scip-go, scip-typescript, scip-rs, etc.). Rejects `local <id>` sentinels and empty-package descriptors.
+  3. **Manifest walk** — upward walk (depth-capped at 12) from the file's directory, looking for a language-appropriate manifest: `Cargo.toml` (Rust, `[package] name`), `go.mod` (Go, `module <path>`), `package.json` (TypeScript / JavaScript / TSX / JSX, top-level `"name"`), `pyproject.toml` (Python, `[project].name` or `[tool.poetry].name`), `setup.py` (Python, `name="…"` in setup call), `pubspec.yaml` (Dart, top-level `name:`). Parse failures, I/O failures, and unsupported languages (C / C++ / Kotlin / Swift / Java) return `None` rather than propagating.
+
+  Unit-tested per parser (`parse_cargo_toml_extracts_crate_name`, `parse_go_mod_extracts_module_path`, `parse_package_json_ignores_name_inside_values`, `parse_pyproject_toml_{project,poetry}_section`, `parse_setup_py_double_and_single_quotes`, `parse_pubspec_yaml_{name,ignores_nested_name}`, plus Cargo's workspace-only and dependency-section edge cases). Resolver-level tests cover the priority ordering (`resolve_prefers_slice_uri_over_scip`, `resolve_falls_back_to_scip_when_no_slice`, `resolve_walks_manifest_for_tier1_rust_file`, `resolve_returns_none_when_unsupported_language_and_no_scip`). Integration tests (`blast_radius_surfaces_module_id_from_scip_descriptor`, `blast_radius_surfaces_module_id_from_cargo_toml_walk`, `outgoing_impact_surfaces_module_id`) confirm the field reaches the wire through both RPCs.
+
+---
+
 ## [2.3.3] — 2026-04-24
 
 **Outgoing-impact symmetry.** Adds a single additive RPC so CKB can query the forward direction of the call graph with the same enriched envelope and provenance gating that `QueryBlastRadiusSymbol` already provides for the reverse direction. `protocol_version` stays at `2`; pre-v2.3.3 daemons reply `UnknownMessage`.
