@@ -6,6 +6,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-04-25
+
+**Forward-direction name-bridge symmetry.** Fixes `QueryOutgoingImpact` returning empty `direct_items` when the seed `symbol_uri` was indexed by a different provider than its callees — typically a SCIP-descriptor seed (`…#AnalyzeImpact().`) whose outgoing edges were recorded in tier-1 form (`…#AnalyzeImpact`), or vice versa. The reverse direction (`QueryBlastRadiusSymbol`) already handled this via the `callee_name_to_callers` name-bridge added in v2.3.2; the forward direction only consulted `caller_to_callees` by URI-exact match, so any caller-side SCIP/tier-1 mismatch produced zero direct hits even though `QueryBlastRadiusSymbol` on the same symbol worked. `protocol_version` stays at `2`; this is a pure correctness fix with no wire-shape change.
+
+### Added
+
+- **`caller_name_to_callees: HashMap<String, Vec<String>>`** — forward-direction twin of `callee_name_to_callers`. Populated at all three edge-insertion sites (`upsert_file`, `upsert_file_precomputed` SCIP path, `upsert_file_precomputed` tier-1 back-fill) using `normalize_callee_name(extract_name(&edge.from_uri))` so SCIP descriptor sigils (`()`, `.`, `#`, `:`) are stripped to a shared identifier key. `remove_file_call_edges` drops caller-side entries symmetrically with the existing callee-side cleanup. `outgoing_impact_for`'s BFS now consults both indexes per hop — URI-exact lookup via `caller_to_callees` plus name-bridge lookup via `caller_name_to_callees` — matching the structural shape of `blast_radius_for` Phase 2. Regression test `outgoing_impact_name_bridge_for_tier1_caller_uri` seeds a SCIP-descriptor caller whose edges were recorded in tier-1 identifier form and asserts the callee surfaces on the wire.
+
+### Changed
+
+- **Rust 1.95 clippy hygiene.** Fixed five newly-enforced lints across `query_graph/db.rs`, `query_graph/module_id.rs`, and `indexer/symbol_extractor.rs`: `unnecessary_map_or`, `unnecessary_sort_by`, `manual_pattern_char_comparison`, and two `cloned_ref_to_slice_refs`. `cargo fmt --all` normalized 19 files touched by v2.3.x work. No behavior change.
+
+---
+
 ## [2.3.4] — 2026-04-24
 
 **Module-level grouping on impact items.** Adds `module_id: Option<String>` to `ImpactItem` and `SemanticImpactItem` so consumers whose risk classifier weights cross-module blast (CKB's `RecomputeBlastRadius.ModuleCount`) get a useful value instead of the conservative zero that the unioned static-plus-LIP set previously collapsed to. `protocol_version` stays at `2`; the field is `#[serde(default, skip_serializing_if = "Option::is_none")]`, so the wire shape stays byte-identical for emitters that don't populate it and deserialises cleanly on pre-v2.3.4 clients.
