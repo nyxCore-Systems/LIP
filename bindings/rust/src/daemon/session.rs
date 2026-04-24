@@ -2649,6 +2649,40 @@ pub async fn read_message(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
 /// Serialize `msg` as JSON and write with a 4-byte big-endian length prefix.
 pub async fn write_message(stream: &mut UnixStream, msg: &ServerMessage) -> anyhow::Result<()> {
     let body = serde_json::to_vec(msg)?;
+    // v2.3.2 diagnostic — gated on LIP_DEBUG_EDGES=1. Replaces the old
+    // 2 KB tail preview (which truncated real payloads) with a
+    // field-presence signal: does the wire body mention `edges_source`
+    // at all, how many of each variant were serialised, and a 500-byte
+    // head for orientation. Truncation-free answer to "is the field
+    // reaching the wire?".
+    if std::env::var("LIP_DEBUG_EDGES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        let marker = matches!(
+            msg,
+            ServerMessage::BlastRadiusResult(_)
+                | ServerMessage::BlastRadiusBatchResult { .. }
+                | ServerMessage::BlastRadiusSymbolResult { .. }
+        );
+        if marker {
+            let body_str = std::str::from_utf8(&body).unwrap_or("");
+            let has_field = body_str.contains("\"edges_source\"");
+            let field_count = body_str.matches("\"edges_source\"").count();
+            let head = if body_str.len() > 500 {
+                &body_str[..500]
+            } else {
+                body_str
+            };
+            eprintln!(
+                "[lip-debug-edges] wire response: has_edges_source={} edges_source_count={} body_bytes={} head={}",
+                has_field,
+                field_count,
+                body.len(),
+                head
+            );
+        }
+    }
     stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
     stream.write_all(&body).await?;
     Ok(())

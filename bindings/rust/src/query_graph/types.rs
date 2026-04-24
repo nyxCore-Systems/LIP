@@ -102,17 +102,14 @@ pub enum EdgesSource {
 pub struct EnrichedBlastRadius {
     /// The input file URI this result was computed for.
     pub file_uri: String,
-    /// The static blast-radius result.
+    /// The static blast-radius result. `static_result.edges_source` carries
+    /// the call-edge provenance (moved off `EnrichedBlastRadius` in v2.3.2
+    /// so non-enriched `QueryBlastRadius` responses carry it too).
     #[serde(flatten)]
     pub static_result: BlastRadiusResult,
     /// Semantically coupled files/symbols not in the static call graph.
     /// Empty when `include_semantic` was false or embeddings are unavailable.
     pub semantic_items: Vec<SemanticImpactItem>,
-    /// Provenance for the call edges used to compute `static_result`
-    /// (v2.3.1). `None` when older daemons serialise this field without
-    /// any signal — deserialisers default to `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edges_source: Option<EdgesSource>,
 }
 
 /// A single forward call edge returned by `QueryOutgoingCalls` (v2.3).
@@ -254,6 +251,12 @@ pub struct BlastRadiusResult {
     pub truncated: bool,
     /// Composite risk level derived from caller count and spread.
     pub risk_level: RiskLevel,
+    /// Provenance for the call edges used to compute this result (v2.3.2).
+    /// Moved from `EnrichedBlastRadius` so `QueryBlastRadius` — not just
+    /// `QueryBlastRadiusBatch` / `QueryBlastRadiusSymbol` — carries it.
+    /// `None` when the daemon has no edges recorded for the target's file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_source: Option<EdgesSource>,
 }
 
 /// Result for a single sub-query inside a [`ClientMessage::BatchQuery`].
@@ -1539,6 +1542,81 @@ mod tests {
     fn round_trip_server(msg: &ServerMessage) -> ServerMessage {
         let json = serde_json::to_string(msg).expect("serialize");
         serde_json::from_str(&json).expect("deserialize")
+    }
+
+    fn blast_radius_fixture() -> BlastRadiusResult {
+        BlastRadiusResult {
+            symbol_uri: "lip://scip-go/gomod/foo@v1.0.0/Engine#SearchSymbols().".into(),
+            direct_dependents: 2,
+            transitive_dependents: 3,
+            affected_files: vec!["lip://local//x/y.go".into()],
+            direct_items: vec![],
+            transitive_items: vec![],
+            truncated: false,
+            risk_level: RiskLevel::Low,
+            edges_source: Some(EdgesSource::ScipWithTier1Edges),
+        }
+    }
+
+    // v2.3.2 Issue — user-observed wire drop of `edges_source` despite
+    // internal state carrying `Some(ScipWithTier1Edges)`. Verifies that the
+    // field survives direct `BlastRadiusResult`, the `BlastRadiusResult`
+    // tuple-variant envelope (internally-tagged), and both
+    // `EnrichedBlastRadius` flatten sites (Batch / Symbol responses).
+    #[test]
+    fn edges_source_survives_all_response_envelopes() {
+        let br = blast_radius_fixture();
+
+        let direct = serde_json::to_string(&br).unwrap();
+        assert!(
+            direct.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "direct BlastRadiusResult must emit edges_source; got {direct}"
+        );
+
+        let envelope = ServerMessage::BlastRadiusResult(br.clone());
+        let envelope_json = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            envelope_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "ServerMessage::BlastRadiusResult envelope must carry edges_source; got {envelope_json}"
+        );
+
+        let enriched = EnrichedBlastRadius {
+            file_uri: "lip://local//x/y.go".into(),
+            static_result: br.clone(),
+            semantic_items: vec![],
+        };
+        let enriched_json = serde_json::to_string(&enriched).unwrap();
+        assert!(
+            enriched_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "flattened EnrichedBlastRadius must carry edges_source; got {enriched_json}"
+        );
+
+        let batch = ServerMessage::BlastRadiusBatchResult {
+            results: vec![enriched.clone()],
+            not_indexed_uris: vec![],
+        };
+        let batch_json = serde_json::to_string(&batch).unwrap();
+        assert!(
+            batch_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "BatchResult's flattened enriched items must carry edges_source; got {batch_json}"
+        );
+
+        let sym = ServerMessage::BlastRadiusSymbolResult {
+            result: Some(enriched),
+        };
+        let sym_json = serde_json::to_string(&sym).unwrap();
+        assert!(
+            sym_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "SymbolResult's Some(enriched) must carry edges_source; got {sym_json}"
+        );
+
+        // Round-trip: deserialised form must preserve Some(...) too.
+        let rt = round_trip_server(&envelope);
+        if let ServerMessage::BlastRadiusResult(rt_br) = rt {
+            assert_eq!(rt_br.edges_source, Some(EdgesSource::ScipWithTier1Edges));
+        } else {
+            panic!("envelope round-trip variant mismatch");
+        }
     }
 
     #[test]

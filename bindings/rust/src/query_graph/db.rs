@@ -46,6 +46,23 @@ fn extract_name(uri: &str) -> &str {
     uri.rfind('#').map(|i| &uri[i + 1..]).unwrap_or("")
 }
 
+/// Strip SCIP descriptor suffix characters so a fragment like
+/// `SearchSymbols().` reduces to `SearchSymbols` — matching the plain
+/// identifier form the Tier-1 extractor emits. SCIP descriptors end in
+/// `()` for methods/functions, `.` for terms, `#` for types, `:` for
+/// macros, or `[T]` for type parameters; tier-1 emits the bare name.
+/// Indexing and lookup must go through this normaliser or the two
+/// providers will store disjoint keys in `callee_name_to_callers`.
+fn normalize_callee_name(fragment: &str) -> &str {
+    // Truncate at the first `(` — SCIP's `name(<disambiguator>).` form.
+    let head = match fragment.find('(') {
+        Some(i) => &fragment[..i],
+        None => fragment,
+    };
+    // Strip trailing SCIP sigils / whitespace.
+    head.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
+}
+
 /// Returns `true` if the annotation entry has expired (past its `expires_ms` timestamp).
 /// An `expires_ms` of 0 means the entry is permanent and never expires.
 fn is_expired(entry: &crate::schema::OwnedAnnotationEntry) -> bool {
@@ -589,7 +606,9 @@ impl LipDatabase {
                     .or_default()
                     .push(edge.to_uri.clone());
                 // Name-based index: enables cross-file resolution in blast_radius_for.
-                let callee_name = extract_name(&edge.to_uri).to_owned();
+                // Normalise to the plain-identifier form so SCIP-descriptor
+                // callees (`Foo().`) share a key with tier-1 (`Foo`).
+                let callee_name = normalize_callee_name(extract_name(&edge.to_uri)).to_owned();
                 if !callee_name.is_empty() {
                     self.callee_name_to_callers
                         .entry(callee_name)
@@ -669,6 +688,21 @@ impl LipDatabase {
             },
         );
 
+        // Snapshot old display_names before clearing sym_cache so we can
+        // remove both the fragment-keyed and display_name-keyed entries from
+        // `name_to_symbols` (v2.3.2 Issue #1 adds display_name indexing).
+        let stale_display_names: Vec<(String, String)> = self
+            .sym_cache
+            .get(&uri)
+            .map(|c| {
+                c.value
+                    .iter()
+                    .filter(|s| !s.display_name.is_empty())
+                    .map(|s| (s.uri.clone(), s.display_name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Clear stale caches + def_index entries for this file.
         self.sym_cache.remove(&uri);
         self.occ_cache.remove(&uri);
@@ -684,6 +718,14 @@ impl LipDatabase {
                 uris.retain(|u| u != sym_uri);
                 if uris.is_empty() {
                     self.name_to_symbols.remove(name);
+                }
+            }
+        }
+        for (sym_uri, display_name) in &stale_display_names {
+            if let Some(uris) = self.name_to_symbols.get_mut(display_name) {
+                uris.retain(|u| u != sym_uri);
+                if uris.is_empty() {
+                    self.name_to_symbols.remove(display_name);
                 }
             }
         }
@@ -709,7 +751,30 @@ impl LipDatabase {
 
         // Seed sym_cache so file_symbols() returns the pre-computed symbols.
         let syms = Arc::new(symbols);
-        self.sym_cache.insert(uri.clone(), Cached::new(syms, rev));
+        self.sym_cache.insert(uri.clone(), Cached::new(syms.clone(), rev));
+
+        // v2.3.2 Issue #1 — also index SCIP defs by their `display_name`
+        // (not just URI fragment) so tier-1 back-fill's cross-file callee
+        // translation can resolve plain-identifier names to SCIP URIs. The
+        // descriptor suffix scip-go emits (`NewExporter()` in the fragment)
+        // otherwise hides cross-file matches from the tier-1 extractor's
+        // plain-identifier view.
+        for sym in syms.iter() {
+            if sym.display_name.is_empty() {
+                continue;
+            }
+            let frag = extract_name(&sym.uri);
+            if sym.display_name == frag {
+                continue; // already indexed by upstream occurrence loop
+            }
+            let entry = self
+                .name_to_symbols
+                .entry(sym.display_name.clone())
+                .or_default();
+            if !entry.contains(&sym.uri) {
+                entry.push(sym.uri.clone());
+            }
+        }
 
         // Consumed-names index (same as upsert_file).
         {
@@ -743,7 +808,7 @@ impl LipDatabase {
                 .entry(edge.from_uri.clone())
                 .or_default()
                 .push(edge.to_uri.clone());
-            let callee_name = extract_name(&edge.to_uri).to_owned();
+            let callee_name = normalize_callee_name(extract_name(&edge.to_uri)).to_owned();
             if !callee_name.is_empty() {
                 self.callee_name_to_callers
                     .entry(callee_name)
@@ -758,6 +823,15 @@ impl LipDatabase {
         // When the disk source is reachable, re-run the Tier-1 tree-sitter
         // edge extractor to populate the forward + reverse call graph so
         // `QueryBlastRadiusSymbol` returns non-empty `direct_items`.
+        //
+        // v2.3.2 Issue #1 — tier-1 emits file-local URIs (`lip://local/…#Name`)
+        // that won't match the SCIP-style def_index keys (`lip://scip-go/…#Name`).
+        // Without translation, Phase 3 of `blast_radius_for` can't resolve the
+        // caller symbol and every ImpactItem degrades to blank `symbol_uri`.
+        // We translate the caller side only: the current file's SCIP defs are
+        // already in `def_index`, so we can look them up by name and rewrite
+        // the tier-1 caller URI in-place. Callees stay tier-1 because the BFS
+        // walks `callee_name_to_callers` via name fragment regardless.
         let edges_src = if !pairs.is_empty() {
             EdgesSource::ScipOnly
         } else if let Some(path) = crate::daemon::watcher::uri_to_path(&uri) {
@@ -765,24 +839,79 @@ impl LipDatabase {
                 Ok(text) => {
                     let lang = Language::detect(&uri, &language);
                     let tier1_edges = Tier1Indexer::new().edges_for_source(&uri, &text, lang);
+
+                    // Build identifier → SCIP-uri map for defs in this file.
+                    // Used to translate tier-1-emitted caller/callee URIs into
+                    // SCIP keys so that def_index and name-based BFS lookups in
+                    // blast_radius_for succeed. Keyed by both `display_name`
+                    // and the URI fragment — SCIP descriptors (`NewExporter()`
+                    // in scip-go, `Component.` in scip-typescript) differ from
+                    // tier-1's plain-identifier fragment extraction.
+                    let mut translate: HashMap<String, String> = HashMap::new();
+                    let this_file_syms = self.file_symbols(&uri);
+                    for sym in this_file_syms.iter() {
+                        if !sym.display_name.is_empty() {
+                            translate
+                                .entry(sym.display_name.clone())
+                                .or_insert_with(|| sym.uri.clone());
+                        }
+                        let frag = extract_name(&sym.uri);
+                        if !frag.is_empty() {
+                            translate
+                                .entry(frag.to_owned())
+                                .or_insert_with(|| sym.uri.clone());
+                        }
+                    }
+
+                    // Cross-file fallback: when the same-file `translate` map
+                    // misses (callee/caller defined in another SCIP document),
+                    // fall back to the global `name_to_symbols` index. Only
+                    // accept unambiguous hits (single URI) so we don't alias
+                    // unrelated homonyms across packages. v2.3.2 Issue #1.
+                    let name_to_symbols = &self.name_to_symbols;
+                    let resolve = |name: &str, fallback: &str| -> String {
+                        if let Some(u) = translate.get(name) {
+                            return u.clone();
+                        }
+                        if let Some(uris) = name_to_symbols.get(name) {
+                            if uris.len() == 1 {
+                                return uris[0].clone();
+                            }
+                        }
+                        fallback.to_owned()
+                    };
+
                     let mut filled = false;
-                    for edge in tier1_edges.iter().filter(|e| e.kind == EdgeKind::Calls) {
+                    let calls: Vec<(String, String)> = tier1_edges
+                        .iter()
+                        .filter(|e| e.kind == EdgeKind::Calls)
+                        .map(|edge| {
+                            let caller_name = extract_name(&edge.from_uri);
+                            let callee_name_raw = extract_name(&edge.to_uri);
+                            (
+                                resolve(caller_name, &edge.from_uri),
+                                resolve(callee_name_raw, &edge.to_uri),
+                            )
+                        })
+                        .collect();
+                    for (from_uri, to_uri) in calls {
                         self.callee_to_callers
-                            .entry(edge.to_uri.clone())
+                            .entry(to_uri.clone())
                             .or_default()
-                            .push(edge.from_uri.clone());
+                            .push(from_uri.clone());
                         self.caller_to_callees
-                            .entry(edge.from_uri.clone())
+                            .entry(from_uri.clone())
                             .or_default()
-                            .push(edge.to_uri.clone());
-                        let callee_name = extract_name(&edge.to_uri).to_owned();
+                            .push(to_uri.clone());
+                        let callee_name =
+                            normalize_callee_name(extract_name(&to_uri)).to_owned();
                         if !callee_name.is_empty() {
                             self.callee_name_to_callers
                                 .entry(callee_name)
                                 .or_default()
-                                .push(edge.from_uri.clone());
+                                .push(from_uri.clone());
                         }
-                        pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
+                        pairs.push((from_uri, to_uri));
                         filled = true;
                     }
                     if filled {
@@ -796,6 +925,21 @@ impl LipDatabase {
         } else {
             EdgesSource::Empty
         };
+        // v2.3.2 diagnostic — gated on LIP_DEBUG_EDGES=1. Confirms which
+        // back-fill branch fired per file and the exact key written into
+        // `file_edges_source` (for pairing against the lookup-side log in
+        // `blast_radius_for`).
+        if std::env::var("LIP_DEBUG_EDGES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            eprintln!(
+                "[lip-debug-edges] upsert_precomputed uri={} edges_src={:?} pairs={}",
+                uri,
+                edges_src,
+                pairs.len()
+            );
+        }
         self.file_edges_source.insert(uri.clone(), edges_src);
         self.file_call_edges.insert(uri.clone(), pairs);
 
@@ -812,6 +956,19 @@ impl LipDatabase {
         let uri = uri.as_str();
         self.revision += 1;
         self.file_inputs.remove(uri);
+        // Snapshot display_names before removing sym_cache (v2.3.2 Issue #1
+        // display_name indexing needs symmetric cleanup on file removal).
+        let stale_display_names: Vec<(String, String)> = self
+            .sym_cache
+            .get(uri)
+            .map(|c| {
+                c.value
+                    .iter()
+                    .filter(|s| !s.display_name.is_empty())
+                    .map(|s| (s.uri.clone(), s.display_name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.sym_cache.remove(uri);
         self.occ_cache.remove(uri);
         self.api_cache.remove(uri);
@@ -828,6 +985,14 @@ impl LipDatabase {
                 uris.retain(|u| u != sym_uri);
                 if uris.is_empty() {
                     self.name_to_symbols.remove(name);
+                }
+            }
+        }
+        for (sym_uri, display_name) in &stale_display_names {
+            if let Some(uris) = self.name_to_symbols.get_mut(display_name) {
+                uris.retain(|u| u != sym_uri);
+                if uris.is_empty() {
+                    self.name_to_symbols.remove(display_name);
                 }
             }
         }
@@ -851,7 +1016,7 @@ impl LipDatabase {
                         self.caller_to_callees.remove(&from);
                     }
                 }
-                let callee_name = extract_name(&to);
+                let callee_name = normalize_callee_name(extract_name(&to));
                 if let Some(callers) = self.callee_name_to_callers.get_mut(callee_name) {
                     callers.retain(|c| *c != from);
                     if callers.is_empty() {
@@ -1244,6 +1409,14 @@ impl LipDatabase {
         //
         // caller_sym → minimum distance from symbol_uri
         let mut cpg_distance: HashMap<String, u32> = HashMap::new();
+        let debug_edges = std::env::var("LIP_DEBUG_EDGES")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        // Phase-2 hit/miss counters (v2.3.2 diagnostic). `uri_*` covers the
+        // exact-URI `callee_to_callers` index; `name_*` covers the
+        // name-fragment `callee_name_to_callers` bridge.
+        let (mut uri_hits, mut uri_misses, mut name_hits, mut name_misses) =
+            (0u32, 0u32, 0u32, 0u32);
         {
             let mut queue: VecDeque<(String, u32)> = VecDeque::new();
             cpg_distance.insert(symbol_uri.to_owned(), 0);
@@ -1260,25 +1433,61 @@ impl LipDatabase {
                 }
                 // URI-exact callers (same-file or pre-resolved edges).
                 if let Some(callers) = self.callee_to_callers.get(&callee).cloned() {
+                    uri_hits += 1;
                     for caller in callers {
                         if !cpg_distance.contains_key(&caller) {
                             cpg_distance.insert(caller.clone(), depth + 1);
                             queue.push_back((caller, depth + 1));
                         }
                     }
+                } else {
+                    uri_misses += 1;
                 }
                 // Name-based callers: catches file-local URIs from other files.
-                let name = extract_name(&callee);
+                // Normalise the SCIP descriptor fragment so `SearchSymbols().`
+                // collides with the tier-1-indexed `SearchSymbols`.
+                let name = normalize_callee_name(extract_name(&callee));
                 if !name.is_empty() {
                     if let Some(callers) = self.callee_name_to_callers.get(name).cloned() {
+                        name_hits += 1;
                         for caller in callers {
                             if !cpg_distance.contains_key(&caller) {
                                 cpg_distance.insert(caller.clone(), depth + 1);
                                 queue.push_back((caller, depth + 1));
                             }
                         }
+                    } else {
+                        name_misses += 1;
                     }
                 }
+            }
+        }
+
+        if debug_edges {
+            eprintln!(
+                "[lip-debug-edges] blast_radius_for Phase-2 symbol={} uri_hits={} uri_misses={} name_hits={} name_misses={} cpg_nodes={}",
+                symbol_uri, uri_hits, uri_misses, name_hits, name_misses, cpg_distance.len()
+            );
+            // If nothing hit, dump a few representative keys from each index
+            // so we can eyeball the URI-form mismatch.
+            if uri_hits == 0 && name_hits == 0 {
+                let uri_keys: Vec<&String> = self.callee_to_callers.keys().take(3).collect();
+                let name_keys: Vec<&String> =
+                    self.callee_name_to_callers.keys().take(10).collect();
+                let raw = extract_name(symbol_uri);
+                let normalized = normalize_callee_name(raw);
+                eprintln!(
+                    "[lip-debug-edges]   query_name_raw={:?} normalized={:?} callee_to_callers_total={} sample={:?}",
+                    raw,
+                    normalized,
+                    self.callee_to_callers.len(),
+                    uri_keys
+                );
+                eprintln!(
+                    "[lip-debug-edges]   callee_name_to_callers_total={} sample={:?}",
+                    self.callee_name_to_callers.len(),
+                    name_keys
+                );
             }
         }
 
@@ -1389,6 +1598,35 @@ impl LipDatabase {
             RiskLevel::Low
         };
 
+        let edges_source = self.file_edges_source.get(&def_uri).copied();
+        // v2.3.2 diagnostic — gated on LIP_DEBUG_EDGES=1. Prints the
+        // symbol_uri / def_uri / hit-or-miss triple so we can spot
+        // canonicalisation asymmetry between upsert-time and query-time.
+        if std::env::var("LIP_DEBUG_EDGES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let has = edges_source.is_some();
+            eprintln!(
+                "[lip-debug-edges] blast_radius_for symbol={} def_uri={} edges_source_hit={} value={:?} sym_items={} file_items={}",
+                symbol_uri,
+                def_uri,
+                has,
+                edges_source,
+                sym_items.len(),
+                file_distance.len(),
+            );
+            if !has {
+                // Dump up to 5 keys so we can compare against the insert log.
+                let keys: Vec<&String> =
+                    self.file_edges_source.keys().take(5).collect();
+                eprintln!(
+                    "[lip-debug-edges]   file_edges_source sample keys (total={}): {:?}",
+                    self.file_edges_source.len(),
+                    keys
+                );
+            }
+        }
         BlastRadiusResult {
             symbol_uri: symbol_uri.to_owned(),
             direct_dependents: direct_count,
@@ -1398,6 +1636,7 @@ impl LipDatabase {
             transitive_items,
             truncated,
             risk_level,
+            edges_source,
         }
     }
 
@@ -1509,12 +1748,10 @@ impl LipDatabase {
                     }
                 }
 
-                let edges_source = self.file_edges_source.get(&canon_file).copied();
                 results.push(EnrichedBlastRadius {
                     file_uri: canon_file.clone(),
                     static_result,
                     semantic_items,
-                    edges_source,
                 });
             }
         }
@@ -1594,12 +1831,10 @@ impl LipDatabase {
             }
         }
 
-        let edges_source = self.file_edges_source.get(&file_uri).copied();
         Some(EnrichedBlastRadius {
             file_uri,
             static_result,
             semantic_items,
-            edges_source,
         })
     }
 
@@ -2765,6 +3000,26 @@ mod tests {
         )
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_callee_name_strips_scip_descriptor_suffixes() {
+        // SCIP method / function descriptor form.
+        assert_eq!(normalize_callee_name("SearchSymbols()."), "SearchSymbols");
+        assert_eq!(normalize_callee_name("foo()"), "foo");
+        // SCIP term form.
+        assert_eq!(normalize_callee_name("MyField."), "MyField");
+        // SCIP type form (trailing `#` already consumed by extract_name, but
+        // defensively handle residual non-identifier trailers).
+        assert_eq!(normalize_callee_name("Foo:"), "Foo");
+        // Plain tier-1 identifier — unchanged.
+        assert_eq!(normalize_callee_name("plain_name"), "plain_name");
+        // Snake-case / digits preserved.
+        assert_eq!(normalize_callee_name("do_thing_2()."), "do_thing_2");
+        // Empty.
+        assert_eq!(normalize_callee_name(""), "");
+    }
+
     // ── Revision ──────────────────────────────────────────────────────────
 
     #[test]
@@ -3840,6 +4095,240 @@ impl Greeter {
             db.blast_radius_batch(&[unknown.clone()], None);
         assert!(results.is_empty());
         assert_eq!(not_indexed, vec![unknown]);
+    }
+
+    // v2.3.2 Issue #1 — tier-1 back-fill URI translation.
+    //
+    // SCIP-imported files carry SCIP descriptor fragments (`#NewExporter()`),
+    // but tier-1 tree-sitter emits plain identifier fragments (`#NewExporter`).
+    // Without translation, `blast_radius_for` Phase 3's `def_index.get(caller_sym)`
+    // misses every tier-1-emitted caller URI → Phase 4 falls through to file-
+    // level items with blank `symbol_uri`.
+    //
+    // This test upserts a precomputed file (SCIP-descriptor URIs, no edges)
+    // pointing at a real on-disk source. The back-fill must translate the
+    // tier-1 caller URI to the SCIP URI via the file's defs so the caller
+    // `ImpactItem` carries a non-empty `symbol_uri`.
+    #[test]
+    fn tier1_backfill_translates_caller_uri_to_scip_fragment() {
+        use crate::schema::{OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src_path = dir.path().join("chain.rs");
+        std::fs::write(&src_path, "fn caller() { target(); }\nfn target() {}\n").unwrap();
+        let abs = src_path.to_string_lossy();
+        let file_uri = format!("lip://local//{}", abs.trim_start_matches('/'));
+        // SCIP descriptor fragments (distinct from tier-1's plain-identifier form).
+        let sym_caller = format!("{file_uri}#caller()");
+        let sym_target = format!("{file_uri}#target()");
+
+        let syms = vec![
+            OwnedSymbolInfo {
+                uri: sym_caller.clone(),
+                kind: SymbolKind::Function,
+                display_name: "caller".to_owned(),
+                confidence_score: 90,
+                is_exported: true,
+                ..Default::default()
+            },
+            OwnedSymbolInfo {
+                uri: sym_target.clone(),
+                kind: SymbolKind::Function,
+                display_name: "target".to_owned(),
+                confidence_score: 90,
+                is_exported: true,
+                ..Default::default()
+            },
+        ];
+        let occs = vec![
+            OwnedOccurrence {
+                symbol_uri: sym_caller.clone(),
+                range: OwnedRange {
+                    start_line: 0,
+                    start_char: 3,
+                    end_line: 0,
+                    end_char: 9,
+                },
+                confidence_score: 90,
+                role: Role::Definition,
+                override_doc: None,
+                kind: ReferenceKind::Unknown,
+                is_test: false,
+            },
+            OwnedOccurrence {
+                symbol_uri: sym_target.clone(),
+                range: OwnedRange {
+                    start_line: 1,
+                    start_char: 3,
+                    end_line: 1,
+                    end_char: 9,
+                },
+                confidence_score: 90,
+                role: Role::Definition,
+                override_doc: None,
+                kind: ReferenceKind::Unknown,
+                is_test: false,
+            },
+        ];
+
+        let mut db = LipDatabase::new();
+        db.upsert_file_precomputed(
+            file_uri.clone(),
+            "rust".to_owned(),
+            "abc".to_owned(),
+            syms,
+            occs,
+            vec![], // empty edges → triggers tier-1 back-fill
+        );
+
+        let result = db.blast_radius_for(&sym_target);
+        let all_items: Vec<_> = result
+            .direct_items
+            .iter()
+            .chain(result.transitive_items.iter())
+            .collect();
+
+        // At least one item should carry the SCIP caller URI — not a blank
+        // symbol_uri from the file-level fallback path.
+        assert!(
+            all_items.iter().any(|i| i.symbol_uri == sym_caller),
+            "tier-1 back-fill must translate the caller URI to the SCIP descriptor form; \
+             got items: {:?}",
+            all_items
+        );
+        assert!(
+            all_items.iter().all(|i| !i.symbol_uri.is_empty()),
+            "no ImpactItem should carry a blank symbol_uri when the caller is defined \
+             in a SCIP-imported file; got items: {:?}",
+            all_items
+        );
+
+        // edges_source (v2.3.2) must now surface on BlastRadiusResult (not just EnrichedBlastRadius).
+        assert_eq!(
+            result.edges_source,
+            Some(EdgesSource::ScipWithTier1Edges),
+            "BlastRadiusResult.edges_source must be populated when back-fill ran"
+        );
+    }
+
+    // v2.3.2 Issue #1 cross-file — tier-1 back-fill callee translation across
+    // SCIP documents. Tier-1 emits edges with `to_uri = lip://local/<caller_file>#<name>`
+    // even when the callee is defined in a different file. The same-file
+    // `translate` map misses, so we must fall back to the global
+    // `name_to_symbols` index (populated with SCIP display_name entries) to
+    // resolve cross-file callees. Without this, CKB's merge step sees
+    // `symbol_uri: ""` on every transitive item.
+    #[test]
+    fn tier1_backfill_resolves_cross_file_callee_via_name_index() {
+        use crate::schema::{OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let caller_path = dir.path().join("caller.rs");
+        let target_path = dir.path().join("target.rs");
+        std::fs::write(&caller_path, "fn caller() { target(); }\n").unwrap();
+        std::fs::write(&target_path, "pub fn target() {}\n").unwrap();
+        let caller_abs = caller_path.to_string_lossy();
+        let target_abs = target_path.to_string_lossy();
+        let caller_uri = format!("lip://local//{}", caller_abs.trim_start_matches('/'));
+        let target_uri = format!("lip://local//{}", target_abs.trim_start_matches('/'));
+        // SCIP descriptor fragments — different from tier-1 plain identifiers.
+        let sym_caller = format!("{caller_uri}#caller()");
+        let sym_target = format!("{target_uri}#target()");
+
+        let caller_syms = vec![OwnedSymbolInfo {
+            uri: sym_caller.clone(),
+            kind: SymbolKind::Function,
+            display_name: "caller".to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        }];
+        let caller_occs = vec![OwnedOccurrence {
+            symbol_uri: sym_caller.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 3,
+                end_line: 0,
+                end_char: 9,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        }];
+        let target_syms = vec![OwnedSymbolInfo {
+            uri: sym_target.clone(),
+            kind: SymbolKind::Function,
+            display_name: "target".to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        }];
+        let target_occs = vec![OwnedOccurrence {
+            symbol_uri: sym_target.clone(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 7,
+                end_line: 0,
+                end_char: 13,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        }];
+
+        let mut db = LipDatabase::new();
+        // Import target first so `name_to_symbols["target"]` is populated
+        // before the caller's tier-1 back-fill runs.
+        db.upsert_file_precomputed(
+            target_uri.clone(),
+            "rust".to_owned(),
+            "t1".to_owned(),
+            target_syms,
+            target_occs,
+            vec![],
+        );
+        db.upsert_file_precomputed(
+            caller_uri.clone(),
+            "rust".to_owned(),
+            "c1".to_owned(),
+            caller_syms,
+            caller_occs,
+            vec![],
+        );
+
+        let result = db.blast_radius_for(&sym_target);
+        let all_items: Vec<_> = result
+            .direct_items
+            .iter()
+            .chain(result.transitive_items.iter())
+            .collect();
+
+        // Caller (cross-file) must be resolved to its SCIP URI, not emitted
+        // as a file-level fallback item with empty symbol_uri.
+        assert!(
+            all_items.iter().any(|i| i.symbol_uri == sym_caller),
+            "cross-file caller must resolve to SCIP URI via name_to_symbols fallback; \
+             got items: {:?}",
+            all_items
+        );
+        assert!(
+            all_items.iter().all(|i| !i.symbol_uri.is_empty()),
+            "no cross-file ImpactItem should carry a blank symbol_uri; got items: {:?}",
+            all_items
+        );
+        // `result.edges_source` reflects the *target* file's edges (no outgoing
+        // calls in `target.rs` → Empty). Verify the caller file recorded the
+        // back-filled edge separately.
+        let caller_edges_src = db.file_edges_source.get(&caller_uri).copied();
+        assert_eq!(
+            caller_edges_src,
+            Some(EdgesSource::ScipWithTier1Edges),
+            "caller file's back-fill must register ScipWithTier1Edges"
+        );
     }
 
     #[test]

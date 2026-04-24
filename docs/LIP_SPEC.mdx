@@ -801,7 +801,9 @@ lip.query.blast_radius_batch(changed_file_uris, min_score?) → {
     risk_level:           "low" | "medium" | "high",
     truncated:            bool,
     semantic_items:       [SemanticItem],   // only when min_score is set
-    edges_source:         EdgesSource,      // v2.3.1, see below
+    edges_source:         EdgesSource,      // v2.3.1; v2.3.2 moved onto the
+                                            // underlying BlastRadiusResult so
+                                            // `query.blast_radius` carries it too
   }]
 }
 
@@ -1294,7 +1296,7 @@ lip-protocol/
 - [x] **`BatchQueryNearestByText`** — embed N query strings in a single round-trip and return one nearest-neighbour list per query. Replaces N sequential `QueryNearestByText` calls in multi-query workflows.
 - [x] **`QueryNearestBySymbol`** — find symbols similar to a given symbol URI. The daemon embeds the symbol's text (display_name + signature + doc) on demand and searches the symbol embedding store. `EmbeddingBatch` now routes `lip://` URIs to `symbol_embeddings` and `file://` URIs to `file_embeddings`.
 - [x] **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Replaces N sequential `AnnotationGet` calls; safe inside `BatchQuery`.
-- [x] **`IndexChanged` push notification** — emitted to all active sessions after every `Delta::Upsert` via the broadcast channel. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- [x] **`IndexChanged` push notification** — emitted to every active session *other than the one that produced the `Delta::Upsert`* via the broadcast channel. Internally, every broadcast message is wrapped in a `Notification { source_session: Option<u64>, message: ServerMessage }` envelope tagged with the emitter's session id; each session's drain loop skips envelopes whose `source_session` matches its own id so an importer never receives echoes of its own emissions. Tier 2 upgrades emit with `source_session: None` and reach every session. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
 - [x] **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between daemon and client is now detectable at connect time.
 - [x] **`--managed` flag** (`lip daemon start --managed`) — spawns a background watchdog that polls the parent process every 2 s and exits when the parent has exited. Designed for IDE integrations that manage the daemon as a subprocess.
 

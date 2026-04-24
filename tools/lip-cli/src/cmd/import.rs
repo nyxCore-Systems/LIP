@@ -117,11 +117,24 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|m| strip_file_scheme(&m.project_root))
         .unwrap_or_default();
+    let mut skipped_traversal: usize = 0;
     let mut deltas: Vec<OwnedDelta> = index
         .documents
         .into_iter()
-        .map(|d| convert_document(d, confidence, &project_root_abs))
+        .filter_map(|d| {
+            if !relative_path_is_within_root(&project_root_abs, &d.relative_path) {
+                skipped_traversal += 1;
+                return None;
+            }
+            Some(convert_document(d, confidence, &project_root_abs))
+        })
         .collect();
+    if skipped_traversal > 0 {
+        eprintln!(
+            "warning: skipped {} SCIP document(s) whose relative_path escapes project_root",
+            skipped_traversal
+        );
+    }
 
     // Also import external symbols as a synthetic document.
     if !index.external_symbols.is_empty() {
@@ -456,6 +469,36 @@ fn build_document_uri(project_root_abs: &str, relative_path: &str) -> String {
     } else {
         format!("lip://local/{project_root_abs}/{rel}")
     }
+}
+
+/// True when `relative_path` stays inside `project_root_abs` after resolving
+/// `..` / `.` segments. Used to drop SCIP documents that reference files
+/// outside the project tree — scip-go, for example, sometimes emits entries
+/// pointing into `$GOCACHE/../Library/Caches/go-build/...` which would be
+/// ingested verbatim by the daemon's path-based indexer.
+///
+/// Pure string-level normalization (does not stat) so it works for SCIP
+/// imports on machines other than the one that produced the index.
+/// Returns `true` when `project_root_abs` is empty (no anchor to validate
+/// against — relative-form URIs are deferred to the daemon).
+fn relative_path_is_within_root(project_root_abs: &str, relative_path: &str) -> bool {
+    if project_root_abs.is_empty() {
+        return true;
+    }
+    let mut depth: i32 = 0;
+    for seg in relative_path.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    true
 }
 
 fn convert_document(doc: scip::Document, confidence: u8, project_root_abs: &str) -> OwnedDelta {
@@ -1251,5 +1294,40 @@ mod tests {
     fn build_document_uri_strips_leading_slash_from_relative_path() {
         let uri = build_document_uri("/repo", "/src/foo.rs");
         assert_eq!(uri, "lip://local//repo/src/foo.rs");
+    }
+
+    // ── v2.3.2 path-traversal guard (Issue #3) ──────────────────────────────
+
+    #[test]
+    fn relative_path_within_root_accepts_normal_paths() {
+        assert!(relative_path_is_within_root("/repo", "src/foo.rs"));
+        assert!(relative_path_is_within_root("/repo", "a/b/c/d.go"));
+        assert!(relative_path_is_within_root("/repo", "./src/foo.rs"));
+        assert!(relative_path_is_within_root("/repo", "a/./b.rs"));
+    }
+
+    #[test]
+    fn relative_path_within_root_rejects_traversal() {
+        // scip-go can emit documents pointing into $GOCACHE. Reject them.
+        assert!(!relative_path_is_within_root(
+            "/Users/lisa/Work/Projects/CKB/src",
+            "../../../../Library/Caches/go-build/abc/def.go"
+        ));
+        assert!(!relative_path_is_within_root("/repo", "../outside.rs"));
+        // Even with intermediate descent, net escape is rejected.
+        assert!(!relative_path_is_within_root("/repo", "a/../../outside.rs"));
+    }
+
+    #[test]
+    fn relative_path_within_root_allows_internal_parent_segments() {
+        // `a/b/../c.rs` stays inside the root — don't over-reject.
+        assert!(relative_path_is_within_root("/repo", "a/b/../c.rs"));
+    }
+
+    #[test]
+    fn relative_path_within_root_empty_root_defers_to_daemon() {
+        // Without an anchor, we can't validate — accept and let the daemon
+        // resolve via registered roots.
+        assert!(relative_path_is_within_root("", "../../outside.rs"));
     }
 }

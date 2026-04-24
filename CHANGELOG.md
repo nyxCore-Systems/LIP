@@ -6,6 +6,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-04-24
+
+**CKB testdrive follow-up.** Five correctness fixes discovered after v2.3.1 shipped and CKB began consuming `EnrichedBlastRadius` end-to-end. `protocol_version` stays at `2`; the only schema change moves an existing field between structurally-nested records and is wire-compatible via `#[serde(flatten)]`.
+
+### Changed
+
+- **`edges_source` moved from `EnrichedBlastRadius` onto `BlastRadiusResult`** — so non-enriched `QueryBlastRadius` (not just `QueryBlastRadiusBatch` / `QueryBlastRadiusSymbol`) carries call-edge provenance. `EnrichedBlastRadius` still surfaces it through `#[serde(flatten)] static_result: BlastRadiusResult`, so the JSON wire shape is unchanged. Rust callers that field-access `enriched.edges_source` must switch to `enriched.static_result.edges_source`. Round-trip test `edges_source_survives_all_response_envelopes` asserts the field is emitted in every response variant.
+
+### Fixed
+
+- **Tier-1 back-fill URIs now translate to SCIP descriptor form — same-file and cross-file.** v2.3.1 Feature #5 re-ran the tree-sitter tier-1 extractor on disk when a SCIP import carried no call edges, but tier-1 emits fragment URIs in plain-identifier form (`#NewExporter`) while scip-go / scip-typescript emit descriptor form (`#NewExporter()`, `#Component.`). Every tier-1-emitted caller and callee missed `def_index.get(caller_sym)` in `blast_radius_for` Phase 3, so Phase 4 fell through to the file-level fallback and produced `ImpactItem`s with blank `symbol_uri` — breaking dedup on the CKB side. The back-fill now builds a same-file `display_name → SCIP-uri` map (plus URI fragment as secondary key) and, for cross-file callees whose definition lives in another SCIP document, falls back to the global `name_to_symbols` index (populated at SCIP-import time from each symbol's `display_name`, with symmetric cleanup on re-upsert and file removal). Both sides of every tier-1 edge are translated in-place when an unambiguous match exists. Regression tests `tier1_backfill_translates_caller_uri_to_scip_fragment` (same-file) and `tier1_backfill_resolves_cross_file_callee_via_name_index` (cross-file) seed SCIP-descriptor defs against real on-disk sources and assert every `ImpactItem` carries a non-empty, translated `symbol_uri`.
+
+- **Path-traversal guard on SCIP document ingestion.** scip-go ships documents whose `relative_path` points outside the project tree (e.g. `../../../../Library/Caches/go-build/…`). `build_document_uri` previously joined them literally, producing URIs like `lip://local//Users/lisa/Work/Projects/CKB/src/../../../../Library/Caches/go-build/…` that the daemon's path-based indexer happily ingested. `convert_document` now rejects any document whose net depth falls below the project root under pure string-level normalization (no filesystem access, so the check works on machines other than the one that produced the index). Emits `warning: skipped N SCIP document(s) whose relative_path escapes project_root` when any documents are dropped.
+
+- **Double `lip://local/` prefix in `callee_to_callers` keys.** `SymbolExtractor::lip_uri` stripped the `file://` scheme but not an existing `lip://local/` prefix. When `upsert_file_precomputed`'s tier-1 back-fill replayed the tree-sitter extractor against a file imported with its canonical key (`lip://local//<abs>/<rel>`), every emitted edge URI was double-prefixed (`lip://local/lip://local//<abs>/<rel>#name`), making URI-exact BFS lookups impossible in `blast_radius_for` Phase 2. Fixed by detecting the `lip://local/` prefix and appending `#<name>` directly; the `file://` / bare-path branch is unchanged for tier-1 callers that pass raw paths. Confirmed via `LIP_DEBUG_EDGES=1` diagnostic trace from a CKB testdrive.
+
+- **SCIP-descriptor / tier-1-identifier name-fragment mismatch in `callee_name_to_callers`.** Tier-1 extractor indexes plain identifiers (`SearchSymbols`); SCIP descriptors carry suffix sigils (`SearchSymbols().`, `MyField.`, `Foo:`). Phase-2 BFS in `blast_radius_for` did `extract_name(callee)` without stripping the sigils, so cross-provider lookups always missed even when both providers had indexed the same function. Added `normalize_callee_name(fragment)` — truncates at the first `(`, then trims trailing non-identifier chars — and applied it at all four `callee_name_to_callers` insert sites plus the BFS lookup site, so SCIP and tier-1 callees now share keys. Unit test `normalize_callee_name_strips_scip_descriptor_suffixes` covers the six canonical SCIP descriptor shapes.
+
+### Added
+
+- **`LIP_DEBUG_EDGES=1` diagnostic gating.** `upsert_file_precomputed`, `blast_radius_for` Phase-2 BFS, and `write_message` (wire output) emit focused `[lip-debug-edges]` traces to stderr when the env var is set. Zero-cost and silent when unset. The wire log now reports `has_edges_source` / `edges_source_count` / `body_bytes` + 500-char head instead of a truncated 2 KB tail, so edges_source presence on the wire can be confirmed without scrolling through multi-kilobyte bodies.
+
+---
+
 ## [2.3.1] — 2026-04-21
 
 **CKB import landing fix.** Addresses the "`lip import --push-to-daemon` prints success but every file shows `indexed: false`" class of bug by making client- and daemon-side URI conventions converge, and by back-filling call edges when SCIP imports carry none. `protocol_version` stays at `2`; every change is either additive or limited to CLI behaviour.

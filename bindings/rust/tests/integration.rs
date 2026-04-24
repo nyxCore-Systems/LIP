@@ -2053,7 +2053,7 @@ async fn daemon_blast_radius_edges_source_tier1() {
         ServerMessage::BlastRadiusSymbolResult { result } => {
             let e = result.expect("expected Some result");
             assert_eq!(
-                e.edges_source,
+                e.static_result.edges_source,
                 Some(EdgesSource::Tier1),
                 "Tier-1 upsert must set edges_source = Tier1"
             );
@@ -2076,9 +2076,12 @@ async fn daemon_blast_radius_edges_source_tier1() {
             assert!(
                 results
                     .iter()
-                    .all(|e| e.edges_source == Some(EdgesSource::Tier1)),
+                    .all(|e| e.static_result.edges_source == Some(EdgesSource::Tier1)),
                 "every batch entry must carry edges_source = Tier1; got {:?}",
-                results.iter().map(|e| e.edges_source).collect::<Vec<_>>(),
+                results
+                    .iter()
+                    .map(|e| e.static_result.edges_source)
+                    .collect::<Vec<_>>(),
             );
         }
         other => panic!("expected BlastRadiusBatchResult, got {other:?}"),
@@ -2167,7 +2170,7 @@ async fn daemon_precomputed_tier1_edge_fill_on_disk() {
         ServerMessage::BlastRadiusSymbolResult { result } => {
             let e = result.expect("expected Some result");
             assert_eq!(
-                e.edges_source,
+                e.static_result.edges_source,
                 Some(EdgesSource::ScipWithTier1Edges),
                 "precomputed + on-disk source should back-fill tier-1 edges"
             );

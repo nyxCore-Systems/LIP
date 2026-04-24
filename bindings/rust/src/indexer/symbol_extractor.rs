@@ -78,7 +78,15 @@ impl<'a> SymbolExtractor<'a> {
     }
 
     fn lip_uri(&self, name: &str) -> String {
-        // Strip the file:// scheme so we don't produce lip://local/file:///abs/path#Name.
+        // `file_uri` may already be a canonical `lip://local/<abs>` URI — this
+        // happens in the v2.3.1 back-fill path where `upsert_file_precomputed`
+        // replays the tree-sitter extractor against a file that was imported
+        // with its canonical key. Appending without re-prefixing avoids the
+        // `lip://local/lip://local/...` double-prefix seen in `callee_to_callers`.
+        if self.file_uri.starts_with("lip://local/") {
+            return format!("{}#{}", self.file_uri, name);
+        }
+        // Strip `file://` so we don't produce `lip://local/file:///abs/path#Name`.
         let path = self
             .file_uri
             .strip_prefix("file://")
