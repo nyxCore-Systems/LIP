@@ -92,9 +92,12 @@ Each connection handles one request/response pair. The protocol is synchronous p
 | `QueryDefinition` | Find definition at (uri, line, col) |
 | `QueryReferences` | Find all references to a symbol URI |
 | `QueryHover` | Hover info at (uri, line, col) |
-| `QueryBlastRadius` | Blast radius for a symbol URI |
+| `QueryBlastRadius` | Blast radius for a symbol URI (carries `edges_source` since v2.3.2) |
 | `QueryBlastRadiusBatch` | Batch blast radius for changed files, with optional semantic enrichment (§8.1.1) |
-| `QueryWorkspaceSymbols` | Search symbols by name |
+| `QueryBlastRadiusSymbol` | Single-symbol blast radius — returns `EnrichedBlastRadius` or `None` (§8.1.2) |
+| `QueryOutgoingCalls` | Forward call-graph BFS via `caller_to_callees` (§8.1.3) |
+| `QueryOutgoingImpact` | Enriched forward traversal — twin of `QueryBlastRadiusSymbol` with `edges_source` + semantic enrichment (§8.1.4) |
+| `QueryWorkspaceSymbols` | Search symbols by name; ranked + kind/scope/modifier filters since v2.3 |
 | `QueryDocumentSymbols` | List symbols in a file |
 | `QueryDeadSymbols` | Find unreferenced symbols |
 | `AnnotationGet/Set/List` | Persistent symbol annotations |
@@ -106,6 +109,8 @@ Each connection handles one request/response pair. The protocol is synchronous p
 | `ReindexStale` | Atomic reindex if stale — re-reads only URIs that are unindexed or older than `max_age_seconds` |
 | `BatchFileStatus` | Query index status for multiple files in one round-trip (batchable) |
 | `QueryAbiHash` | SHA-256 over a file's exported API surface — stable recompilation trigger (batchable) |
+| `RegisterProjectRoot` | Register a filesystem root so the daemon resolves `lip://local/<rel>` URIs (v2.3.1) |
+| `RegisterTier3Source` | Declare provenance (tool name / version / project root) for a SCIP-import batch |
 | `BatchQuery` | Multiple queries in one round-trip |
 
 **Acknowledgment:** Every `Delta` receives a `DeltaAck { seq, accepted }` response, eliminating the fire-and-forget drift that LSP is known for.

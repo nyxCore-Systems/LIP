@@ -214,6 +214,16 @@ pub struct LipDatabase {
     /// file is stored here under key `"foo"`, so blast_radius on the canonical
     /// definition `lip://local/Y#foo` still finds all callers.
     callee_name_to_callers: HashMap<String, Vec<String>>,
+    /// Forward-direction twin of `callee_name_to_callers` (v2.3.5).
+    /// CPG name index: caller display_name → [callee symbol_uris]. Bridges
+    /// the tier-1 back-fill's URI-form mismatches during `outgoing_impact_for`
+    /// the same way the reverse bridge serves `blast_radius_for`: when the
+    /// SCIP descriptor caller URI (`Engine#AnalyzeImpact().`) misses the
+    /// URI-exact `caller_to_callees` key (which the back-fill ended up
+    /// writing under the raw tier-1 form), the BFS falls through to this
+    /// name-fragment keyed bridge. Keys are normalised via
+    /// `normalize_callee_name(extract_name(from_uri))`.
+    caller_name_to_callees: HashMap<String, Vec<String>>,
     /// Pre-built symbols from mounted dependency slices (Tier 3, score=100).
     /// Keyed by symbol URI. Not derived from source text — set directly by `mount_slice`.
     mounted_symbols: HashMap<String, OwnedSymbolInfo>,
@@ -271,6 +281,7 @@ impl LipDatabase {
             file_call_edges: HashMap::new(),
             name_to_symbols: HashMap::new(),
             callee_name_to_callers: HashMap::new(),
+            caller_name_to_callees: HashMap::new(),
             mounted_symbols: HashMap::new(),
             mounted_packages: HashMap::new(),
             file_consumed_names: HashMap::new(),
@@ -630,6 +641,17 @@ impl LipDatabase {
                         .or_default()
                         .push(edge.from_uri.clone());
                 }
+                // Forward twin: enables outgoing_impact_for to seed from a
+                // SCIP descriptor URI when the back-fill kept the raw
+                // tier-1 caller URI. v2.3.5.
+                let caller_name =
+                    normalize_callee_name(extract_name(&edge.from_uri)).to_owned();
+                if !caller_name.is_empty() {
+                    self.caller_name_to_callees
+                        .entry(caller_name)
+                        .or_default()
+                        .push(edge.to_uri.clone());
+                }
                 pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
             }
             let src = if pairs.is_empty() {
@@ -833,6 +855,13 @@ impl LipDatabase {
                     .or_default()
                     .push(edge.from_uri.clone());
             }
+            let caller_name = normalize_callee_name(extract_name(&edge.from_uri)).to_owned();
+            if !caller_name.is_empty() {
+                self.caller_name_to_callees
+                    .entry(caller_name)
+                    .or_default()
+                    .push(edge.to_uri.clone());
+            }
             pairs.push((edge.from_uri.clone(), edge.to_uri.clone()));
         }
 
@@ -932,6 +961,14 @@ impl LipDatabase {
                                 .entry(callee_name)
                                 .or_default()
                                 .push(from_uri.clone());
+                        }
+                        let caller_name =
+                            normalize_callee_name(extract_name(&from_uri)).to_owned();
+                        if !caller_name.is_empty() {
+                            self.caller_name_to_callees
+                                .entry(caller_name)
+                                .or_default()
+                                .push(to_uri.clone());
                         }
                         pairs.push((from_uri, to_uri));
                         filled = true;
@@ -1046,6 +1083,13 @@ impl LipDatabase {
                     callers.retain(|c| *c != from);
                     if callers.is_empty() {
                         self.callee_name_to_callers.remove(callee_name);
+                    }
+                }
+                let caller_name = normalize_callee_name(extract_name(&from));
+                if let Some(callees) = self.caller_name_to_callees.get_mut(caller_name) {
+                    callees.retain(|c| *c != to);
+                    if callees.is_empty() {
+                        self.caller_name_to_callees.remove(caller_name);
                     }
                 }
             }
@@ -1984,6 +2028,14 @@ impl LipDatabase {
         let threshold = min_score.unwrap_or(0.6);
 
         // ── Forward BFS over caller_to_callees ───────────────────────────
+        //
+        // Mirrors Phase 2 of `blast_radius_for`: at each hop, consult both
+        // the URI-exact `caller_to_callees` index and the name-bridge
+        // `caller_name_to_callees`. The bridge catches the case where the
+        // seed (or an intermediate caller) is a SCIP descriptor URI while
+        // the tier-1 back-fill kept the raw tier-1 form as the index key —
+        // symmetric to how the reverse direction bridges file-local callee
+        // URIs to scip-form seeds. v2.3.5.
         let mut callee_distance: HashMap<String, u32> = HashMap::new();
         let mut truncated = false;
         {
@@ -1994,10 +2046,22 @@ impl LipDatabase {
             'bfs: for hop in 1..=depth {
                 let mut next: Vec<String> = Vec::new();
                 for caller in &frontier {
-                    let Some(callees) = self.caller_to_callees.get(caller) else {
-                        continue;
-                    };
-                    for callee in callees {
+                    // URI-exact callees.
+                    let mut direct_callees: Vec<String> = self
+                        .caller_to_callees
+                        .get(caller)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Name-bridge callees: normalise the caller's fragment
+                    // so a SCIP descriptor (`AnalyzeImpact().`) collides
+                    // with the tier-1-indexed `AnalyzeImpact`.
+                    let caller_name = normalize_callee_name(extract_name(caller));
+                    if !caller_name.is_empty() {
+                        if let Some(extra) = self.caller_name_to_callees.get(caller_name) {
+                            direct_callees.extend(extra.iter().cloned());
+                        }
+                    }
+                    for callee in &direct_callees {
                         if callee == symbol_uri {
                             continue; // skip self-cycles back to the seed
                         }
@@ -4873,6 +4937,97 @@ impl Greeter {
         assert!(
             direct.iter().all(|i| !i.symbol_uri.is_empty()),
             "outgoing direct items must never carry blank symbol_uri; got: {:?}",
+            direct
+        );
+    }
+
+    // v2.3.5 — forward-direction twin of the `callee_name_to_callers` bridge.
+    // When a caller symbol is registered under a SCIP descriptor URI
+    // (`pkg#Engine#AnalyzeImpact().`) but the pre-computed call edges key
+    // the caller in tier-1 form (`...#AnalyzeImpact`), the seed lookup in
+    // `caller_to_callees` misses. `outgoing_impact_for` must fall through
+    // to `caller_name_to_callees` via the normalised name fragment.
+    #[test]
+    fn outgoing_impact_name_bridge_for_tier1_caller_uri() {
+        use crate::schema::{OwnedGraphEdge, OwnedRange, OwnedSymbolInfo, SymbolKind};
+
+        let mut db = LipDatabase::new();
+        let caller_file = "lip://local//abs/engine.go".to_owned();
+        let callee_file = "lip://local//abs/leaf.go".to_owned();
+        // SCIP descriptor form for the caller (Go method on Engine receiver).
+        // `extract_name` + `normalize_callee_name` collapses this to
+        // `"AnalyzeImpact"` — matching the tier-1-form caller URI below.
+        let scip_caller_sym = format!("{caller_file}#Engine#AnalyzeImpact().");
+        // Raw tier-1 caller URI that the back-fill resolver's fallthrough
+        // would keep when the same-file `translate` map and the global
+        // `name_to_symbols` index both miss for an overloaded method name.
+        let tier1_caller_sym = format!("{caller_file}#AnalyzeImpact");
+        let callee_sym = format!("{callee_file}#leaf().");
+
+        let range = OwnedRange {
+            start_line: 0,
+            start_char: 0,
+            end_line: 0,
+            end_char: 1,
+        };
+        let defn_occ = |sym: &str| OwnedOccurrence {
+            symbol_uri: sym.to_owned(),
+            range: range.clone(),
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+        let mk_sym = |uri: &str, name: &str| OwnedSymbolInfo {
+            uri: uri.to_owned(),
+            kind: SymbolKind::Function,
+            display_name: name.to_owned(),
+            confidence_score: 90,
+            is_exported: true,
+            ..Default::default()
+        };
+
+        // Callee registered cleanly in SCIP form so Phase-3 resolution can
+        // map it to a file via `def_index` rather than the #-strip fallback.
+        db.upsert_file_precomputed(
+            callee_file.clone(),
+            "go".to_owned(),
+            "c1".to_owned(),
+            vec![mk_sym(&callee_sym, "leaf")],
+            vec![defn_occ(&callee_sym)],
+            vec![],
+        );
+        // Caller file: SCIP symbol + definition (feeds def_index with the
+        // SCIP descriptor), but the pre-computed edge keys the caller in
+        // tier-1 form. This is the shape the tier-1 back-fill produces
+        // when the caller name is ambiguous across the codebase.
+        let edge = OwnedGraphEdge {
+            from_uri: tier1_caller_sym.clone(),
+            to_uri: callee_sym.clone(),
+            kind: EdgeKind::Calls,
+            at_range: range.clone(),
+        };
+        db.upsert_file_precomputed(
+            caller_file.clone(),
+            "go".to_owned(),
+            "e1".to_owned(),
+            vec![mk_sym(&scip_caller_sym, "AnalyzeImpact")],
+            vec![defn_occ(&scip_caller_sym)],
+            vec![edge],
+        );
+
+        // Query using the SCIP descriptor URI — URI-exact seed lookup in
+        // `caller_to_callees` misses (key is the tier-1 form), so the
+        // forward BFS must bridge via `caller_name_to_callees`.
+        let enriched = db
+            .outgoing_impact_for(&scip_caller_sym, None, None)
+            .expect("outgoing_impact_for must return Some for a known symbol");
+        let direct = &enriched.static_result.direct_items;
+        assert!(
+            direct.iter().any(|i| i.symbol_uri == callee_sym),
+            "forward name-bridge must surface the callee from a SCIP-form seed; \
+             got direct_items: {:?}",
             direct
         );
     }

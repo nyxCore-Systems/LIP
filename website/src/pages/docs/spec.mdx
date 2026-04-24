@@ -9,7 +9,7 @@ import Badge from '../../components/Badge.astro'
 
 # LIP — Linked Incremental Protocol
 
-**Design Document & Specification v2.0.1** · MIT License
+**Design Document & Specification v2.3.5** · MIT License
 
 ---
 
@@ -117,7 +117,7 @@ LIP is designed around three axioms:
 
 ## 2. Comparison Matrix
 
-| Property | LSP 3.17 | SCIP | **LIP v2.0.1** |
+| Property | LSP 3.17 | SCIP | **LIP v2.3.5** |
 |---|---|---|---|
 | Wire format | JSON-RPC 2.0 | Protobuf 3 | **FlatBuffers (zero-copy)** |
 | Framing | HTTP Content-Length | n/a (file) | **4-byte length prefix** |
@@ -1168,6 +1168,48 @@ lip-protocol/
 - [x] **Tier 1.5 Datalog inference** — `LipDatabase::run_tier1_5_inference()` runs a fixed-point loop applying two conservative rules: (1) if every direct caller of a symbol is at confidence ≥ 80, raise the callee to 65; (2) exported symbols with no local callers are raised by 5 points (capped at 65). Never lowers confidence; ceiling 65 leaves headroom for Tier 2.
 - [x] **Tier 2 backoff recovery** — language server backends now recover from transient crashes with exponential backoff (2–300 s, permanent disable only after 8 consecutive failures). `BackoffState { failure_count, available_after }` tracks per-backend state. Replaces immediate permanent disable on first crash.
 
+### v2.3 — CKB structural-parity bundle ✓
+
+- [x] **Rich symbol metadata** — `OwnedSymbolInfo` gains `signature_normalized`, `modifiers`, `visibility` + `visibility_confidence`, `container_name`, `extraction_tier`, and `modifiers_source`. Populated by all Tier-1 extractors (Rust / TypeScript / Python / Swift / Kotlin) and by the SCIP importer (via upstream-compatible `enclosing_symbol = 8` + prefix-parsed modifiers).
+- [x] **Reference classification** — `OwnedOccurrence` gains `kind: ReferenceKind` (`Unknown` / `Call` / `Read` / `Write` / `Type` / `Implements` / `Extends`) + `is_test: bool`. Tier-1 classifier uses tree-sitter parent/field lookup; SCIP import/export round-trips via `SymbolRole::ReadAccess | WriteAccess | Test`.
+- [x] **`QueryBlastRadiusSymbol { symbol_uri, min_score? } → BlastRadiusSymbolResult { result: Option<EnrichedBlastRadius> }`** — single-symbol wrapper around `blast_radius_for_symbol`. Returns `None` for unknown or unindexed symbols so callers can distinguish "zero impact" from "no data."
+- [x] **`QueryOutgoingCalls { symbol_uri, depth } → OutgoingCallsResult { edges, truncated }`** — forward call-graph BFS via a new `caller_to_callees` index. Depth clamped `[1, 8]`; NODE_LIMIT = 200.
+- [x] **Ranked & filtered workspace symbols** — `QueryWorkspaceSymbols` adds `kind_filter`, `scope`, `modifier_filter`; `WorkspaceSymbolsResult` adds `ranked: Vec<RankedSymbol>` with tiered scoring (`Exact = 1.0` / `Prefix = 0.8` / `Fuzzy = 0.5`). `ranked` is `skip_if_empty`; empty query preserves pre-v2.3 semantics.
+- [x] **All additive.** `protocol_version` stays at `2`; every new field is `#[serde(default, skip_serializing_if = …)]`; every new message is advertised via `HandshakeResult.supported_messages`.
+
+### v2.3.1 — CKB import landing fix ✓
+
+- [x] **`RegisterProjectRoot { root }`** — idempotent filesystem-root registration. Lets the daemon resolve relative `lip://local/<rel>` URIs against the absolute-form records emitted by the tier-1 indexer and by `lip import`. Longest matching root wins. Advertised as `register_project_root` in `HandshakeResult.supported_messages`. `RegisterTier3Source` now auto-registers its `source.project_root`.
+- [x] **`EdgesSource` provenance on blast radius** — `EnrichedBlastRadius` gains `edges_source: Option<EdgesSource>` with four variants (`Tier1 | ScipWithTier1Edges | ScipOnly | Empty`). Consumers that maintain their own fallback path can now detect when LIP has no structural edges and route around us.
+- [x] **Tier-1 edge back-fill on SCIP imports** — `upsert_file_precomputed` now falls back to running the tree-sitter tier-1 extractor over the file on disk when the incoming SCIP document has no call edges. Produces `edges_source = ScipWithTier1Edges` on success. Fills the gap where `scip-go` inconsistently emits call edges and `scip-clang` omits them entirely.
+- [x] **`lip import --verify`** — after pushing deltas, samples up to 10 documents and round-trips `QueryFileStatus` + `QueryWorkspaceSymbols`. Exits non-zero on any mismatch so CI catches silent import drops.
+- [x] **`lip import` URI scheme** — imported documents now use `lip://local/<rel>` or the canonical doubled-slash `lip://local/<abs>/<rel>` form, replacing the previous `file:///<rel>` form that silently failed to match any CKB query.
+- [x] **`LipDatabase::canonicalize_uri`** — every public query- and mutation-surface method canonicalises its URI argument through `registered_roots`, so relative and absolute lip-local forms resolve to the same record.
+- [x] **Self-echo deadlock fix** — broadcast notifications now carry `source_session: Option<u64>`; the drain loop skips envelopes whose `source_session` matches its own. Regression test `daemon_bulk_precomputed_import_does_not_deadlock` pushes 200 precomputed deltas through a single session.
+
+### v2.3.2 — CKB testdrive follow-up ✓
+
+- [x] **`edges_source` moved from `EnrichedBlastRadius` onto `BlastRadiusResult`** — so non-enriched `QueryBlastRadius` carries call-edge provenance. `EnrichedBlastRadius` still surfaces it via `#[serde(flatten)] static_result: BlastRadiusResult`, so the JSON wire shape is unchanged. Round-trip test `edges_source_survives_all_response_envelopes`.
+- [x] **Tier-1 back-fill URIs translate to SCIP descriptor form** — same-file and cross-file. Tier-1 emits `#NewExporter`; SCIP carries `#NewExporter()` / `#Component.`. The back-fill now builds a same-file `display_name → SCIP-uri` map and, for cross-file callees, falls back to a global `name_to_symbols` index populated at SCIP-import time.
+- [x] **Path-traversal guard on SCIP document ingestion** — rejects documents whose net depth falls below the project root under pure string-level normalization. Catches scip-go's `../../../../Library/Caches/go-build/…` drift.
+- [x] **Double `lip://local/` prefix in `callee_to_callers` keys** — `SymbolExtractor::lip_uri` now detects the `lip://local/` prefix and appends `#<name>` directly instead of re-wrapping.
+- [x] **SCIP-descriptor / tier-1-identifier name-fragment mismatch** — added `normalize_callee_name(fragment)` (truncates at first `(`, trims trailing non-identifier chars) and applied it at all four `callee_name_to_callers` insert sites plus the BFS lookup site, so SCIP and tier-1 callees share keys. Unit test `normalize_callee_name_strips_scip_descriptor_suffixes`.
+- [x] **Blank `symbol_uri` fallback** — Phase 3 of `blast_radius_for` derives the file URI by stripping the `#<name>` fragment when `def_index` misses and the caller URI has the `lip://local/` scheme, using the caller URI verbatim as `symbol_uri`. Regression test `blast_radius_phase3_fallback_for_tier1_caller_uri`.
+- [x] **`LIP_DEBUG_EDGES=1` diagnostic gating** — zero-cost when unset. The wire log reports `has_edges_source` / `edges_source_count` / `body_bytes` + 500-char head.
+
+### v2.3.3 — Outgoing-impact symmetry ✓
+
+- [x] **`QueryOutgoingImpact { symbol_uri, depth?, min_score? } → OutgoingImpactResult { result: Option<EnrichedOutgoingImpact> }`** — forward-direction twin of `QueryBlastRadiusSymbol`. BFS walks `caller_to_callees` starting from `symbol_uri`, splits direct vs. transitive hops, and wraps the static result in an envelope flattened with `#[serde(flatten)] static_result: OutgoingImpactStatic` so `edges_source` lives on the inner struct (matching the v2.3.2 shape for blast radius). `depth` clamps to `1..=8` (default 8); `NODE_LIMIT=200` bounds the BFS frontier. Semantic enrichment reuses `SemanticImpactItem { source: Static | Semantic | Both }`: symbol-level embedding is preferred, with file-level embedding as the fallback seed. The v2.3.2 Phase 3 `#<name>`-strip fallback is applied symmetrically on the callee side. Advertised as `query_outgoing_impact` in `HandshakeResult.supported_messages`.
+
+### v2.3.4 — Module-level grouping on impact items ✓
+
+- [x] **`ImpactItem.module_id` and `SemanticImpactItem.module_id`** — `Option<String>`, resolved once at upsert time (stored on `FileInput`), surfaced on every `ImpactItem` / `SemanticImpactItem` built by `blast_radius_for`, `blast_radius_for_symbol`, `blast_radius_batch`, and `outgoing_impact_for`. Three-tier resolution, first hit wins: (1) slice URI prefix `lip://<manager>/<package>@<version>/…` → `"<manager>/<package>"`; (2) first `<manager> <name>` pair parsed from any SCIP symbol attached to the file (rejects `local <id>` sentinels); (3) upward manifest walk (depth-capped at 12) for `Cargo.toml`, `go.mod`, `package.json`, `pyproject.toml`, `setup.py`, `pubspec.yaml`. Parse failures, I/O failures, and unsupported languages (C / C++ / Kotlin / Swift / Java) return `None`. Unlocks CKB's `RecomputeBlastRadius.ModuleCount` for non-sliced LIP-only traffic. `protocol_version` stays at `2`; `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+
+### v2.3.5 — Forward-direction name-bridge symmetry ✓
+
+- [x] **`caller_name_to_callees` index** — forward-direction twin of v2.3.2's `callee_name_to_callers`. Keyed by `normalize_callee_name(extract_name(from_uri))`; populated at all three edge-insertion sites (regular tier-1 upsert, SCIP pre-computed edges, SCIP-empty tier-1 back-fill) and pruned in `remove_file_call_edges`.
+- [x] **Symmetric BFS in `outgoing_impact_for`** — every frontier hop now consults both `caller_to_callees` (URI-exact) and `caller_name_to_callees` (name-bridge), exactly matching Phase 2 of `blast_radius_for`. Closes the asymmetry where `QueryOutgoingImpact` seeded from a SCIP descriptor URI (e.g. `pkg#Engine#AnalyzeImpact().`) returned empty `direct_items` because the tier-1 back-fill had kept the raw tier-1 caller URI when the method name was ambiguous across the codebase. Blocks pre-v2.3.5 CKB integration of `QueryOutgoingImpact` for Go / TypeScript / Python repos with name-overloaded methods. Regression test `outgoing_impact_name_bridge_for_tier1_caller_uri`.
+
 ### v1.2 — In progress
 
 - [ ] FlatBuffers binary IPC — replace JSON wire framing with generated FlatBuffers tables
@@ -1280,5 +1322,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v2.0.1 · April 2026 · MIT License*
+*LIP Specification v2.3.5 · April 2026 · MIT License*
 *Lisa Welsch*
