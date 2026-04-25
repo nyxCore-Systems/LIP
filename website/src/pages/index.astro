@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import { version } from '../version';
 ---
 
 <Layout>
@@ -41,7 +42,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="hero-head">
         <div class="badge">
           <span class="badge-dot"></span>
-          v2.3.5 — Free & Open Source
+          v{version} — Free & Open Source
         </div>
         <h1 class="hero-title">
           Live code intelligence.<br />
@@ -222,7 +223,7 @@ import Layout from '../layouts/Layout.astro';
         </div>
         <div class="terminal-body">
           <p class="tline"><span class="tprompt">$</span> <span class="tcmd">lip daemon --socket /tmp/lip.sock</span></p>
-          <p class="tline tout">LIP daemon v2.3.5 — listening on /tmp/lip.sock</p>
+          <p class="tline tout">LIP daemon v{version} — listening on /tmp/lip.sock</p>
           <p class="tline tout">Watching ./src  <span class="tdim">3,847 files · Tier 1 warm</span></p>
           <p class="tline tgap"><span class="tprompt">$</span> <span class="tcmd">lip query blast-radius \</span></p>
           <p class="tline"><span class="tindent"></span><span class="tcmd">"lip://local/src/auth.rs#AuthService"</span></p>
@@ -985,7 +986,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="footer-left">
         <div class="footer-logo">LIP</div>
         <div class="footer-tagline">Linked Incremental Protocol</div>
-        <div class="footer-meta">Free & open source · MIT License · v2.3.5 · © 2026 Lisa Welsch</div>
+        <div class="footer-meta">Free & open source · MIT License · v{version} · © 2026 Lisa Welsch</div>
       </div>
       <div class="footer-links">
         <a href="https://github.com/nyxCore-Systems/LIP" target="_blank" rel="noopener">GitHub</a>
