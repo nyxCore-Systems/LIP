@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::query_graph::LipDatabase;
-use crate::schema::OwnedAnnotationEntry;
+use crate::schema::{OwnedAnnotationEntry, OwnedGraphEdge, OwnedOccurrence, OwnedSymbolInfo};
 
 /// Compact the journal when it has accumulated this many entries.
 /// Below this threshold the overhead of compaction isn't worth it.
@@ -48,6 +48,14 @@ pub enum JournalEntry {
         uri: String,
         text: String,
         language: String,
+    },
+    UpsertFilePrecomputed {
+        uri: String,
+        language: String,
+        content_hash: String,
+        symbols: Vec<OwnedSymbolInfo>,
+        occurrences: Vec<OwnedOccurrence>,
+        edges: Vec<OwnedGraphEdge>,
     },
     RemoveFile {
         uri: String,
@@ -168,9 +176,25 @@ pub fn compact(path: &Path, db: &LipDatabase) -> anyhow::Result<usize> {
             })?;
         }
 
-        // One UpsertFile per tracked file.
+        // One UpsertFile (or UpsertFilePrecomputed) per tracked file.
         for uri in db.tracked_uris() {
-            if let (Some(text), Some(lang)) = (db.file_text(&uri), db.file_language(&uri)) {
+            let Some(lang) = db.file_language(&uri) else {
+                continue;
+            };
+            if db.is_precomputed(&uri) {
+                let content_hash = db.file_content_hash(&uri).unwrap_or_default().to_owned();
+                let symbols = db.cached_symbols(&uri).as_ref().clone();
+                let occurrences = db.cached_occurrences(&uri).as_ref().clone();
+                let edges = db.file_call_edges_raw(&uri);
+                write_entry(&JournalEntry::UpsertFilePrecomputed {
+                    uri,
+                    language: lang.to_owned(),
+                    content_hash,
+                    symbols,
+                    occurrences,
+                    edges,
+                })?;
+            } else if let Some(text) = db.file_text(&uri) {
                 write_entry(&JournalEntry::UpsertFile {
                     uri,
                     text: text.to_owned(),
@@ -207,6 +231,23 @@ pub fn replay(entries: &[JournalEntry], db: &mut LipDatabase) {
                 language,
             } => {
                 db.upsert_file(uri.clone(), text.clone(), language.clone());
+            }
+            JournalEntry::UpsertFilePrecomputed {
+                uri,
+                language,
+                content_hash,
+                symbols,
+                occurrences,
+                edges,
+            } => {
+                db.upsert_file_precomputed(
+                    uri.clone(),
+                    language.clone(),
+                    content_hash.clone(),
+                    symbols.clone(),
+                    occurrences.clone(),
+                    edges.clone(),
+                );
             }
             JournalEntry::RemoveFile { uri } => {
                 db.remove_file(uri);
@@ -353,6 +394,90 @@ mod tests {
         replay(&compacted_entries, &mut db2);
         assert_eq!(db2.file_count(), 1);
         assert_eq!(db2.current_merkle_root(), Some("abc"));
+    }
+
+    #[test]
+    fn precomputed_survives_compact_replay() {
+        use crate::schema::{
+            OwnedOccurrence, OwnedRange, OwnedSymbolInfo, ReferenceKind, Role, SymbolKind,
+        };
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_owned();
+
+        let sym = OwnedSymbolInfo {
+            uri: "lip://local/lib.rs#Foo".into(),
+            display_name: "Foo".into(),
+            kind: SymbolKind::Function,
+            documentation: None,
+            signature: None,
+            confidence_score: 90,
+            relationships: vec![],
+            runtime_p99_ms: None,
+            call_rate_per_s: None,
+            taint_labels: vec![],
+            blast_radius: 0,
+            is_exported: false,
+            ..Default::default()
+        };
+        let occ = OwnedOccurrence {
+            symbol_uri: "lip://local/lib.rs#Foo".into(),
+            range: OwnedRange {
+                start_line: 0,
+                start_char: 0,
+                end_line: 0,
+                end_char: 3,
+            },
+            confidence_score: 90,
+            role: Role::Definition,
+            override_doc: None,
+            kind: ReferenceKind::Unknown,
+            is_test: false,
+        };
+
+        // Write a precomputed entry.
+        let (mut j, _) = Journal::open(&path).unwrap();
+        j.append(&JournalEntry::UpsertFilePrecomputed {
+            uri: "file:///project/lib.rs".into(),
+            language: "rust".into(),
+            content_hash: "abc123".into(),
+            symbols: vec![sym],
+            occurrences: vec![occ],
+            edges: vec![],
+        })
+        .unwrap();
+        drop(j);
+
+        // Replay into db1.
+        let (_, entries) = Journal::open(&path).unwrap();
+        let mut db1 = LipDatabase::new();
+        replay(&entries, &mut db1);
+        assert_eq!(db1.file_count(), 1);
+        assert!(db1.is_precomputed("file:///project/lib.rs"));
+        let syms = db1.file_symbols("file:///project/lib.rs");
+        assert_eq!(syms.len(), 1, "precomputed symbol must survive replay");
+
+        // Compact and replay into db2.
+        compact(&path, &db1).unwrap();
+        let (_, compacted) = Journal::open(&path).unwrap();
+        let mut db2 = LipDatabase::new();
+        replay(&compacted, &mut db2);
+        assert_eq!(db2.file_count(), 1);
+        assert!(db2.is_precomputed("file:///project/lib.rs"));
+        let syms2 = db2.file_symbols("file:///project/lib.rs");
+        assert_eq!(
+            syms2.len(),
+            1,
+            "precomputed symbol must survive compact + replay"
+        );
+        assert_eq!(syms2[0].display_name, "Foo");
+
+        let results = db2.workspace_symbols("Foo", 10);
+        assert_eq!(
+            results.len(),
+            1,
+            "precomputed symbol must be searchable after compact + replay"
+        );
     }
 
     #[test]

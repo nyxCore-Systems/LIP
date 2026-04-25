@@ -35,6 +35,7 @@
 //! roadmap.
 
 pub mod db;
+pub(crate) mod module_id;
 pub mod types;
 
 pub use db::LipDatabase;

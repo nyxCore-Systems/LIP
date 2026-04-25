@@ -1,6 +1,6 @@
 ---
 title: "LIP — Linked Incremental Protocol"
-subtitle: "Design Document & Specification v2.0"
+subtitle: "Design Document & Specification v2.3"
 status: "Stable"
 license: "MIT"
 authors: ["Lisa Welsch"]
@@ -564,6 +564,34 @@ to SCIP's escaping rules:
 lip://npm/lodash@4.17.21/lodash#`_.chunk`
 ```
 
+### 5.4 Local URIs and project roots (v2.3.1)
+
+For the `local` scope, the daemon stores each file under a single *canonical* URI.
+Two forms are accepted on the wire; both map to the same record:
+
+```
+absolute   lip://local//Users/lisa/repo/src/foo.rs
+relative   lip://local/src/foo.rs
+```
+
+The absolute form carries a doubled slash after `lip://local/` because the path
+component itself begins with `/`. This is the form the tier-1 indexer emits and
+the form the v2.3.1 SCIP importer produces (see §10.2). The relative form is
+resolved against whichever *project roots* the client has registered:
+
+```
+Client → Daemon:  RegisterProjectRoot { root: "/Users/lisa/repo" }
+Daemon → Client:  DeltaAck { accepted: true }
+```
+
+`RegisterProjectRoot` is idempotent — re-registering the same root is a no-op.
+Clients may register multiple roots; the daemon resolves relative URIs against
+the longest matching root first. The capability is advertised as
+`register_project_root` in `HandshakeResult.supported_messages`; pre-v2.3.1
+daemons reply with `UnknownMessage` and clients must fall back to sending
+absolute URIs. CKB relies on this contract to send `lip://local/<rel>` and have
+the daemon re-join them with the absolute records written by `lip import`.
+
 ---
 
 ## 6. Protocol Lifecycle
@@ -662,6 +690,7 @@ lip.query.definition(uri: string, position: Range) → SymbolInfo
 lip.query.references(symbol_uri: string, limit?: int) → [Occurrence]
 lip.query.hover(uri: string, position: Range) → HoverResult
 lip.query.blast_radius(symbol_uri: string) → BlastRadiusResult
+lip.query.blast_radius_batch(changed_file_uris: [string], min_score?: f32) → BlastRadiusBatchResult
 lip.query.subgraph(symbol_uri: string, depth: int) → SymbolGraph
 lip.query.taint(symbol_uri: string) → [TaintPath]
 lip.query.workspace_symbols(query: string, limit?: int) → [SymbolInfo]
@@ -758,6 +787,159 @@ lip.query.blast_radius(symbol_uri) → {
 Available as a pre-commit hook: "Changing this interface will affect 47 call sites
 across 12 files and 3 microservices."
 
+#### 8.1.1 Batch blast radius with semantic enrichment
+
+```
+lip.query.blast_radius_batch(changed_file_uris, min_score?) → {
+  results: [{
+    symbol_uri:           string,
+    direct_dependents:    int,
+    transitive_dependents: int,
+    affected_files:       [string],
+    direct_items:         [ImpactItem],
+    transitive_items:     [ImpactItem],
+    risk_level:           "low" | "medium" | "high",
+    truncated:            bool,
+    semantic_items:       [SemanticItem],   // only when min_score is set
+    edges_source:         EdgesSource,      // v2.3.1; v2.3.2 moved onto the
+                                            // underlying BlastRadiusResult so
+                                            // `query.blast_radius` carries it too
+  }]
+}
+
+// ImpactItem / SemanticItem shape (v2.3.4 added `module_id`):
+// ImpactItem        { file_uri, symbol_uri, distance, confidence, module_id? }
+// SemanticItem      { file_uri, symbol_uri, similarity, source,   module_id? }
+
+enum EdgesSource {
+  "tier1",                  // edges came from the tree-sitter extractor
+  "scip_with_tier1_edges",  // SCIP import that had no edges; daemon back-filled
+                            // by running tier-1 over the file on disk
+  "scip_only",              // SCIP import that already carried call edges
+  "empty",                  // no edges in either source
+}
+```
+
+Accepts changed **files** and resolves exported symbols server-side — one round-trip
+regardless of symbol count. Only symbols with kind `Function`, `Method`, `Class`,
+`Interface`, `Constructor`, or `Macro` are resolved; variables, constants, and
+parameters are excluded to avoid framework-wiring noise.
+
+When `min_score` is present, the daemon runs each changed file's embedding against
+the file embedding index and includes neighbours above the threshold as
+`semantic_items`. Each semantic item carries a `source` field:
+
+- **`"semantic"`** — found only via embedding similarity, not in the structural
+  call graph. Catches dynamic dispatch, macro-expanded call sites, and template
+  instantiation chains that SCIP's static graph cannot resolve.
+- **`"both"`** — found in both the structural graph and the embedding search,
+  confirming a structural edge with semantic evidence.
+
+**Embedding scope:** Semantic enrichment currently operates at file-level granularity
+(searching `file_embeddings`). Per-function chunked embeddings are not yet integrated
+into this path; when they are, the `symbol_uri` field in `SemanticItem` (currently
+empty) will carry the matched symbol, with no wire format change required.
+
+**Consumer contract (CKB):** `UniqueCallerCount` (which drives review thresholds)
+stays structural-only. Semantic callers are additive — they inform the human reviewer
+("8 callers (+3 semantically coupled)") but do not inflate risk scores.
+
+**`module_id` (v2.3.4).** Every `ImpactItem` and `SemanticItem` optionally carries
+`module_id: Option<String>` identifying the module the impacted file belongs to.
+Resolved once at upsert time (stored on `FileInput`) with three-tier precedence:
+(1) slice URI prefix `lip://<manager>/<package>@<version>/…` → `"<manager>/<package>"`;
+(2) first `<manager> <name>` pair parsed from any SCIP symbol attached to the file;
+(3) upward manifest walk (depth-capped at 12) for `Cargo.toml`, `go.mod`, `package.json`,
+`pyproject.toml`, `setup.py`, or `pubspec.yaml`. Unsupported languages (C / C++ / Kotlin
+/ Swift / Java without a manifest) return `None`. CKB's `RecomputeBlastRadius.ModuleCount`
+uses this to distinguish "47 dependents across 12 modules" from the conservative
+zero it previously derived from the unioned set.
+
+#### 8.1.2 Symbol-level blast radius
+
+```
+lip.query.blast_radius_symbol(symbol_uri, min_score?) → {
+  result: null | EnrichedBlastRadius
+}
+```
+
+Single-symbol variant of `blast_radius_batch`. Returns the same `EnrichedBlastRadius`
+shape — including the v2.3.1 `edges_source` field — or `null` when the symbol is
+unknown or not indexed, so callers can distinguish "zero impact" from "no data."
+Used by CKB's per-symbol change-impact summaries and by refactor planners that ask
+about one candidate at a time.
+
+**`edges_source` semantics (v2.3.1).** SCIP indexers disagree on whether call
+edges belong in the index: `scip-go` emits them inconsistently, `scip-clang`
+omits them entirely. The daemon therefore advertises the provenance of each
+result's structural edges so consumers can fall back when needed:
+
+- `tier1` — structural edges came from the tree-sitter extractor over the
+  stored source text. Authoritative for syntactic calls.
+- `scip_only` — the importer provided call edges and the daemon used them
+  verbatim. Trust but verify: scip-go is known to drop edges.
+- `scip_with_tier1_edges` — the importer's `edges` were empty, so the daemon
+  read the file from disk and ran tier-1 to back-fill. Structural edges are
+  present even though the upstream producer omitted them.
+- `empty` — neither source produced call edges. CKB should fall back to its
+  own SCIP backend for that file.
+
+#### 8.1.3 Outgoing calls (forward call graph)
+
+```
+lip.query.outgoing_calls(symbol_uri, depth) → {
+  edges:     [{ from_uri, to_uri }],
+  truncated: bool,
+}
+```
+
+Inverse of the blast-radius direction. BFS over the forward call graph from
+`symbol_uri` up to `depth` hops (clamped to `[1, 8]`). Implemented by a
+`caller_to_callees` index that mirrors the reverse edge map used for blast radius.
+Traversal is capped at 200 nodes; the `truncated` flag reports when the cap fires.
+Useful for "what does this function reach?" queries — tracing a public API's
+downstream behaviour, auditing service calls, generating call-graph visualisations.
+
+#### 8.1.4 Outgoing impact (enriched forward traversal)
+
+```
+lip.query.outgoing_impact(symbol_uri, depth?, min_score?) → {
+  result: null | EnrichedOutgoingImpact
+}
+
+// EnrichedOutgoingImpact flattens OutgoingImpactStatic via `serde(flatten)`,
+// so edges_source lives on the inner struct (mirroring v2.3.2 blast radius):
+// {
+//   direct_items:     [ImpactItem],
+//   transitive_items: [ImpactItem],
+//   truncated:        bool,
+//   edges_source:     EdgesSource,
+//   semantic_items:   [SemanticImpactItem],   // only when min_score is set
+// }
+```
+
+Forward-direction twin of `QueryBlastRadiusSymbol` (§8.1.2). BFS walks
+`caller_to_callees` starting from `symbol_uri`, splits direct vs. transitive hops,
+and returns the same enriched envelope that blast-radius queries use — including
+`edges_source` provenance and semantic enrichment when `min_score` is set. `depth`
+clamps to `[1, 8]` with a default of 8; `NODE_LIMIT = 200` caps the frontier and
+trips `truncated: true` on overflow.
+
+From v2.3.5, each frontier hop also consults `caller_name_to_callees` —
+a forward-direction name-bridge keyed by the normalised caller fragment.
+Restores full symmetry with `blast_radius_for`'s Phase 2, so a SCIP
+descriptor seed (e.g. `pkg#Engine#AnalyzeImpact().`) still returns callees
+when the tier-1 back-fill keyed the caller in raw tier-1 form because the
+method name was ambiguous across the codebase.
+
+Semantic enrichment prefers symbol-level embeddings with a file-level fallback seed;
+`SemanticImpactItem.source` is `Both` when a static hit's file also appears in the
+nearest-embedding set, `Static` or `Semantic` otherwise. Tier-1 URIs with no
+`def_index` entry fall through to the file URI (strip `#<name>` fragment) rather
+than producing blank `symbol_uri` — the same Phase-3 fallback applied on the callee
+side that v2.3.2 introduced for blast radius. `ImpactItem` / `SemanticImpactItem`
+carry `module_id` (§8.1.1) so CKB can attribute module counts to callees.
+
 ### 8.2 Taint tracking
 
 Symbols can be annotated with `taint_labels` (e.g. `["PII", "UNSAFE_IO"]`). LIP
@@ -836,6 +1018,70 @@ Taint tracking (§8.2) is implemented as a forward reachability query over
 `DataFlows` edges filtered by `taint_labels`. The same query engine drives both
 blast-radius analysis (§8.1) and taint analysis — they differ only in which edge
 kinds are traversed.
+
+### 8.6 Ranked workspace symbols
+
+```
+lip.query.workspace_symbols(
+  query:            string,
+  limit?:           int,
+  kind_filter?:     [SymbolKind],
+  scope?:           string,           // def-file URI prefix
+  modifier_filter?: [string],
+) → {
+  symbols: [SymbolInfo],                             // length n
+  ranked:  [{ symbol_uri, score, match_type }],      // length n, parallel (v2.3)
+}
+```
+
+`kind_filter`, `scope`, and `modifier_filter` are optional server-side narrowings
+that replace the client-side post-filter patterns CKB was running. `scope` is a
+def-file URI prefix (e.g. `lip://local/cli`); `modifier_filter` matches against the
+symbol's `modifiers` vector (e.g. `["async"]`, `["pub", "async"]`).
+
+`ranked[i]` describes `symbols[i]`. Scoring is tiered, not BM25:
+
+- **`exact`** (score `1.0`) — case-sensitive equality with `display_name`.
+- **`prefix`** (score `0.8`) — case-insensitive prefix of `display_name`.
+- **`fuzzy`** (score `0.5`) — case-insensitive substring of `display_name`.
+
+`match_type` is a discriminator for display only; callers should sort by `score`.
+Symbols are returned sorted by descending score, then ascending `display_name` for
+stability. When `query` is empty, `ranked` is empty (matches pre-v2.3 semantics).
+
+### 8.7 Structural metadata on symbols
+
+Every `SymbolInfo` carries the fields that previously required a parallel SCIP
+parse:
+
+- **`signature_normalized`** — parameter-name-stripped, whitespace-collapsed form
+  of the signature, stable across rename refactors.
+- **`modifiers: [string]`** — language-specific modifier keywords (`pub`, `async`,
+  `static`, `override`, `final`, …).
+- **`visibility` + `visibility_confidence`** — `Public` / `Internal` / `Private` /
+  `Protected`, plus 0–100 confidence. Conventions like Python's underscore prefix
+  yield lower confidence than an explicit `pub` keyword.
+- **`container_name`** — the enclosing class / struct / trait / namespace, or
+  `None` for top-level symbols.
+- **`extraction_tier`** — `Tier1` (tree-sitter), `Tier2Lsp` (language server),
+  `Tier3Scip` (SCIP import), or `Tier15Inferred` (Datalog inference, §3.3).
+- **`modifiers_source`** — `None` when produced by a tree-sitter extractor that
+  emits modifier tokens directly; `PrefixParse` when derived by the SCIP importer
+  from `signature_documentation[0]`. Clients that need compiler-grade modifier
+  provenance should branch on this.
+
+### 8.8 Reference classification
+
+Every `Occurrence` carries a `kind: ReferenceKind` discriminator:
+
+`Unknown` · `Call` · `Read` · `Write` · `Type` · `Implements` · `Extends`
+
+Plus an `is_test: bool` flag stamped by a file-path heuristic
+(`/tests/`, `_test.rs`, `_test.py`, `.spec.ts`, …). Tier-1 extractors classify
+via tree-sitter parent-node + field-name lookup; SCIP import maps
+`SymbolRole::ReadAccess | WriteAccess | Test` bits to the corresponding fields
+(Call has no SCIP equivalent). Both fields are `#[serde(default)]`; pre-v2.3
+occurrences decode with `Unknown` / `false`.
 
 ---
 
@@ -1105,7 +1351,7 @@ lip-protocol/
 - [x] **`BatchQueryNearestByText`** — embed N query strings in a single round-trip and return one nearest-neighbour list per query. Replaces N sequential `QueryNearestByText` calls in multi-query workflows.
 - [x] **`QueryNearestBySymbol`** — find symbols similar to a given symbol URI. The daemon embeds the symbol's text (display_name + signature + doc) on demand and searches the symbol embedding store. `EmbeddingBatch` now routes `lip://` URIs to `symbol_embeddings` and `file://` URIs to `file_embeddings`.
 - [x] **`BatchAnnotationGet`** — retrieve an annotation key for multiple symbol URIs under a single db lock. Replaces N sequential `AnnotationGet` calls; safe inside `BatchQuery`.
-- [x] **`IndexChanged` push notification** — emitted to all active sessions after every `Delta::Upsert` via the broadcast channel. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
+- [x] **`IndexChanged` push notification** — emitted to every active session *other than the one that produced the `Delta::Upsert`* via the broadcast channel. Internally, every broadcast message is wrapped in a `Notification { source_session: Option<u64>, message: ServerMessage }` envelope tagged with the emitter's session id; each session's drain loop skips envelopes whose `source_session` matches its own id so an importer never receives echoes of its own emissions. Tier 2 upgrades emit with `source_session: None` and reach every session. Carries `indexed_files` count and `affected_uris`. Enables precise cache invalidation without polling `QueryIndexStatus`.
 - [x] **`Handshake` / `HandshakeResult`** — clients send `Handshake { client_version }` on connect; daemon replies with `daemon_version` (semver) and `protocol_version` (monotonic integer, currently `1`). Version drift between daemon and client is now detectable at connect time.
 - [x] **`--managed` flag** (`lip daemon start --managed`) — spawns a background watchdog that polls the parent process every 2 s and exits when the parent has exited. Designed for IDE integrations that manage the daemon as a subprocess.
 
@@ -1153,6 +1399,69 @@ lip-protocol/
 - [x] **`GetCentroid { uris }`** — compute and return the embedding centroid of a file set server-side, without shipping all raw vectors over the socket. Used by module-scoped architecture queries and cross-repo federation. Returns `CentroidResult { vector, included }`. Safe inside `BatchQuery`.
 - [x] **`QueryStaleEmbeddings { root }`** — report files under `root` whose stored embedding is older than their current mtime. Detects the case where LIP was offline during a batch of writes and search results are silently stale. Returns `StaleEmbeddingsResult { uris }`. Not permitted inside `BatchQuery`.
 - [x] 2 new MCP tools (`lip_get_centroid`, `lip_stale_embeddings`) + `filter`/`min_score` params on 5 existing tools.
+
+### v2.1 — Streaming context + forward-compat primitives ✓
+
+- [x] **`StreamContext { file_uri, cursor_position, max_tokens, model? }`** — streaming wire message. Daemon ranks symbols relevant to the cursor and emits one `SymbolInfo` frame at a time, terminating with exactly one `EndStream { reason, emitted, total_candidates, error? }` frame. Reasons: `budget_reached`, `exhausted`, `error`, `cursor_out_of_range`, `file_not_indexed`. Replaces the "fetch top-k, locally truncate" pattern. `protocol_version` bumped to `2`. Spec §9.2.
+- [x] **`EmbedText { text, model? }`** — embed an arbitrary text string and return the raw vector. Closes the gap left by `EmbeddingBatch` (URI-only) and `QueryNearestByText` (discards the vector). Returns `EmbedTextResult { vector: Vec<f32>, embedding_model: String }`. Not permitted inside `BatchQuery`.
+- [x] **`RegisterTier3Source { source: Tier3Source }`** — expose provenance for SCIP-import batches. `Tier3Source { source_id, tool_name, tool_version, project_root, imported_at_ms }` records what producer generated the symbols and when. `IndexStatusResult.tier3_sources` is `#[serde(default)]`; older daemons yield an empty vector. Not permitted inside `BatchQuery` (mutation).
+- [x] **`HandshakeResult.supported_messages`** — handshake response now lists every `ClientMessage` type tag the daemon understands. Clients probe for individual messages without version-integer comparison. `#[serde(default)]`; older daemons yield empty vector.
+- [x] **`ServerMessage::UnknownMessage { message_type, supported }`** — unknown type tag returns this response *and keeps the socket open*, enabling graceful client downgrade.
+- [x] **`ErrorCode`** enum — stable machine-readable error categories: `unknown_message_type`, `unknown_model`, `embedding_not_configured`, `no_embedding`, `cursor_out_of_range`, `index_locked`, `invalid_request`, `internal` (default).
+- [x] **`ClientMessage::variant_tag` + `supported_messages_covers_all_variants` test** — compile-time exhaustive match plus paired test that fails when a new variant is added without being advertised in `supported_messages()`.
+
+### v2.3 — CKB structural-parity bundle ✓
+
+- [x] **Rich symbol metadata** — `OwnedSymbolInfo` gains `signature_normalized`, `modifiers`, `visibility` + `visibility_confidence`, `container_name`, `extraction_tier`, and `modifiers_source`. Populated by all Tier-1 extractors (Rust / TypeScript / Python / Swift / Kotlin) and by the SCIP importer (via upstream-compatible `enclosing_symbol = 8` + prefix-parsed modifiers). See §8.7.
+- [x] **Reference classification** — `OwnedOccurrence` gains `kind: ReferenceKind` (`Unknown` / `Call` / `Read` / `Write` / `Type` / `Implements` / `Extends`) + `is_test: bool`. Tier-1 classifier uses tree-sitter parent/field lookup; SCIP import/export round-trips via `SymbolRole::ReadAccess | WriteAccess | Test`. See §8.8.
+- [x] **`QueryBlastRadiusSymbol { symbol_uri, min_score? } → BlastRadiusSymbolResult { result: Option<EnrichedBlastRadius> }`** — single-symbol wrapper around `blast_radius_for_symbol`. Returns `None` for unknown or unindexed symbols so callers can distinguish "zero impact" from "no data." Spec §8.1.2.
+- [x] **`QueryOutgoingCalls { symbol_uri, depth } → OutgoingCallsResult { edges, truncated }`** — forward call-graph BFS via a new `caller_to_callees` index. Depth clamped `[1, 8]`; NODE_LIMIT = 200. Spec §8.1.3.
+- [x] **Ranked & filtered workspace symbols** — `QueryWorkspaceSymbols` adds `kind_filter`, `scope`, `modifier_filter`; `WorkspaceSymbolsResult` adds `ranked: Vec<RankedSymbol>` (parallel to `symbols`) with tiered scoring (`Exact = 1.0` / `Prefix = 0.8` / `Fuzzy = 0.5`). `ranked` is `skip_if_empty`; empty query preserves pre-v2.3 semantics. Spec §8.6.
+- [x] **All additive.** `protocol_version` stays at `2`; every new field is `#[serde(default, skip_serializing_if = …)]`; every new message is advertised via `HandshakeResult.supported_messages`. Drift-guard test covers both new variants.
+
+### v2.2 — Function-level blast radius + intelligence layer ✓
+
+- [x] **`NearestItem.embedding_model`** — every nearest-neighbour hit now carries the model name that produced its stored embedding. Optional / `skip_serializing_if = None`; older clients see no change. Populated by `nearest_by_vector`, `nearest_symbol_by_vector`, and `outliers`.
+- [x] **Function-level blast radius** — `QueryBlastRadiusBatch` semantic enrichment now uses per-symbol embeddings when available. `semantic_items[].symbol_uri` is populated when `EmbeddingBatch` has been called with `lip://` URIs (function-level chunks); falls back to file embeddings transparently.
+- [x] **`ReindexStale { uris, max_age_seconds }`** — atomic check-then-reindex. Re-reads from disk only URIs that are unindexed or whose `last_indexed_at` exceeds the threshold. `max_age_seconds = 0` forces unconditional reindex. Returns `ReindexStaleResult { reindexed, skipped }`. Not permitted inside `BatchQuery`.
+- [x] **`BatchFileStatus { uris }`** — query index and embedding status for multiple files in one round-trip. Returns `BatchFileStatusResult { entries: Vec<FileStatusEntry> }`. Safe inside `BatchQuery`.
+- [x] **`QueryAbiHash { uri }`** — stable SHA-256 hex hash over a file's exported API surface (exported symbol URIs + kinds + signatures, sorted). Hash change ↔ public interface change — safe as a downstream recompilation or re-verification trigger. Returns `AbiHashResult { uri, hash: Option<String> }`. Safe inside `BatchQuery`.
+- [x] **Tier 1.5 Datalog inference** — `LipDatabase::run_tier1_5_inference()` fixed-point loop: (1) callee elevation when all callers ≥ 80 confidence → raise to 65; (2) exported leaf symbols with ≥ 40 confidence → +5 capped at 65. Never lowers confidence; ceiling 65 leaves headroom for Tier 2.
+- [x] **Tier 2 backoff recovery** — language server backends recover from transient crashes with exponential backoff (2–300 s, permanent disable only after 8 failures). `BackoffState { failure_count, available_after }` per backend. Replaces immediate permanent disable on first crash.
+
+### v2.3.1 — CKB import landing fix ✓
+
+- [x] **`RegisterProjectRoot { root }`** — idempotent filesystem-root registration. Lets the daemon resolve relative `lip://local/<rel>` URIs against the absolute-form records emitted by the tier-1 indexer and by `lip import`. Longest matching root wins when multiple are registered. Advertised as `register_project_root` in `HandshakeResult.supported_messages`; pre-v2.3.1 daemons reply `UnknownMessage`. `RegisterTier3Source` now auto-registers its `source.project_root` so SCIP imports need no second round-trip.
+- [x] **`EdgesSource` provenance on blast radius** — `EnrichedBlastRadius` gains `edges_source: Option<EdgesSource>` with four variants (`Tier1 | ScipWithTier1Edges | ScipOnly | Empty`). Consumers that maintain their own fallback path can detect when LIP has no structural edges and route around us. `#[serde(default, skip_serializing_if = Option::is_none)]`.
+- [x] **Tier-1 edge back-fill on SCIP imports** — `upsert_file_precomputed` now runs the tree-sitter tier-1 extractor over the file on disk when the incoming SCIP document carries no call edges. Produces `edges_source = ScipWithTier1Edges` on success, `Empty` when the file is unreadable or yields no calls. Fills the gap where `scip-go` inconsistently emits call edges and `scip-clang` omits them entirely.
+- [x] **`lip import --verify`** — after pushing deltas, samples up to 10 documents and round-trips `QueryFileStatus` (expecting `indexed = true`) plus a `QueryWorkspaceSymbols` probe scoped to the file. Exits non-zero on any mismatch so CI catches silent import drops.
+- [x] **`lip import` URI scheme** — imported documents now use `lip://local/<rel>` (when `Metadata.project_root` is absent) or `lip://local/<abs>/<rel>` with the canonical doubled slash (when it is present), replacing the previous `file:///<rel>` form that silently failed to match any CKB query.
+- [x] **`LipDatabase::canonicalize_uri`** — every public query- and mutation-surface method canonicalises its URI argument through `registered_roots` before hitting the input/embedding/def/sym/occ maps, so relative and absolute lip-local forms of the same file resolve to the same record.
+- [x] **Self-echo deadlock fix** — broadcast notifications now carry `source_session: Option<u64>`; the drain loop skips envelopes whose `source_session` matches its own. Tier 2 upgrades emit with `source_session: None` so they still reach every session. Regression test `daemon_bulk_precomputed_import_does_not_deadlock` pushes 200 precomputed deltas through a single session.
+
+### v2.3.2 — CKB testdrive follow-up ✓
+
+- [x] **`edges_source` moved from `EnrichedBlastRadius` onto `BlastRadiusResult`** — so non-enriched `QueryBlastRadius` (not just the batch / symbol variants) carries call-edge provenance. `EnrichedBlastRadius` still surfaces it through `#[serde(flatten)] static_result: BlastRadiusResult`, so the JSON wire shape is unchanged. Round-trip test `edges_source_survives_all_response_envelopes` asserts the field is emitted in every response variant.
+- [x] **Tier-1 back-fill URIs translate to SCIP descriptor form** — same-file and cross-file. Tier-1 emits fragment URIs in plain-identifier form (`#NewExporter`) while scip-go / scip-typescript emit descriptor form (`#NewExporter()`, `#Component.`). The back-fill now builds a same-file `display_name → SCIP-uri` map and, for cross-file callees, falls back to a global `name_to_symbols` index populated at SCIP-import time. Regression tests `tier1_backfill_translates_caller_uri_to_scip_fragment` and `tier1_backfill_resolves_cross_file_callee_via_name_index`.
+- [x] **Path-traversal guard on SCIP document ingestion** — scip-go ships documents whose `relative_path` points outside the project tree (`../../../../Library/Caches/go-build/…`). `convert_document` now rejects any document whose net depth falls below the project root under pure string-level normalization. Emits `warning: skipped N SCIP document(s) whose relative_path escapes project_root`.
+- [x] **Double `lip://local/` prefix in `callee_to_callers` keys** — `SymbolExtractor::lip_uri` stripped `file://` but not an existing `lip://local/` prefix, so tier-1 back-fills against imported-with-canonical-key files produced double-prefixed edge URIs. Fixed by detecting the `lip://local/` prefix and appending `#<name>` directly.
+- [x] **SCIP-descriptor / tier-1-identifier name-fragment mismatch in `callee_name_to_callers`** — tier-1 indexes plain identifiers (`SearchSymbols`); SCIP carries sigils (`SearchSymbols().`, `MyField.`, `Foo:`). Added `normalize_callee_name(fragment)` and applied it at all four insert sites plus the BFS lookup site. Unit test `normalize_callee_name_strips_scip_descriptor_suffixes` covers the six canonical SCIP descriptor shapes.
+- [x] **Blank `symbol_uri` when tier-1 back-fill preserves a raw caller URI** — Phase 3 of `blast_radius_for` now derives the file URI by stripping the `#<name>` fragment when `def_index` misses and the caller URI has the `lip://local/` scheme, using the caller URI verbatim as `symbol_uri`. Regression test `blast_radius_phase3_fallback_for_tier1_caller_uri`.
+- [x] **`LIP_DEBUG_EDGES=1` diagnostic gating** — zero-cost when unset. The wire log now reports `has_edges_source` / `edges_source_count` / `body_bytes` + 500-char head instead of a truncated 2 KB tail.
+
+### v2.3.3 — Outgoing-impact symmetry ✓
+
+- [x] **`QueryOutgoingImpact { symbol_uri, depth?, min_score? } → OutgoingImpactResult { result: Option<EnrichedOutgoingImpact> }`** — forward-direction twin of `QueryBlastRadiusSymbol`. BFS walks `caller_to_callees` starting from `symbol_uri`, splits direct vs. transitive hops, and wraps the static result in an envelope flattened with `#[serde(flatten)] static_result: OutgoingImpactStatic` so `edges_source` lives on the inner struct (matching the v2.3.2 shape for blast radius). `depth` is clamped to `1..=8` with a default of 8; `NODE_LIMIT = 200` bounds the BFS frontier and trips `truncated: true` on overflow. Semantic enrichment reuses `SemanticImpactItem { source: Static | Semantic | Both }`: symbol-level embedding is preferred, with file-level embedding as the fallback seed, and static-hit files are tagged `Both` when their URI also appears in the nearest-embedding set. The v2.3.2 Phase 3 `#<name>`-strip fallback is applied symmetrically on the callee side, so tier-1 URIs with no `def_index` entry still resolve to their file URI instead of producing blank `symbol_uri`. Advertised as `query_outgoing_impact` in `HandshakeResult.supported_messages`. Spec §8.1.4.
+
+### v2.3.4 — Module-level grouping on impact items ✓
+
+- [x] **`ImpactItem.module_id` and `SemanticImpactItem.module_id`** — `Option<String>`, resolved once at upsert time (stored on `FileInput`), surfaced on every `ImpactItem` / `SemanticImpactItem` built by `blast_radius_for`, `blast_radius_for_symbol`, `blast_radius_batch`, and `outgoing_impact_for`. Three-tier resolution, first hit wins: (1) slice URI prefix `lip://<manager>/<package>@<version>/…` → `"<manager>/<package>"`; (2) first `<manager> <name>` pair parsed from any SCIP symbol attached to the file (rejects `local <id>` sentinels and empty-package descriptors); (3) upward manifest walk, depth-capped at 12, for `Cargo.toml` (Rust, `[package] name`), `go.mod` (Go, `module <path>`), `package.json` (TypeScript / JavaScript / TSX / JSX, top-level `"name"`), `pyproject.toml` (Python, `[project].name` or `[tool.poetry].name`), `setup.py` (Python, `name="…"`), `pubspec.yaml` (Dart, top-level `name:`). Parse failures, I/O failures, and unsupported languages (C / C++ / Kotlin / Swift / Java) return `None`. Unit-tested per parser; integration tests `blast_radius_surfaces_module_id_from_scip_descriptor`, `blast_radius_surfaces_module_id_from_cargo_toml_walk`, `outgoing_impact_surfaces_module_id` confirm the field reaches the wire. `protocol_version` stays at `2`; `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps the shape byte-identical for emitters that don't populate it.
+
+### v2.3.5 — Forward-direction name-bridge symmetry ✓
+
+- [x] **`caller_name_to_callees` index** — forward-direction twin of v2.3.2's `callee_name_to_callers`. Keyed by `normalize_callee_name(extract_name(from_uri))`; maps the caller's plain-identifier fragment to every callee URI of every `Calls` edge the database has indexed. Populated at all three edge-insertion sites (regular tier-1 upsert in `upsert_file`, SCIP pre-computed edges in `upsert_file_precomputed`, the SCIP-empty tier-1 back-fill) and pruned in `remove_file_call_edges`, mirroring the reverse index byte-for-byte.
+- [x] **Symmetric BFS in `outgoing_impact_for`** — every frontier hop now consults both `caller_to_callees` (URI-exact) and `caller_name_to_callees` (name-bridge via `normalize_callee_name(extract_name(caller))`), exactly matching Phase 2 of `blast_radius_for`. The union of the two lookups feeds the visited/distance machinery; self-cycles back to the seed are still skipped. Closes the asymmetry where `QueryOutgoingImpact` seeded from a SCIP descriptor URI (e.g. `pkg#Engine#AnalyzeImpact().`) returned empty `direct_items` because the SCIP tier-1 back-fill had kept the raw tier-1 caller URI (`…#AnalyzeImpact`) as the key when the method name was ambiguous across the codebase (translate-map miss + `name_to_symbols` miss on multi-hit). Blocks pre-v2.3.5 CKB integration of `QueryOutgoingImpact` for any Go / TypeScript / Python repo with name-overloaded methods.
+- [x] **Regression coverage** — `outgoing_impact_name_bridge_for_tier1_caller_uri`: pre-computed edge keyed under tier-1 caller form (`…#AnalyzeImpact`); symbol definition registered under SCIP descriptor form (`…#Engine#AnalyzeImpact().`); `outgoing_impact_for(scip_descriptor)` must surface the callee via the name-bridge fallback. All 438 existing tests continue to pass — no behavioural change for URI-exact hits, only a strictly-additive bridge for misses.
 
 ### v1.2 — In progress
 
@@ -1266,5 +1575,5 @@ via the `flatbuffers` crate, aligning with LIP's reference implementation langua
 
 ---
 
-*LIP Specification v2.0.1 · April 2026 · MIT License*
+*LIP Specification v2.3.5 · April 2026 · MIT License*
 *Lisa Welsch*

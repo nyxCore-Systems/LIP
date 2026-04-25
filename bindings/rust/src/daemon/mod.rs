@@ -44,5 +44,5 @@ pub mod watcher;
 pub use journal::{Journal, JournalEntry};
 pub use manifest::{ManifestRequest, ManifestResponse};
 pub use server::LipDaemon;
-pub use session::{read_message, write_client_message, write_message, Session};
+pub use session::{read_message, write_client_message, write_message, Notification, Session};
 pub use tier2_manager::VerificationJob;

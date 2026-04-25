@@ -19,6 +19,20 @@ use super::watcher::{uri_to_path, FileWatcherHandle};
 /// Clients can detect drift by comparing against this value in `HandshakeResult`.
 const PROTOCOL_VERSION: u32 = 2;
 
+/// Broadcast envelope that tags every push notification with the session
+/// that produced it. A session skips messages whose `source_session`
+/// matches its own id so an importer never receives echoes of the
+/// `IndexChanged` it just emitted — that self-echo doubled the daemon's
+/// outbound frame rate and filled the 8 KB macOS AF_UNIX send buffer
+/// around delta ~65, freezing bulk SCIP imports. System-originated
+/// messages (Tier 2 upgrades) use `source_session: None` so every session
+/// still receives them.
+#[derive(Clone, Debug)]
+pub struct Notification {
+    pub source_session: Option<u64>,
+    pub message: ServerMessage,
+}
+
 /// Convert a classified [`EmbedError`] into the appropriate wire-level
 /// error response. Centralises the mapping so every embedding call site
 /// reports the same [`ErrorCode`] category for the same failure mode.
@@ -37,6 +51,11 @@ fn embed_error_response(e: EmbedError) -> ServerMessage {
 
 /// Per-connection session state.
 pub struct Session {
+    /// Unique id for this connection, assigned by the daemon at accept time.
+    /// Used to filter broadcast echoes: when a session emits a notification
+    /// tagged with its own id, the drain loop skips it rather than writing
+    /// it back to the client.
+    pub session_id: u64,
     pub db: Arc<Mutex<LipDatabase>>,
     /// Channel to the background Tier 2 manager. `None` when Tier 2 is disabled.
     pub tier2_tx: Option<mpsc::Sender<VerificationJob>>,
@@ -46,21 +65,23 @@ pub struct Session {
     pub watcher: Option<FileWatcherHandle>,
     /// Broadcast sender for push notifications (e.g. `SymbolUpgraded`).
     /// Kept so we can subscribe receivers for newly forked sessions.
-    pub notify_tx: Option<broadcast::Sender<ServerMessage>>,
+    pub notify_tx: Option<broadcast::Sender<Notification>>,
     /// HTTP embedding client. `None` when `LIP_EMBEDDING_URL` is not configured.
     pub embedding_client: Arc<Option<EmbeddingClient>>,
 }
 
 impl Session {
     pub fn new(
+        session_id: u64,
         db: Arc<Mutex<LipDatabase>>,
         tier2_tx: Option<mpsc::Sender<VerificationJob>>,
         journal: Option<Arc<StdMutex<Journal>>>,
         watcher: Option<FileWatcherHandle>,
-        notify_tx: Option<broadcast::Sender<ServerMessage>>,
+        notify_tx: Option<broadcast::Sender<Notification>>,
         embedding_client: Arc<Option<EmbeddingClient>>,
     ) -> Self {
         Self {
+            session_id,
             db,
             tier2_tx,
             journal,
@@ -82,9 +103,9 @@ impl Session {
 
     /// Drive the session loop for a single connected client.
     pub async fn run(self: Arc<Self>, mut stream: UnixStream) -> anyhow::Result<()> {
-        info!("new client session");
+        info!("new client session id={}", self.session_id);
         // Subscribe to push notifications for this session's lifetime.
-        let mut notify_rx: Option<broadcast::Receiver<ServerMessage>> =
+        let mut notify_rx: Option<broadcast::Receiver<Notification>> =
             self.notify_tx.as_ref().map(|tx| tx.subscribe());
 
         loop {
@@ -157,11 +178,20 @@ impl Session {
             }
 
             // Drain any pending push notifications before blocking on the next read.
+            // Skip envelopes whose `source_session` matches our own id — those
+            // are echoes of notifications this same session just emitted, and
+            // writing them back to the client doubles the daemon's outbound
+            // frame rate. Filling the 8 KB macOS AF_UNIX send buffer with that
+            // excess hung bulk SCIP imports around delta ~65 before this fix.
             if let Some(ref mut rx) = notify_rx {
                 loop {
                     match rx.try_recv() {
                         Ok(notification) => {
-                            if let Err(e) = write_message(&mut stream, &notification).await {
+                            if notification.source_session == Some(self.session_id) {
+                                continue;
+                            }
+                            if let Err(e) = write_message(&mut stream, &notification.message).await
+                            {
                                 error!("write error (notification): {e}");
                                 break;
                             }
@@ -227,9 +257,34 @@ impl Session {
                 let lang = document.language.clone();
                 let source_opt = document.source_text.clone();
 
+                let has_precomputed = document.source_text.is_none()
+                    && (!document.symbols.is_empty() || !document.occurrences.is_empty());
+                let content_hash = document.content_hash.clone();
+                let symbols = document.symbols.clone();
+                let occurrences = document.occurrences.clone();
+                let edges = document.edges.clone();
+
                 let workspace_root = {
                     let mut db = self.db.lock().await;
                     match action {
+                        Action::Upsert if has_precomputed => {
+                            self.journal_write(JournalEntry::UpsertFilePrecomputed {
+                                uri: uri.clone(),
+                                language: lang.clone(),
+                                content_hash: content_hash.clone(),
+                                symbols: symbols.clone(),
+                                occurrences: occurrences.clone(),
+                                edges: edges.clone(),
+                            });
+                            db.upsert_file_precomputed(
+                                uri.clone(),
+                                lang.clone(),
+                                content_hash,
+                                symbols,
+                                occurrences,
+                                edges,
+                            );
+                        }
                         Action::Upsert => {
                             let text = source_opt.clone().unwrap_or_default();
                             self.journal_write(JournalEntry::UpsertFile {
@@ -265,6 +320,11 @@ impl Session {
                 }
 
                 // Enqueue Tier 2 verification for supported languages on upsert.
+                // Skipped for pre-computed imports (SCIP): source_opt is None so
+                // the (Some(tx), Some(source)) guard below won't fire. This is
+                // intentional — SCIP emitters are authoritative; re-verifying via
+                // a local language server would be redundant and may not have the
+                // right project context.
                 if matches!(action, Action::Upsert) {
                     let needs_tier2 = lang == "rust"
                         || uri.ends_with(".rs")
@@ -296,10 +356,15 @@ impl Session {
                 if matches!(action, Action::Upsert) {
                     if let Some(tx) = &self.notify_tx {
                         let indexed_files = self.db.lock().await.file_count();
+                        // Tag with our session id so the drain loop in THIS session
+                        // skips the echo — only other sessions forward it to their clients.
                         // SendError only occurs when there are zero active receivers — benign.
-                        let _ = tx.send(ServerMessage::IndexChanged {
-                            indexed_files,
-                            affected_uris: vec![uri.clone()],
+                        let _ = tx.send(Notification {
+                            source_session: Some(self.session_id),
+                            message: ServerMessage::IndexChanged {
+                                indexed_files,
+                                affected_uris: vec![uri.clone()],
+                            },
                         });
                     }
                 }
@@ -369,11 +434,70 @@ impl Session {
                 ServerMessage::BlastRadiusResult(result)
             }
 
-            ClientMessage::QueryWorkspaceSymbols { query, limit } => {
+            ClientMessage::QueryBlastRadiusBatch {
+                changed_file_uris,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let (results, not_indexed_uris) =
+                    db.blast_radius_batch(&changed_file_uris, min_score);
+                ServerMessage::BlastRadiusBatchResult {
+                    results,
+                    not_indexed_uris,
+                }
+            }
+
+            ClientMessage::QueryBlastRadiusSymbol {
+                symbol_uri,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let result = db.blast_radius_for_symbol(&symbol_uri, min_score);
+                ServerMessage::BlastRadiusSymbolResult { result }
+            }
+
+            ClientMessage::QueryOutgoingCalls { symbol_uri, depth } => {
+                let db = self.db.lock().await;
+                let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
+                let edges = pairs
+                    .into_iter()
+                    .map(
+                        |(from_uri, to_uri)| crate::query_graph::types::OutgoingCallEdge {
+                            from_uri,
+                            to_uri,
+                        },
+                    )
+                    .collect();
+                ServerMessage::OutgoingCallsResult { edges, truncated }
+            }
+
+            ClientMessage::QueryOutgoingImpact {
+                symbol_uri,
+                depth,
+                min_score,
+            } => {
+                let mut db = self.db.lock().await;
+                let result = db.outgoing_impact_for(&symbol_uri, depth, min_score);
+                ServerMessage::OutgoingImpactResult { result }
+            }
+
+            ClientMessage::QueryWorkspaceSymbols {
+                query,
+                limit,
+                kind_filter,
+                scope,
+                modifier_filter,
+            } => {
                 let limit = limit.unwrap_or(100);
                 let mut db = self.db.lock().await;
-                let syms = db.workspace_symbols(&query, limit);
-                ServerMessage::WorkspaceSymbolsResult { symbols: syms }
+                let (symbols, ranked) = db.workspace_symbols_ranked(
+                    &query,
+                    limit,
+                    kind_filter.as_deref(),
+                    scope.as_deref(),
+                    modifier_filter.as_deref(),
+                );
+                ServerMessage::WorkspaceSymbolsResult { symbols, ranked }
             }
 
             ClientMessage::QueryDocumentSymbols { uri } => {
@@ -386,6 +510,14 @@ impl Session {
                 let mut db = self.db.lock().await;
                 let symbols = db.dead_symbols(limit);
                 ServerMessage::DeadSymbolsResult { symbols }
+            }
+
+            ClientMessage::QueryInvalidatedFiles {
+                changed_symbol_uris,
+            } => {
+                let db = self.db.lock().await;
+                let file_uris = db.invalidated_files_for(&changed_symbol_uris);
+                ServerMessage::InvalidatedFilesResult { file_uris }
             }
 
             // ── Annotations ───────────────────────────────────────────────
@@ -579,7 +711,7 @@ impl Session {
                 };
                 let vectors: Vec<Option<Vec<f32>>> = cached_hits
                     .into_iter()
-                    .zip(texts_needed.into_iter())
+                    .zip(texts_needed)
                     .map(|(cached, needed)| {
                         if let Some(v) = cached {
                             Some(v)
@@ -1114,6 +1246,7 @@ impl Session {
                         Some(crate::query_graph::types::NearestItem {
                             uri: c.clone(),
                             score,
+                            embedding_model: None,
                         })
                     })
                     .collect();
@@ -1319,6 +1452,7 @@ impl Session {
                         Some(crate::query_graph::types::NearestItem {
                             uri: store_uri.clone(),
                             score,
+                            embedding_model: None,
                         })
                     })
                     .collect();
@@ -1364,9 +1498,12 @@ impl Session {
                     }
                     if let Some(tx) = &self.notify_tx {
                         let indexed_files = db.file_count();
-                        let _ = tx.send(ServerMessage::IndexChanged {
-                            indexed_files,
-                            affected_uris: removed.clone(),
+                        let _ = tx.send(Notification {
+                            source_session: Some(self.session_id),
+                            message: ServerMessage::IndexChanged {
+                                indexed_files,
+                                affected_uris: removed.clone(),
+                            },
                         });
                     }
                 }
@@ -1490,7 +1627,7 @@ impl Session {
                 let q_norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let mut scored: Vec<crate::query_graph::types::ExplanationChunk> = raw_chunks
                     .into_iter()
-                    .zip(chunk_vecs.into_iter())
+                    .zip(chunk_vecs)
                     .filter_map(|((start_line, end_line, chunk_text), vec)| {
                         if vec.len() != query_vec.len() || q_norm == 0.0 {
                             return None;
@@ -1554,12 +1691,94 @@ impl Session {
             // ── v2.1: Tier 3 provenance registration ──────────────────────
             ClientMessage::RegisterTier3Source { source } => {
                 let mut db = self.db.lock().await;
+                // Auto-register the source's project root for URI resolution (v2.3.1).
+                if !source.project_root.is_empty() {
+                    db.register_project_root(&source.project_root);
+                }
                 db.register_tier3_source(source);
                 ServerMessage::DeltaAck {
                     seq: 0,
                     accepted: true,
                     error: None,
                 }
+            }
+
+            // ── v2.3.1: standalone project-root registration ──────────────
+            ClientMessage::RegisterProjectRoot { root } => {
+                let mut db = self.db.lock().await;
+                db.register_project_root(&root);
+                ServerMessage::DeltaAck {
+                    seq: 0,
+                    accepted: true,
+                    error: None,
+                }
+            }
+
+            // ── v2.2 features ─────────────────────────────────────────────
+            ClientMessage::ReindexStale {
+                uris,
+                max_age_seconds,
+            } => {
+                let mut reindexed = Vec::new();
+                let mut skipped = Vec::new();
+                for uri in &uris {
+                    let is_stale = {
+                        let db = self.db.lock().await;
+                        let (indexed, _, age_seconds) = db.file_status(uri);
+                        !indexed || age_seconds.map(|age| age > max_age_seconds).unwrap_or(true)
+                    };
+                    if is_stale {
+                        let Some(path) = uri_to_path(uri) else {
+                            skipped.push(uri.clone());
+                            continue;
+                        };
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            warn!("ReindexStale: could not read {}", path.display());
+                            skipped.push(uri.clone());
+                            continue;
+                        };
+                        let lang = {
+                            use crate::indexer::language::Language;
+                            Language::detect(uri, "").as_str().to_owned()
+                        };
+                        let mut db = self.db.lock().await;
+                        db.upsert_file(uri.clone(), text, lang);
+                        reindexed.push(uri.clone());
+                    } else {
+                        skipped.push(uri.clone());
+                    }
+                }
+                debug!(
+                    "ReindexStale: reindexed {}/{} files",
+                    reindexed.len(),
+                    uris.len()
+                );
+                ServerMessage::ReindexStaleResult { reindexed, skipped }
+            }
+
+            ClientMessage::BatchFileStatus { uris } => {
+                let db = self.db.lock().await;
+                let entries = uris
+                    .into_iter()
+                    .map(|uri| {
+                        let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                        let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
+                        crate::query_graph::types::FileStatusEntry {
+                            uri,
+                            indexed,
+                            has_embedding,
+                            age_seconds,
+                            embedding_model,
+                        }
+                    })
+                    .collect();
+                ServerMessage::BatchFileStatusResult { entries }
+            }
+
+            ClientMessage::QueryAbiHash { uri } => {
+                let mut db = self.db.lock().await;
+                let hash = db.abi_hash(&uri);
+                ServerMessage::AbiHashResult { uri, hash }
             }
         }
     }
@@ -1848,10 +2067,64 @@ fn process_query_sync(
             ok(ServerMessage::BlastRadiusResult(result))
         }
 
-        ClientMessage::QueryWorkspaceSymbols { query, limit } => {
+        ClientMessage::QueryBlastRadiusBatch {
+            changed_file_uris,
+            min_score,
+        } => {
+            let (results, not_indexed_uris) = db.blast_radius_batch(&changed_file_uris, min_score);
+            ok(ServerMessage::BlastRadiusBatchResult {
+                results,
+                not_indexed_uris,
+            })
+        }
+
+        ClientMessage::QueryBlastRadiusSymbol {
+            symbol_uri,
+            min_score,
+        } => {
+            let result = db.blast_radius_for_symbol(&symbol_uri, min_score);
+            ok(ServerMessage::BlastRadiusSymbolResult { result })
+        }
+
+        ClientMessage::QueryOutgoingCalls { symbol_uri, depth } => {
+            let (pairs, truncated) = db.outgoing_calls(&symbol_uri, depth);
+            let edges = pairs
+                .into_iter()
+                .map(
+                    |(from_uri, to_uri)| crate::query_graph::types::OutgoingCallEdge {
+                        from_uri,
+                        to_uri,
+                    },
+                )
+                .collect();
+            ok(ServerMessage::OutgoingCallsResult { edges, truncated })
+        }
+
+        ClientMessage::QueryOutgoingImpact {
+            symbol_uri,
+            depth,
+            min_score,
+        } => {
+            let result = db.outgoing_impact_for(&symbol_uri, depth, min_score);
+            ok(ServerMessage::OutgoingImpactResult { result })
+        }
+
+        ClientMessage::QueryWorkspaceSymbols {
+            query,
+            limit,
+            kind_filter,
+            scope,
+            modifier_filter,
+        } => {
             let limit = limit.unwrap_or(100);
-            let syms = db.workspace_symbols(&query, limit);
-            ok(ServerMessage::WorkspaceSymbolsResult { symbols: syms })
+            let (symbols, ranked) = db.workspace_symbols_ranked(
+                &query,
+                limit,
+                kind_filter.as_deref(),
+                scope.as_deref(),
+                modifier_filter.as_deref(),
+            );
+            ok(ServerMessage::WorkspaceSymbolsResult { symbols, ranked })
         }
 
         ClientMessage::QueryDocumentSymbols { uri } => {
@@ -1862,6 +2135,13 @@ fn process_query_sync(
         ClientMessage::QueryDeadSymbols { limit } => {
             let symbols = db.dead_symbols(limit);
             ok(ServerMessage::DeadSymbolsResult { symbols })
+        }
+
+        ClientMessage::QueryInvalidatedFiles {
+            changed_symbol_uris,
+        } => {
+            let file_uris = db.invalidated_files_for(&changed_symbol_uris);
+            ok(ServerMessage::InvalidatedFilesResult { file_uris })
         }
 
         // ── Annotations ───────────────────────────────────────────────────
@@ -2185,6 +2465,7 @@ fn process_query_sync(
                     Some(crate::query_graph::types::NearestItem {
                         uri: c.clone(),
                         score,
+                        embedding_model: None,
                     })
                 })
                 .collect();
@@ -2280,6 +2561,7 @@ fn process_query_sync(
                     Some(crate::query_graph::types::NearestItem {
                         uri: su.clone(),
                         score,
+                        embedding_model: None,
                     })
                 })
                 .collect();
@@ -2327,6 +2609,38 @@ fn process_query_sync(
         ClientMessage::RegisterTier3Source { .. } => {
             err("RegisterTier3Source is a mutation; not permitted in BatchQuery")
         }
+
+        ClientMessage::RegisterProjectRoot { .. } => {
+            err("RegisterProjectRoot is a mutation; not permitted in BatchQuery")
+        }
+
+        // ── v2.2: new variants ───────────────────────────────────────────────
+        ClientMessage::ReindexStale { .. } => {
+            err("ReindexStale requires filesystem I/O; not permitted in BatchQuery")
+        }
+
+        ClientMessage::BatchFileStatus { uris } => {
+            let entries = uris
+                .into_iter()
+                .map(|uri| {
+                    let (indexed, has_embedding, age_seconds) = db.file_status(&uri);
+                    let embedding_model = db.file_embedding_model(&uri).map(str::to_owned);
+                    crate::query_graph::types::FileStatusEntry {
+                        uri,
+                        indexed,
+                        has_embedding,
+                        age_seconds,
+                        embedding_model,
+                    }
+                })
+                .collect();
+            ok(ServerMessage::BatchFileStatusResult { entries })
+        }
+
+        ClientMessage::QueryAbiHash { uri } => {
+            let hash = db.abi_hash(&uri);
+            ok(ServerMessage::AbiHashResult { uri, hash })
+        }
     }
 }
 
@@ -2358,6 +2672,40 @@ pub async fn read_message(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
 /// Serialize `msg` as JSON and write with a 4-byte big-endian length prefix.
 pub async fn write_message(stream: &mut UnixStream, msg: &ServerMessage) -> anyhow::Result<()> {
     let body = serde_json::to_vec(msg)?;
+    // v2.3.2 diagnostic — gated on LIP_DEBUG_EDGES=1. Replaces the old
+    // 2 KB tail preview (which truncated real payloads) with a
+    // field-presence signal: does the wire body mention `edges_source`
+    // at all, how many of each variant were serialised, and a 500-byte
+    // head for orientation. Truncation-free answer to "is the field
+    // reaching the wire?".
+    if std::env::var("LIP_DEBUG_EDGES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        let marker = matches!(
+            msg,
+            ServerMessage::BlastRadiusResult(_)
+                | ServerMessage::BlastRadiusBatchResult { .. }
+                | ServerMessage::BlastRadiusSymbolResult { .. }
+        );
+        if marker {
+            let body_str = std::str::from_utf8(&body).unwrap_or("");
+            let has_field = body_str.contains("\"edges_source\"");
+            let field_count = body_str.matches("\"edges_source\"").count();
+            let head = if body_str.len() > 500 {
+                &body_str[..500]
+            } else {
+                body_str
+            };
+            eprintln!(
+                "[lip-debug-edges] wire response: has_edges_source={} edges_source_count={} body_bytes={} head={}",
+                has_field,
+                field_count,
+                body.len(),
+                head
+            );
+        }
+    }
     stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
     stream.write_all(&body).await?;
     Ok(())

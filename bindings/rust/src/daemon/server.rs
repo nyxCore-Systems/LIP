@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(unix)]
@@ -8,11 +9,11 @@ use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::query_graph::{LipDatabase, ServerMessage};
+use crate::query_graph::LipDatabase;
 
 use super::embedding::EmbeddingClient;
 use super::journal::{self, Journal, COMPACT_THRESHOLD as COMPACT_THR};
-use super::session::Session;
+use super::session::{Notification, Session};
 use super::tier2_manager::{Tier2Manager, VerificationJob, CHANNEL_CAPACITY};
 use super::watcher::{self, FileWatcherHandle};
 
@@ -28,11 +29,14 @@ pub struct LipDaemon {
     /// Whether to spawn the per-file filesystem watcher on startup.
     watch_files: bool,
     /// Broadcast sender for push notifications to all active sessions.
-    notify_tx: broadcast::Sender<ServerMessage>,
+    notify_tx: broadcast::Sender<Notification>,
     /// Shared embedding client. `None` when `LIP_EMBEDDING_URL` is not set.
     embedding_client: Arc<Option<EmbeddingClient>>,
     /// When `true`, spawn a watchdog that exits the process when the parent dies.
     managed: bool,
+    /// Monotonic session id counter. Assigned to each accepted connection so
+    /// the session can filter broadcast echoes of its own emissions.
+    next_session_id: Arc<AtomicU64>,
 }
 
 impl LipDaemon {
@@ -48,6 +52,7 @@ impl LipDaemon {
             notify_tx,
             embedding_client: Arc::new(EmbeddingClient::from_env()),
             managed: false,
+            next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -169,7 +174,9 @@ impl LipDaemon {
 
         loop {
             let (stream, _) = listener.accept().await?;
+            let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
             let session = Arc::new(Session::new(
+                session_id,
                 self.db.clone(),
                 Some(self.tier2_tx.clone()),
                 Some(Arc::clone(&shared_journal)),

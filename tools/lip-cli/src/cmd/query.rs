@@ -129,6 +129,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         QueryKind::Symbols { query, limit } => ClientMessage::QueryWorkspaceSymbols {
             query,
             limit: Some(limit),
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
         },
         QueryKind::DeadSymbols { limit } => ClientMessage::QueryDeadSymbols { limit: Some(limit) },
         QueryKind::Similar { query, limit } => ClientMessage::SimilarSymbols { query, limit },

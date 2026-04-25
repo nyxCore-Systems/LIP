@@ -233,6 +233,99 @@ mod tests {
         assert!(s.is_exported);
     }
 
+    // ── Rust: v2.3 structural metadata ────────────────────────────────────────
+
+    #[test]
+    fn rust_pub_fn_visibility_public() {
+        use crate::schema::{ExtractionTier, Visibility};
+        let syms = sym("pub fn bar(x: i32) {}", Language::Rust);
+        let s = find(&syms, "bar");
+        assert_eq!(s.visibility, Some(Visibility::Public));
+        assert!(s.modifiers.iter().any(|m| m == "pub"));
+        assert_eq!(s.extraction_tier, ExtractionTier::Tier1);
+        // Confidence from explicit keyword → 1.0.
+        assert_eq!(s.visibility_confidence, Some(1.0));
+    }
+
+    #[test]
+    fn rust_pub_crate_fn_visibility_internal() {
+        use crate::schema::Visibility;
+        let syms = sym("pub(crate) fn helper() {}", Language::Rust);
+        let s = find(&syms, "helper");
+        assert_eq!(s.visibility, Some(Visibility::Internal));
+        assert!(s.modifiers.iter().any(|m| m.starts_with("pub(")));
+    }
+
+    #[test]
+    fn rust_private_fn_visibility_private() {
+        use crate::schema::Visibility;
+        let syms = sym("fn hidden() {}", Language::Rust);
+        let s = find(&syms, "hidden");
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        // No modifier keyword → 0.5 confidence.
+        assert_eq!(s.visibility_confidence, Some(0.5));
+    }
+
+    #[test]
+    fn rust_async_unsafe_modifiers_collected() {
+        let src = "pub async unsafe fn io() {}";
+        let syms = sym(src, Language::Rust);
+        let s = find(&syms, "io");
+        assert!(s.modifiers.iter().any(|m| m == "pub"));
+        assert!(s.modifiers.iter().any(|m| m == "async"));
+        assert!(s.modifiers.iter().any(|m| m == "unsafe"));
+    }
+
+    #[test]
+    fn rust_container_name_from_impl() {
+        let src = "impl Foo { pub fn bar(&self) {} }";
+        let syms = sym(src, Language::Rust);
+        let s = find(&syms, "bar");
+        assert_eq!(s.container_name.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn rust_container_name_from_trait() {
+        // Default method has a body and parses as `function_item`, so it is
+        // extracted. Abstract trait methods (`function_signature_item`) are
+        // not extracted today — orthogonal gap.
+        let src = "pub trait Render { fn draw(&self) {} }";
+        let syms = sym(src, Language::Rust);
+        let s = find(&syms, "draw");
+        assert_eq!(s.container_name.as_deref(), Some("Render"));
+    }
+
+    #[test]
+    fn rust_no_container_at_top_level() {
+        let syms = sym("pub fn top() {}", Language::Rust);
+        assert_eq!(find(&syms, "top").container_name, None);
+    }
+
+    #[test]
+    fn rust_signature_and_normalized() {
+        let syms = sym(
+            "pub fn add(x: i32, y: i32) -> i32 { x + y }",
+            Language::Rust,
+        );
+        let s = find(&syms, "add");
+        assert_eq!(
+            s.signature.as_deref(),
+            Some("pub fn add(x: i32, y: i32) -> i32")
+        );
+        assert_eq!(
+            s.signature_normalized.as_deref(),
+            Some("pub fn add(_: i32, _: i32) -> i32")
+        );
+    }
+
+    #[test]
+    fn rust_non_function_has_no_signature() {
+        let syms = sym("pub struct Point { x: i32 }", Language::Rust);
+        let s = find(&syms, "Point");
+        assert_eq!(s.signature, None);
+        assert_eq!(s.signature_normalized, None);
+    }
+
     #[test]
     fn rust_macro_definition() {
         let syms = sym("macro_rules! vec_of { () => {} }", Language::Rust);
@@ -806,5 +899,235 @@ mod tests {
     #[test]
     fn empty_source_returns_empty_swift() {
         assert!(sym("", Language::Swift).is_empty());
+    }
+
+    // ── v2.3 structural metadata: smoke tests per language ───────────────────
+
+    #[test]
+    fn ts_method_visibility_and_container() {
+        use crate::schema::{ExtractionTier, Visibility};
+        let src = "class Svc { private handle(x: number): boolean { return true; } }";
+        let syms = sym(src, Language::TypeScript);
+        let s = find(&syms, "handle");
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        assert_eq!(s.container_name.as_deref(), Some("Svc"));
+        assert!(s.modifiers.iter().any(|m| m == "private"));
+        assert_eq!(s.extraction_tier, ExtractionTier::Tier1);
+        assert_eq!(
+            s.signature_normalized.as_deref(),
+            Some("private handle(_: number): boolean")
+        );
+    }
+
+    #[test]
+    fn ts_exported_function_modifier() {
+        use crate::schema::Visibility;
+        let syms = sym(
+            "export function send(x: number): void {}",
+            Language::TypeScript,
+        );
+        let s = find(&syms, "send");
+        assert!(s.modifiers.iter().any(|m| m == "export"));
+        assert_eq!(s.visibility, Some(Visibility::Public));
+    }
+
+    #[test]
+    fn py_method_container_and_visibility() {
+        use crate::schema::{ExtractionTier, Visibility};
+        let src = "class C:\n    def _private(self, x: int) -> None:\n        pass\n";
+        let syms = sym(src, Language::Python);
+        let s = find(&syms, "_private");
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        assert_eq!(s.container_name.as_deref(), Some("C"));
+        assert_eq!(s.extraction_tier, ExtractionTier::Tier1);
+        // `self` has no `:` and is left as-is; only the typed param is normalized.
+        assert_eq!(
+            s.signature_normalized.as_deref(),
+            Some("def _private(self, _: int) -> None")
+        );
+    }
+
+    #[test]
+    fn go_func_visibility_from_name() {
+        use crate::schema::Visibility;
+        let syms = sym(
+            "package p\nfunc Exported(x int) bool { return true }",
+            Language::Go,
+        );
+        let s = find(&syms, "Exported");
+        assert_eq!(s.visibility, Some(Visibility::Public));
+        assert_eq!(s.signature.as_deref(), Some("func Exported(x int) bool"));
+    }
+
+    #[test]
+    fn go_method_receiver_as_container() {
+        let src = "package p\nfunc (f *Foo) Bar() {}";
+        let syms = sym(src, Language::Go);
+        let s = find(&syms, "Bar");
+        assert_eq!(s.container_name.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn dart_private_underscore_visibility_top_level() {
+        // Note: Dart class-body methods (`class_member_definition` →
+        // `method_signature`) are a pre-existing extractor gap — we only
+        // match `method_declaration` today. Validate the underscore-private
+        // convention on a top-level function instead.
+        use crate::schema::Visibility;
+        let src = "void _priv(int x) {}";
+        let syms = sym(src, Language::Dart);
+        let s = find(&syms, "_priv");
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        assert!(!s.is_exported);
+    }
+
+    #[test]
+    fn c_static_modifier_and_signature() {
+        use crate::schema::Visibility;
+        let syms = sym("static int helper(int n) { return n; }", Language::C);
+        let s = find(&syms, "helper");
+        assert!(s.modifiers.iter().any(|m| m == "static"));
+        // Signature at minimum covers the visible declarator; normalized form is whitespace-collapsed.
+        assert!(s.signature.as_deref().unwrap_or("").contains("helper"));
+        assert_eq!(s.visibility, Some(Visibility::Public));
+    }
+
+    #[test]
+    fn cpp_method_container_in_class() {
+        use crate::schema::SymbolKind;
+        let src = "class Svc { public: int run() { return 0; } };";
+        let syms = sym(src, Language::Cpp);
+        let s = find(&syms, "run");
+        assert_eq!(s.container_name.as_deref(), Some("Svc"));
+        assert_eq!(s.kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn kotlin_private_modifier_and_visibility() {
+        use crate::schema::Visibility;
+        let src = "class Svc { private fun hidden(x: Int): Boolean = true }";
+        let syms = sym(src, Language::Kotlin);
+        let s = find(&syms, "hidden");
+        assert!(s.modifiers.iter().any(|m| m == "private"));
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        assert_eq!(s.container_name.as_deref(), Some("Svc"));
+    }
+
+    #[test]
+    fn swift_fileprivate_modifier_and_visibility() {
+        use crate::schema::Visibility;
+        let src = "class Svc {\n    fileprivate func hidden() {}\n}";
+        let syms = sym(src, Language::Swift);
+        let s = find(&syms, "hidden");
+        assert!(s.modifiers.iter().any(|m| m == "fileprivate"));
+        assert_eq!(s.visibility, Some(Visibility::Private));
+        assert_eq!(s.container_name.as_deref(), Some("Svc"));
+    }
+
+    // ── v2.3 reference classification (Call/Read/Write + is_test) ────────────
+
+    fn occs_at(uri: &str, source: &str, lang: Language) -> Vec<OwnedOccurrence> {
+        Tier1Indexer::new().occurrences_for_source(uri, source, lang)
+    }
+
+    #[test]
+    fn ref_kind_call_rust() {
+        use crate::schema::ReferenceKind;
+        let occs_list = occs("fn a() { b(); } fn b() {}", Language::Rust);
+        let call = occs_list
+            .iter()
+            .find(|o| o.symbol_uri.contains("#b") && o.role == Role::Reference)
+            .expect("b() should be a reference");
+        assert_eq!(call.kind, ReferenceKind::Call);
+    }
+
+    #[test]
+    fn ref_kind_call_typescript_method_property() {
+        use crate::schema::ReferenceKind;
+        // `obj.method()` — the property identifier is the callee.
+        let src = "function demo(obj: any) { obj.method(); }";
+        let occs_list = occs(src, Language::TypeScript);
+        let callee = occs_list.iter().find(|o| o.symbol_uri.contains("#method"));
+        if let Some(c) = callee {
+            assert_eq!(
+                c.kind,
+                ReferenceKind::Call,
+                "obj.method() callee must be classified as Call, got {:?}",
+                c.kind
+            );
+        }
+    }
+
+    #[test]
+    fn ref_kind_read_rust_local_variable_use() {
+        use crate::schema::ReferenceKind;
+        let src = "fn f(x: i32) -> i32 { x + 1 }";
+        let occs_list = occs(src, Language::Rust);
+        // `x` on the RHS of the expression is a Read.
+        let read = occs_list
+            .iter()
+            .find(|o| o.symbol_uri.contains("#x") && o.role == Role::Reference);
+        if let Some(r) = read {
+            assert_eq!(r.kind, ReferenceKind::Read);
+        }
+    }
+
+    #[test]
+    fn ref_kind_write_python_assignment() {
+        use crate::schema::ReferenceKind;
+        let src = "x = 1\nx = 2\n";
+        let occs_list = occs(src, Language::Python);
+        // At least one Write occurrence for `x`.
+        let has_write = occs_list
+            .iter()
+            .any(|o| o.symbol_uri.contains("#x") && o.kind == ReferenceKind::Write);
+        assert!(
+            has_write,
+            "expected at least one Write occurrence on `x = ...`; got {:?}",
+            occs_list
+                .iter()
+                .filter(|o| o.symbol_uri.contains("#x"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn is_test_file_detects_common_paths() {
+        let cases = [
+            ("file:///proj/tests/foo.rs", true),
+            ("file:///proj/src/foo_test.go", true),
+            ("file:///proj/src/foo.test.ts", true),
+            ("file:///proj/src/foo.spec.js", true),
+            ("file:///proj/__tests__/foo.ts", true),
+            ("file:///proj/src/MyServiceTest.java", true),
+            ("file:///proj/src/lib.rs", false),
+            ("file:///proj/src/foo.rs", false),
+        ];
+        for (uri, expected) in cases {
+            let occs_list = occs_at(uri, "fn foo() {}", Language::Rust);
+            let any = occs_list.first();
+            if let Some(o) = any {
+                assert_eq!(
+                    o.is_test, expected,
+                    "wrong is_test for uri {uri}: got {}",
+                    o.is_test
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn definition_role_leaves_kind_unknown() {
+        use crate::schema::ReferenceKind;
+        let occs_list = occs("pub fn defined() {}", Language::Rust);
+        let def = occs_list
+            .iter()
+            .find(|o| o.symbol_uri.contains("#defined") && o.role == Role::Definition)
+            .expect("definition occurrence");
+        assert_eq!(
+            def.kind,
+            ReferenceKind::Unknown,
+            "definitions must leave kind as Unknown — ReferenceKind only classifies references"
+        );
     }
 }

@@ -111,6 +111,9 @@ async fn daemon_call(name: &str, args: &Value, socket: &Path) -> anyhow::Result<
         "lip_workspace_symbols" => ClientMessage::QueryWorkspaceSymbols {
             query: req_str(args, "query")?,
             limit: args["limit"].as_u64().map(|n| n as usize).or(Some(50)),
+            kind_filter: None,
+            scope: None,
+            modifier_filter: None,
         },
         "lip_definition" => ClientMessage::QueryDefinition {
             uri: req_str(args, "uri")?,
@@ -383,7 +386,7 @@ fn format_response(tool: &str, msg: &ServerMessage) -> String {
 
             out
         }
-        ServerMessage::WorkspaceSymbolsResult { symbols } => {
+        ServerMessage::WorkspaceSymbolsResult { symbols, .. } => {
             if symbols.is_empty() {
                 return "No symbols found.".into();
             }

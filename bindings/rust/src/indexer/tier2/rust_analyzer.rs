@@ -23,8 +23,10 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
+use crate::indexer::language::Language;
 use crate::schema::{OwnedRelationship, OwnedSymbolInfo, SymbolKind};
 
+use super::enrich::enrich_v23;
 use super::lsp_client::LspClient;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -199,11 +201,18 @@ impl RustAnalyzerBackend {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
 
+            let container = item
+                .get("containerName")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+
             out.push(RawSymbol {
                 name,
                 kind,
                 line,
                 col,
+                container,
             });
         }
         Ok(out)
@@ -389,12 +398,12 @@ impl RustAnalyzerBackend {
                 .as_deref()
                 .map(|s| s.starts_with("pub"))
                 .unwrap_or(false);
-            symbols.push(OwnedSymbolInfo {
+            let mut info = OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
                 kind: lsp_kind_to_lip(sym.kind),
                 documentation: None,
-                signature: sig,
+                signature: sig.clone(),
                 confidence_score: 90,
                 relationships: type_rel.into_iter().collect(),
                 runtime_p99_ms: None,
@@ -402,7 +411,15 @@ impl RustAnalyzerBackend {
                 taint_labels: vec![],
                 blast_radius: 0,
                 is_exported,
-            });
+                ..Default::default()
+            };
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Rust,
+            );
+            symbols.push(info);
         }
 
         // Collect local variable types from inlay hints — these are bindings
@@ -440,12 +457,13 @@ impl RustAnalyzerBackend {
             };
             // @line:col suffix makes the URI unique for same-name locals.
             let sym_uri = format!("lip://local/{path}#{name}@{hint_line}:{hint_col}");
-            symbols.push(OwnedSymbolInfo {
+            let local_sig = format!("{name}: {label}");
+            let mut info = OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: name.to_owned(),
                 kind: SymbolKind::Variable,
                 documentation: None,
-                signature: Some(format!("{name}: {label}")),
+                signature: Some(local_sig.clone()),
                 confidence_score: 90,
                 relationships: vec![],
                 runtime_p99_ms: None,
@@ -453,7 +471,10 @@ impl RustAnalyzerBackend {
                 taint_labels: vec![],
                 blast_radius: 0,
                 is_exported: false,
-            });
+                ..Default::default()
+            };
+            enrich_v23(&mut info, Some(&local_sig), None, Language::Rust);
+            symbols.push(info);
         }
 
         Ok(VerificationResult {
@@ -470,6 +491,7 @@ struct RawSymbol {
     kind: u64,
     line: u32,
     col: u32,
+    container: Option<String>,
 }
 
 /// Convert a `file://` URI to a LIP `lip://local/` URI.

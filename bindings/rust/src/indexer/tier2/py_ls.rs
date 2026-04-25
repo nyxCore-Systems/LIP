@@ -22,8 +22,10 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
 
+use crate::indexer::language::Language;
 use crate::schema::{OwnedRelationship, OwnedSymbolInfo, SymbolKind};
 
+use super::enrich::enrich_v23;
 use super::lsp_client::LspClient;
 use super::rust_analyzer::{file_uri_to_lip_uri, VerificationResult};
 
@@ -181,11 +183,18 @@ impl PythonBackend {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
 
+            let container = item
+                .get("containerName")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+
             out.push(RawSymbol {
                 name,
                 kind,
                 line,
                 col,
+                container,
             });
         }
         Ok(out)
@@ -299,12 +308,12 @@ impl PythonBackend {
 
             // Python convention: names starting with _ are private.
             let is_exported = !sym.name.starts_with('_');
-            symbols.push(OwnedSymbolInfo {
+            let mut info = OwnedSymbolInfo {
                 uri: sym_uri,
                 display_name: sym.name.clone(),
                 kind: lsp_kind_to_lip(sym.kind),
                 documentation: None,
-                signature: sig,
+                signature: sig.clone(),
                 confidence_score: 90,
                 relationships: type_rel.into_iter().collect(),
                 runtime_p99_ms: None,
@@ -312,7 +321,15 @@ impl PythonBackend {
                 taint_labels: vec![],
                 blast_radius: 0,
                 is_exported,
-            });
+                ..Default::default()
+            };
+            enrich_v23(
+                &mut info,
+                sig.as_deref(),
+                sym.container.clone(),
+                Language::Python,
+            );
+            symbols.push(info);
         }
 
         Ok(VerificationResult {
@@ -329,6 +346,7 @@ struct RawSymbol {
     kind: u64,
     line: u32,
     col: u32,
+    container: Option<String>,
 }
 
 /// Try to spawn `pyright-langserver --stdio`; if not found, try `pylsp`.

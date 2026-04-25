@@ -27,6 +27,7 @@
 
 pub mod clangd;
 pub mod dart_ls;
+mod enrich;
 pub mod gopls;
 pub mod kotlin;
 pub mod lsp_client;

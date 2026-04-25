@@ -49,6 +49,13 @@ pub struct ImpactItem {
     /// Confidence that this dependency is real.
     /// Decreases with distance: 0.95 → 0.85 → 0.75 → 0.50 (floor).
     pub confidence: f32,
+    /// v2.3.4 — stable module grouping key for this file, used by risk
+    /// classifiers that weight cross-module blast. Resolved at upsert time
+    /// from the slice URI prefix, the SCIP symbol's package descriptor, or
+    /// a language-appropriate manifest (Cargo.toml, go.mod, package.json,
+    /// pyproject.toml, pubspec.yaml). `None` when no source yields a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<String>,
 }
 
 impl ImpactItem {
@@ -63,6 +70,131 @@ impl ImpactItem {
     }
 }
 
+/// How an impact item was discovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactSource {
+    /// Discovered via static call graph / dependency analysis.
+    Static,
+    /// Discovered via embedding similarity (semantic coupling).
+    Semantic,
+    /// Confirmed by both static analysis and semantic similarity.
+    Both,
+}
+
+/// Provenance for the call edges backing a blast-radius result (v2.3.1).
+///
+/// Reported to clients so they can decide how much to trust the static
+/// graph: Tier-1 tree-sitter edges are reliable, SCIP-only edges depend
+/// on the emitter's accuracy (scip-clang omits calls, scip-go is
+/// inconsistent), and `Empty` means no edges were available at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgesSource {
+    /// Edges produced by the Tier-1 tree-sitter pass on the file's source.
+    Tier1,
+    /// SCIP import provided symbols/occurrences but no edges, so the
+    /// daemon re-ran the Tier-1 tree-sitter pass against the file on disk
+    /// to fill the static call graph (v2.3.1 Feature #5).
+    ScipWithTier1Edges,
+    /// SCIP import provided edges via `SymbolRole::Call`, used as-is.
+    ScipOnly,
+    /// No call edges are available for this symbol/file. Clients should
+    /// treat the static blast-radius as best-effort only.
+    Empty,
+}
+
+/// A single entry in a batch blast-radius result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedBlastRadius {
+    /// The input file URI this result was computed for.
+    pub file_uri: String,
+    /// The static blast-radius result. `static_result.edges_source` carries
+    /// the call-edge provenance (moved off `EnrichedBlastRadius` in v2.3.2
+    /// so non-enriched `QueryBlastRadius` responses carry it too).
+    #[serde(flatten)]
+    pub static_result: BlastRadiusResult,
+    /// Semantically coupled files/symbols not in the static call graph.
+    /// Empty when `include_semantic` was false or embeddings are unavailable.
+    pub semantic_items: Vec<SemanticImpactItem>,
+}
+
+/// A single forward call edge returned by `QueryOutgoingCalls` (v2.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct OutgoingCallEdge {
+    pub from_uri: String,
+    pub to_uri: String,
+}
+
+/// Static forward-impact result for `QueryOutgoingImpact` (v2.3.3).
+///
+/// Symmetric to [`BlastRadiusResult`] — runs a forward BFS over
+/// `caller_to_callees` starting at `target_uri`, groups callees by
+/// distance (direct = 1, transitive >= 2), and surfaces the same
+/// [`EdgesSource`] provenance the incoming-direction query carries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutgoingImpactStatic {
+    /// Symbol URI the forward BFS started from.
+    pub target_uri: String,
+    /// Direct callees (distance = 1).
+    pub direct_items: Vec<ImpactItem>,
+    /// Transitive callees (distance >= 2).
+    pub transitive_items: Vec<ImpactItem>,
+    /// Call-edge provenance for the *target's defining file*. `None`
+    /// when the daemon has no edges recorded for that file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_source: Option<EdgesSource>,
+    /// `true` when BFS hit the depth or node cap.
+    pub truncated: bool,
+}
+
+/// Forward-impact result with optional semantic enrichment (v2.3.3).
+/// Symmetric envelope to [`EnrichedBlastRadius`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedOutgoingImpact {
+    #[serde(flatten)]
+    pub static_result: OutgoingImpactStatic,
+    /// Callees/files surfaced via embedding similarity to the target.
+    /// `source: Static | Semantic | Both` marks overlap with the static
+    /// call graph the same way [`EnrichedBlastRadius`] does.
+    pub semantic_items: Vec<SemanticImpactItem>,
+}
+
+/// How the client's query matched a workspace symbol's display name (v2.3 #5).
+/// Discriminator only — not a ranking signal; the numeric `score` on
+/// [`RankedSymbol`] is what callers sort by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchType {
+    Exact,
+    Prefix,
+    Fuzzy,
+}
+
+/// Per-symbol ranking metadata for [`ServerMessage::WorkspaceSymbolsResult`]
+/// (v2.3 Feature #5). Parallel to `symbols`: `ranked[i]` describes `symbols[i]`.
+/// Tiered scoring — Exact=1.0, Prefix=0.8, Fuzzy=0.5 — not BM25.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RankedSymbol {
+    pub symbol_uri: String,
+    pub score: f32,
+    pub match_type: MatchType,
+}
+
+/// An impact item discovered through embedding similarity rather than
+/// static call-graph edges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticImpactItem {
+    pub file_uri: String,
+    pub symbol_uri: String,
+    /// Cosine similarity in [0.0, 1.0].
+    pub similarity: f32,
+    pub source: ImpactSource,
+    /// v2.3.4 — module grouping key for this file. See [`ImpactItem::module_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<String>,
+}
+
 /// A single nearest-neighbor hit returned by `ServerMessage::NearestResult`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NearestItem {
@@ -70,6 +202,20 @@ pub struct NearestItem {
     pub uri: String,
     /// Cosine similarity in [0.0, 1.0] — higher is more similar.
     pub score: f32,
+    /// Model that produced the stored embedding for this item.
+    /// `None` when the item has no embedding or the model is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+/// Per-file entry inside [`ServerMessage::BatchFileStatusResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatusEntry {
+    pub uri: String,
+    pub indexed: bool,
+    pub has_embedding: bool,
+    pub age_seconds: Option<u64>,
+    pub embedding_model: Option<String>,
 }
 
 /// A line-range chunk boundary returned by [`ServerMessage::BoundariesResult`].
@@ -149,6 +295,12 @@ pub struct BlastRadiusResult {
     pub truncated: bool,
     /// Composite risk level derived from caller count and spread.
     pub risk_level: RiskLevel,
+    /// Provenance for the call edges used to compute this result (v2.3.2).
+    /// Moved from `EnrichedBlastRadius` so `QueryBlastRadius` — not just
+    /// `QueryBlastRadiusBatch` / `QueryBlastRadiusSymbol` — carries it.
+    /// `None` when the daemon has no edges recorded for the target's file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_source: Option<EdgesSource>,
 }
 
 /// Result for a single sub-query inside a [`ClientMessage::BatchQuery`].
@@ -194,14 +346,53 @@ pub enum ServerMessage {
         symbol: Option<OwnedSymbolInfo>,
     },
     BlastRadiusResult(BlastRadiusResult),
+    BlastRadiusBatchResult {
+        results: Vec<EnrichedBlastRadius>,
+        /// Input URIs from `changed_file_uris` that were not present in the index.
+        /// Absent when empty (all inputs were indexed).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_indexed_uris: Vec<String>,
+    },
+    /// Response to [`ClientMessage::QueryBlastRadiusSymbol`].
+    /// `result` is `None` when the symbol's defining file is not indexed.
+    BlastRadiusSymbolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<EnrichedBlastRadius>,
+    },
+    /// Response to [`ClientMessage::QueryOutgoingCalls`]. `edges` is a flat
+    /// list of `(caller, callee)` pairs collected during BFS, with no
+    /// guaranteed ordering. `truncated = true` means the configured node
+    /// cap stopped the BFS short.
+    OutgoingCallsResult {
+        edges: Vec<OutgoingCallEdge>,
+        truncated: bool,
+    },
+    /// Response to [`ClientMessage::QueryOutgoingImpact`] (v2.3.3).
+    /// `result` is `None` when the symbol's defining file is not indexed.
+    OutgoingImpactResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<EnrichedOutgoingImpact>,
+    },
     WorkspaceSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
+        /// v2.3 Feature #5: per-symbol ranking information.
+        /// Empty when the client did not provide any filter/ranking cues
+        /// (pre-v2.3 callers get an empty vec and ignore it via serde default).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ranked: Vec<RankedSymbol>,
     },
     DocumentSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
     },
     DeadSymbolsResult {
         symbols: Vec<OwnedSymbolInfo>,
+    },
+    /// Response to [`ClientMessage::QueryInvalidatedFiles`].
+    ///
+    /// Contains the deduplicated set of file URIs that consume at least one of
+    /// the changed symbol names and therefore need re-verification.
+    InvalidatedFilesResult {
+        file_uris: Vec<String>,
     },
     AnnotationAck,
     AnnotationValue {
@@ -516,6 +707,28 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    // ── v2.2 features ────────────────────────────────────────────────────
+    /// Response to [`ClientMessage::ReindexStale`].
+    ReindexStaleResult {
+        /// URIs that were re-indexed from disk.
+        reindexed: Vec<String>,
+        /// URIs that were within the age threshold and were skipped.
+        skipped: Vec<String>,
+    },
+    /// Response to [`ClientMessage::BatchFileStatus`].
+    BatchFileStatusResult {
+        entries: Vec<FileStatusEntry>,
+    },
+    /// Response to [`ClientMessage::QueryAbiHash`].
+    ///
+    /// The hash is a hex-encoded SHA-256 over the file's exported symbols
+    /// sorted by URI. A change in hash means the public interface changed.
+    AbiHashResult {
+        uri: String,
+        /// `None` when the file is not in the daemon's index.
+        hash: Option<String>,
+    },
 }
 
 /// Provenance record for a Tier 3 ingestion source (typically a SCIP
@@ -668,15 +881,86 @@ pub enum ClientMessage {
     QueryBlastRadius {
         symbol_uri: String,
     },
+    /// Batch blast-radius for all symbols defined in the given files.
+    /// Optionally enriched with embedding-based semantic coupling.
+    /// Returns `BlastRadiusBatchResult`.
+    ///
+    /// When `min_score` is present, semantic enrichment is enabled:
+    /// each changed file's embedding is compared against the index and
+    /// neighbours above the threshold are included as `semantic_items`.
+    /// Omit or set to `null` to skip semantic enrichment.
+    QueryBlastRadiusBatch {
+        changed_file_uris: Vec<String>,
+        /// Minimum cosine similarity for semantic hits (default: 0.6).
+        /// Presence enables semantic enrichment.
+        #[serde(default)]
+        min_score: Option<f32>,
+    },
+    /// Symbol-scoped blast radius with optional semantic enrichment (v2.3).
+    /// Single-symbol analogue of `QueryBlastRadiusBatch`. Delegates to the
+    /// file-level blast-radius computation for the symbol's defining file
+    /// and returns an `EnrichedBlastRadius`.
+    ///
+    /// When `min_score` is present, semantic enrichment runs for that file's
+    /// embedding against the index; absent means structural-only.
+    /// Returns `BlastRadiusSymbolResult`.
+    QueryBlastRadiusSymbol {
+        symbol_uri: String,
+        #[serde(default)]
+        min_score: Option<f32>,
+    },
+    /// Outgoing call graph starting at `symbol_uri` (v2.3 Feature #4).
+    /// Returns the transitive forward call edges up to `depth` hops.
+    /// `truncated = true` when the BFS hit the configured node limit.
+    QueryOutgoingCalls {
+        symbol_uri: String,
+        /// BFS depth (>=1). Values <1 are treated as 1; >8 are clamped to 8
+        /// to bound response size on pathological graphs.
+        depth: u32,
+    },
+    /// Forward-direction symbol impact with optional semantic enrichment
+    /// (v2.3.3). Symmetric to [`ClientMessage::QueryBlastRadiusSymbol`] —
+    /// same envelope shape, same threshold semantics, same `edges_source`
+    /// provenance. Walks `caller_to_callees` instead of `callee_to_callers`.
+    QueryOutgoingImpact {
+        symbol_uri: String,
+        /// BFS depth. `None` or values outside [1,8] clamp to 8 (the safety
+        /// ceiling). Clients pass smaller depths to bound response size in
+        /// latency-sensitive workflows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+        /// Cosine-similarity threshold for semantic enrichment. `None`
+        /// skips enrichment entirely. Matches `QueryBlastRadiusSymbol`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_score: Option<f32>,
+    },
     QueryWorkspaceSymbols {
         query: String,
         limit: Option<usize>,
+        /// v2.3 Feature #5: only return symbols whose `kind` is in this set.
+        /// Omit for no filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind_filter: Option<Vec<crate::schema::SymbolKind>>,
+        /// v2.3 Feature #5: only return symbols whose defining file URI
+        /// starts with this prefix. Omit to search all files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// v2.3 Feature #5: only return symbols that carry at least one of
+        /// these modifier strings (e.g. "pub", "async"). Omit for no filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifier_filter: Option<Vec<String>>,
     },
     QueryDocumentSymbols {
         uri: String,
     },
     QueryDeadSymbols {
         limit: Option<usize>,
+    },
+    /// Given a list of changed symbol URIs, return the file URIs that consume
+    /// those symbols and need re-verification (Kotlin IC model).
+    /// Returns `InvalidatedFilesResult`.
+    QueryInvalidatedFiles {
+        changed_symbol_uris: Vec<String>,
     },
     AnnotationSet {
         symbol_uri: String,
@@ -1094,6 +1378,51 @@ pub enum ClientMessage {
     RegisterTier3Source {
         source: Tier3Source,
     },
+
+    // ── v2.2 features ────────────────────────────────────────────────────
+    /// Re-index stale files atomically. For each URI, if the file is
+    /// not indexed or was last indexed more than `max_age_seconds` ago,
+    /// it is re-read from disk and re-indexed. URIs within the threshold
+    /// are skipped. Pass `max_age_seconds = 0` to force re-index of all
+    /// listed URIs regardless of age. Returns `ReindexStaleResult`.
+    ReindexStale {
+        uris: Vec<String>,
+        /// Files older than this threshold are re-indexed.
+        max_age_seconds: u64,
+    },
+    /// Query the index status of multiple files in a single round-trip.
+    /// Equivalent to issuing `QueryFileStatus` once per URI inside a
+    /// `Batch`, but without the overhead of individual messages.
+    /// Returns `BatchFileStatusResult`.
+    BatchFileStatus {
+        uris: Vec<String>,
+    },
+    /// Query the ABI surface hash for a file. The hash is a stable hex
+    /// string computed over the file's exported symbols sorted by URI,
+    /// including their signatures and kinds. A change in hash means the
+    /// public interface changed — useful as a recompilation trigger.
+    /// Returns `AbiHashResult`.
+    QueryAbiHash {
+        uri: String,
+    },
+
+    // ── v2.3.1 — URI canonicalisation ─────────────────────────────────────
+    /// Register a project root so the daemon can resolve relative
+    /// `lip://local/<rel>` URIs (from clients like CKB) against absolute
+    /// `lip://local/<abs>` keys (how SCIP imports are stored).
+    ///
+    /// Idempotent: re-registering the same root is a no-op. Callers may
+    /// issue this unconditionally at startup regardless of whether a prior
+    /// `lip import` already registered the same root.
+    ///
+    /// With multiple registered roots, URI resolution matches the
+    /// longest-prefix first. Acknowledged with `DeltaAck`.
+    RegisterProjectRoot {
+        /// Absolute filesystem path or `file:///…` / `lip://local/…` URI
+        /// of the project root. Normalised to an absolute path by the
+        /// daemon before insertion.
+        root: String,
+    },
 }
 
 impl ClientMessage {
@@ -1111,9 +1440,14 @@ impl ClientMessage {
             "query_references",
             "query_hover",
             "query_blast_radius",
+            "query_blast_radius_batch",
+            "query_blast_radius_symbol",
+            "query_outgoing_calls",
+            "query_outgoing_impact",
             "query_workspace_symbols",
             "query_document_symbols",
             "query_dead_symbols",
+            "query_invalidated_files",
             "annotation_set",
             "annotation_get",
             "annotation_list",
@@ -1155,6 +1489,10 @@ impl ClientMessage {
             "embed_text",
             "stream_context",
             "register_tier3_source",
+            "reindex_stale",
+            "batch_file_status",
+            "query_abi_hash",
+            "register_project_root",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -1180,9 +1518,14 @@ impl ClientMessage {
             ClientMessage::QueryReferences { .. } => "query_references",
             ClientMessage::QueryHover { .. } => "query_hover",
             ClientMessage::QueryBlastRadius { .. } => "query_blast_radius",
+            ClientMessage::QueryBlastRadiusBatch { .. } => "query_blast_radius_batch",
+            ClientMessage::QueryBlastRadiusSymbol { .. } => "query_blast_radius_symbol",
+            ClientMessage::QueryOutgoingCalls { .. } => "query_outgoing_calls",
+            ClientMessage::QueryOutgoingImpact { .. } => "query_outgoing_impact",
             ClientMessage::QueryWorkspaceSymbols { .. } => "query_workspace_symbols",
             ClientMessage::QueryDocumentSymbols { .. } => "query_document_symbols",
             ClientMessage::QueryDeadSymbols { .. } => "query_dead_symbols",
+            ClientMessage::QueryInvalidatedFiles { .. } => "query_invalidated_files",
             ClientMessage::AnnotationSet { .. } => "annotation_set",
             ClientMessage::AnnotationGet { .. } => "annotation_get",
             ClientMessage::AnnotationList { .. } => "annotation_list",
@@ -1224,6 +1567,10 @@ impl ClientMessage {
             ClientMessage::EmbedText { .. } => "embed_text",
             ClientMessage::StreamContext { .. } => "stream_context",
             ClientMessage::RegisterTier3Source { .. } => "register_tier3_source",
+            ClientMessage::ReindexStale { .. } => "reindex_stale",
+            ClientMessage::BatchFileStatus { .. } => "batch_file_status",
+            ClientMessage::QueryAbiHash { .. } => "query_abi_hash",
+            ClientMessage::RegisterProjectRoot { .. } => "register_project_root",
         }
     }
 
@@ -1246,6 +1593,7 @@ impl ClientMessage {
                 | ClientMessage::PruneDeleted
                 | ClientMessage::QueryStaleEmbeddings { .. }
                 | ClientMessage::ExplainMatch { .. }
+                | ClientMessage::ReindexStale { .. }
         )
     }
 }
@@ -1262,6 +1610,81 @@ mod tests {
     fn round_trip_server(msg: &ServerMessage) -> ServerMessage {
         let json = serde_json::to_string(msg).expect("serialize");
         serde_json::from_str(&json).expect("deserialize")
+    }
+
+    fn blast_radius_fixture() -> BlastRadiusResult {
+        BlastRadiusResult {
+            symbol_uri: "lip://scip-go/gomod/foo@v1.0.0/Engine#SearchSymbols().".into(),
+            direct_dependents: 2,
+            transitive_dependents: 3,
+            affected_files: vec!["lip://local//x/y.go".into()],
+            direct_items: vec![],
+            transitive_items: vec![],
+            truncated: false,
+            risk_level: RiskLevel::Low,
+            edges_source: Some(EdgesSource::ScipWithTier1Edges),
+        }
+    }
+
+    // v2.3.2 Issue — user-observed wire drop of `edges_source` despite
+    // internal state carrying `Some(ScipWithTier1Edges)`. Verifies that the
+    // field survives direct `BlastRadiusResult`, the `BlastRadiusResult`
+    // tuple-variant envelope (internally-tagged), and both
+    // `EnrichedBlastRadius` flatten sites (Batch / Symbol responses).
+    #[test]
+    fn edges_source_survives_all_response_envelopes() {
+        let br = blast_radius_fixture();
+
+        let direct = serde_json::to_string(&br).unwrap();
+        assert!(
+            direct.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "direct BlastRadiusResult must emit edges_source; got {direct}"
+        );
+
+        let envelope = ServerMessage::BlastRadiusResult(br.clone());
+        let envelope_json = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            envelope_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "ServerMessage::BlastRadiusResult envelope must carry edges_source; got {envelope_json}"
+        );
+
+        let enriched = EnrichedBlastRadius {
+            file_uri: "lip://local//x/y.go".into(),
+            static_result: br.clone(),
+            semantic_items: vec![],
+        };
+        let enriched_json = serde_json::to_string(&enriched).unwrap();
+        assert!(
+            enriched_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "flattened EnrichedBlastRadius must carry edges_source; got {enriched_json}"
+        );
+
+        let batch = ServerMessage::BlastRadiusBatchResult {
+            results: vec![enriched.clone()],
+            not_indexed_uris: vec![],
+        };
+        let batch_json = serde_json::to_string(&batch).unwrap();
+        assert!(
+            batch_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "BatchResult's flattened enriched items must carry edges_source; got {batch_json}"
+        );
+
+        let sym = ServerMessage::BlastRadiusSymbolResult {
+            result: Some(enriched),
+        };
+        let sym_json = serde_json::to_string(&sym).unwrap();
+        assert!(
+            sym_json.contains("\"edges_source\":\"scip_with_tier1_edges\""),
+            "SymbolResult's Some(enriched) must carry edges_source; got {sym_json}"
+        );
+
+        // Round-trip: deserialised form must preserve Some(...) too.
+        let rt = round_trip_server(&envelope);
+        if let ServerMessage::BlastRadiusResult(rt_br) = rt {
+            assert_eq!(rt_br.edges_source, Some(EdgesSource::ScipWithTier1Edges));
+        } else {
+            panic!("envelope round-trip variant mismatch");
+        }
     }
 
     #[test]
@@ -1390,6 +1813,239 @@ mod tests {
         assert!(tier3_sources.is_empty());
     }
 
+    // ── v2.2 round-trip tests ─────────────────────────────────────────
+
+    #[test]
+    fn reindex_stale_round_trips() {
+        let msg = ClientMessage::ReindexStale {
+            uris: vec!["file:///src/main.rs".into()],
+            max_age_seconds: 300,
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::ReindexStale {
+            uris,
+            max_age_seconds,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris, ["file:///src/main.rs"]);
+        assert_eq!(max_age_seconds, 300);
+    }
+
+    #[test]
+    fn reindex_stale_not_batchable() {
+        assert!(!ClientMessage::ReindexStale {
+            uris: vec![],
+            max_age_seconds: 0
+        }
+        .is_batchable());
+    }
+
+    #[test]
+    fn batch_file_status_round_trips() {
+        let msg = ClientMessage::BatchFileStatus {
+            uris: vec!["file:///a.rs".into(), "file:///b.rs".into()],
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::BatchFileStatus { uris } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn batch_file_status_is_batchable() {
+        assert!(ClientMessage::BatchFileStatus { uris: vec![] }.is_batchable());
+    }
+
+    #[test]
+    fn query_abi_hash_round_trips() {
+        let msg = ClientMessage::QueryAbiHash {
+            uri: "file:///src/lib.rs".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryAbiHash { uri } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/lib.rs");
+    }
+
+    // ── v2.3.3 round-trip tests ───────────────────────────────────────
+    #[test]
+    fn query_outgoing_impact_round_trips() {
+        let msg = ClientMessage::QueryOutgoingImpact {
+            symbol_uri: "lip://local/src/lib.rs#foo".into(),
+            depth: Some(3),
+            min_score: Some(0.7),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::QueryOutgoingImpact {
+            symbol_uri,
+            depth,
+            min_score,
+        } = rt
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(symbol_uri, "lip://local/src/lib.rs#foo");
+        assert_eq!(depth, Some(3));
+        assert_eq!(min_score, Some(0.7));
+    }
+
+    #[test]
+    fn query_outgoing_impact_is_batchable() {
+        assert!(ClientMessage::QueryOutgoingImpact {
+            symbol_uri: String::new(),
+            depth: None,
+            min_score: None,
+        }
+        .is_batchable());
+    }
+
+    #[test]
+    fn outgoing_impact_result_round_trips() {
+        let msg = ServerMessage::OutgoingImpactResult {
+            result: Some(EnrichedOutgoingImpact {
+                static_result: OutgoingImpactStatic {
+                    target_uri: "lip://local//abs/lib.rs#foo".into(),
+                    direct_items: vec![ImpactItem {
+                        file_uri: "lip://local//abs/callee.rs".into(),
+                        symbol_uri: "lip://local//abs/callee.rs#bar".into(),
+                        distance: 1,
+                        confidence: ImpactItem::confidence_at(1),
+                        module_id: None,
+                    }],
+                    transitive_items: vec![],
+                    edges_source: Some(EdgesSource::ScipWithTier1Edges),
+                    truncated: false,
+                },
+                semantic_items: vec![SemanticImpactItem {
+                    file_uri: "lip://local//abs/other.rs".into(),
+                    symbol_uri: "lip://local//abs/other.rs#baz".into(),
+                    similarity: 0.82,
+                    source: ImpactSource::Semantic,
+                    module_id: None,
+                }],
+            }),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        let rt: ServerMessage = serde_json::from_str(&json).expect("deserialise");
+        let ServerMessage::OutgoingImpactResult { result: Some(r) } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.static_result.direct_items.len(), 1);
+        assert_eq!(
+            r.static_result.edges_source,
+            Some(EdgesSource::ScipWithTier1Edges)
+        );
+        assert_eq!(r.semantic_items.len(), 1);
+        assert_eq!(r.semantic_items[0].source, ImpactSource::Semantic);
+    }
+
+    // ── v2.3.1 round-trip tests ───────────────────────────────────────
+    #[test]
+    fn register_project_root_round_trips() {
+        let msg = ClientMessage::RegisterProjectRoot {
+            root: "file:///repo".into(),
+        };
+        let rt = round_trip_client(&msg);
+        let ClientMessage::RegisterProjectRoot { root } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(root, "file:///repo");
+    }
+
+    #[test]
+    fn register_project_root_not_batchable() {
+        assert!(ClientMessage::RegisterProjectRoot {
+            root: String::new()
+        }
+        .is_batchable());
+    }
+
+    #[test]
+    fn query_abi_hash_is_batchable() {
+        assert!(ClientMessage::QueryAbiHash { uri: String::new() }.is_batchable());
+    }
+
+    #[test]
+    fn reindex_stale_result_round_trips() {
+        let msg = ServerMessage::ReindexStaleResult {
+            reindexed: vec!["file:///src/a.rs".into()],
+            skipped: vec!["file:///src/b.rs".into()],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::ReindexStaleResult { reindexed, skipped } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(reindexed, ["file:///src/a.rs"]);
+        assert_eq!(skipped, ["file:///src/b.rs"]);
+    }
+
+    #[test]
+    fn batch_file_status_result_round_trips() {
+        let msg = ServerMessage::BatchFileStatusResult {
+            entries: vec![FileStatusEntry {
+                uri: "file:///src/main.rs".into(),
+                indexed: true,
+                has_embedding: false,
+                age_seconds: Some(42),
+                embedding_model: None,
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::BatchFileStatusResult { entries } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].indexed);
+        assert_eq!(entries[0].age_seconds, Some(42));
+    }
+
+    #[test]
+    fn abi_hash_result_round_trips() {
+        let msg = ServerMessage::AbiHashResult {
+            uri: "file:///src/lib.rs".into(),
+            hash: Some("deadbeef".into()),
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::AbiHashResult { uri, hash } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(uri, "file:///src/lib.rs");
+        assert_eq!(hash.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn nearest_item_embedding_model_round_trips() {
+        let msg = ServerMessage::NearestResult {
+            results: vec![NearestItem {
+                uri: "file:///src/auth.rs".into(),
+                score: 0.95,
+                embedding_model: Some("text-embedding-3-small".into()),
+            }],
+        };
+        let rt = round_trip_server(&msg);
+        let ServerMessage::NearestResult { results } = rt else {
+            panic!("wrong variant");
+        };
+        assert_eq!(
+            results[0].embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn nearest_item_missing_embedding_model_deserializes_as_none() {
+        let json = r#"{"type":"nearest_result","results":[{"uri":"file:///a.rs","score":0.9}]}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        let ServerMessage::NearestResult { results } = msg else {
+            panic!("wrong variant");
+        };
+        assert!(results[0].embedding_model.is_none());
+    }
+
     /// Drift guard: every tag produced by [`ClientMessage::variant_tag`]
     /// must also appear in [`ClientMessage::supported_messages`], and
     /// the two lists must be the same size. Combined with the
@@ -1439,12 +2095,35 @@ mod tests {
             ClientMessage::QueryBlastRadius {
                 symbol_uri: String::new(),
             },
+            ClientMessage::QueryBlastRadiusBatch {
+                changed_file_uris: vec![],
+                min_score: None,
+            },
+            ClientMessage::QueryBlastRadiusSymbol {
+                symbol_uri: String::new(),
+                min_score: None,
+            },
+            ClientMessage::QueryOutgoingCalls {
+                symbol_uri: String::new(),
+                depth: 1,
+            },
+            ClientMessage::QueryOutgoingImpact {
+                symbol_uri: String::new(),
+                depth: None,
+                min_score: None,
+            },
             ClientMessage::QueryWorkspaceSymbols {
                 query: String::new(),
                 limit: None,
+                kind_filter: None,
+                scope: None,
+                modifier_filter: None,
             },
             ClientMessage::QueryDocumentSymbols { uri: String::new() },
             ClientMessage::QueryDeadSymbols { limit: None },
+            ClientMessage::QueryInvalidatedFiles {
+                changed_symbol_uris: vec![],
+            },
             ClientMessage::AnnotationSet {
                 symbol_uri: String::new(),
                 key: String::new(),
@@ -1614,6 +2293,15 @@ mod tests {
                     imported_at_ms: 0,
                 },
             },
+            ClientMessage::ReindexStale {
+                uris: vec![],
+                max_age_seconds: 0,
+            },
+            ClientMessage::BatchFileStatus { uris: vec![] },
+            ClientMessage::QueryAbiHash { uri: String::new() },
+            ClientMessage::RegisterProjectRoot {
+                root: String::new(),
+            },
         ];
 
         let supported = ClientMessage::supported_messages();
@@ -1756,6 +2444,7 @@ mod tests {
                 vec![NearestItem {
                     uri: "file:///a.rs".into(),
                     score: 0.9,
+                    embedding_model: None,
                 }],
                 vec![],
             ],
@@ -1942,6 +2631,7 @@ mod tests {
             outliers: vec![NearestItem {
                 uri: "file:///src/billing.go".into(),
                 score: 0.12,
+                embedding_model: None,
             }],
         };
         let rt = round_trip_server(&msg);
@@ -2148,6 +2838,7 @@ mod tests {
             moving_toward: vec![NearestItem {
                 uri: "file:///src/auth.rs".into(),
                 score: 0.91,
+                embedding_model: None,
             }],
         };
         let rt = round_trip_server(&msg);
