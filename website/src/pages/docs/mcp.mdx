@@ -1,7 +1,7 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: MCP Integration
-description: 24 MCP tools for AI agents — full schema reference, annotation patterns, and agent workflows.
+description: 34 MCP tools for AI agents — full schema reference, annotation patterns, and agent workflows.
 ---
 
 # MCP Integration
@@ -11,6 +11,8 @@ description: 24 MCP tools for AI agents — full schema reference, annotation pa
 ---
 
 ## Tools
+
+**Structural / graph (14):**
 
 | Tool | Description |
 |------|-------------|
@@ -28,16 +30,36 @@ description: 24 MCP tools for AI agents — full schema reference, annotation pa
 | `lip_stale_files` | Merkle sync probe — which files need re-indexing |
 | `lip_load_slice` | Mount a pre-built dependency slice into the daemon graph |
 | `lip_batch_query` | Execute multiple queries in one round-trip |
+
+**Semantic / embeddings (17):**
+
+| Tool | Description |
+|------|-------------|
 | `lip_embedding_batch` | Compute and cache file embeddings via HTTP endpoint |
 | `lip_nearest` | Top-K files most similar to a given file (cosine similarity) |
 | `lip_nearest_by_text` | Top-K files most similar to a free-text query |
+| `lip_nearest_by_contrast` | Contrastive search — files like X but unlike Y |
+| `lip_nearest_in_store` | Nearest-neighbour search against a caller-provided embedding store (cross-repo federation) |
+| `lip_similarity_matrix` | Pairwise cosine similarities for a list of files in one call |
+| `lip_semantic_drift` | Cosine distance between two files (0.0 = identical, 2.0 = opposite) |
+| `lip_semantic_diff` | Drift distance between two versions of a file |
+| `lip_outliers` | Identify semantically misplaced files within a set |
+| `lip_novelty_score` | How semantically novel a set of files is relative to the rest of the codebase |
+| `lip_find_boundaries` | Detect semantic boundaries within a file via chunked windowing |
+| `lip_find_counterpart` | Given a source file + candidate pool, return the closest matches |
+| `lip_extract_terminology` | Domain vocabulary most semantically central to a set of files |
+| `lip_get_centroid` | Component-wise mean embedding of a set of files |
+| `lip_explain_match` | Explain *why* a result was a strong semantic match for a query |
+| `lip_coverage` | Embedding coverage report under a filesystem path |
+| `lip_stale_embeddings` | Files whose stored embedding is older than the file's mtime |
+
+**Observability / ops (3):**
+
+| Tool | Description |
+|------|-------------|
 | `lip_index_status` | Daemon health: indexed count, embedding coverage, last update |
 | `lip_file_status` | Per-file indexing status and embedding age |
-| `lip_reindex_files` | Force re-index of specific file URIs from disk |
-| `lip_similarity` | Pairwise cosine similarity of two stored embeddings |
-| `lip_query_expansion` | Expand a query string into related symbol names |
-| `lip_cluster` | Group URIs by embedding proximity within a given radius |
-| `lip_export_embeddings` | Return raw stored vectors for external pipelines |
+| `lip_prune_deleted` | Remove index entries for files no longer on disk |
 
 All tools are backed by the live LIP daemon — results are always current, never a stale snapshot.
 
@@ -333,108 +355,81 @@ file:///src/auth.rs  indexed=true  has_embedding=true  age=42s
 
 ---
 
-## v1.6 embedding integration tools
+## Advanced semantic tools
 
-These tools require `LIP_EMBEDDING_URL` to be set unless otherwise noted.
+These tools require `LIP_EMBEDDING_URL` to be set unless otherwise noted. The full table above lists every tool; the most commonly-used ones are spelled out below.
 
-### lip_reindex_files
+### lip_nearest_by_contrast
 
-Force a re-index of specific file URIs from disk. Does not require embeddings — reads each file, detects its language, and updates the symbol graph.
+Contrastive search — find files similar to `like_uri` but different from `unlike_uri`. Useful when two concepts are close in raw vector space and you want to disambiguate.
 
 **Input:**
 ```json
-{ "uris": ["file:///src/auth.rs", "file:///src/session.rs"] }
+{ "like_uri": "file:///src/auth.rs", "unlike_uri": "file:///src/session.rs", "top_k": 5 }
 ```
-
-Use this after out-of-band changes that the daemon's file watcher didn't catch (e.g. selective `git checkout` or CI-generated files). Returns `DeltaAck`.
 
 ---
 
-### lip_similarity
+### lip_similarity_matrix
 
-Pairwise cosine similarity of two stored embeddings.
+Pairwise cosine similarities for a list of files in a single call. Returns a labelled N×N matrix.
 
 **Input:**
 ```json
-{ "uri_a": "file:///src/auth.rs", "uri_b": "file:///src/session.rs" }
+{ "uris": ["file:///src/auth.rs", "file:///src/session.rs", "file:///src/tokens.rs"] }
 ```
-
-**Output:**
-```
-score=0.9214
-```
-
-Returns `null` when either URI has no cached embedding — call `lip_embedding_batch` first. Accepts both `file://` (file embeddings) and `lip://` (symbol embeddings) URIs. Safe inside `lip_batch_query`.
 
 ---
 
-### lip_query_expansion
+### lip_outliers
 
-Embed a short query string and return the display names of the nearest symbols — useful before `lip_workspace_symbols` when the exact symbol name isn't known.
+Identify semantically misplaced files within a set. For each URI, computes its leave-one-out mean cosine similarity to the other set members and ranks the lowest as outliers.
 
 **Input:**
 ```json
-{ "query": "token validation", "top_k": 5 }
+{ "uris": ["file:///src/auth.rs", "file:///src/session.rs", "file:///src/payments.rs"], "top_k": 3 }
 ```
-
-**Output:**
-```
-verifyToken
-validateSession
-checkJwt
-parseBearer
-refreshToken
-```
-
-Requires symbols to have embeddings in the symbol store (populate with `lip_embedding_batch` using `lip://` URIs).
 
 ---
 
-### lip_cluster
+### lip_find_boundaries
 
-Group a list of URIs into clusters based on embedding proximity.
+Detect semantic boundaries within a single file by chunking it into line-windows and embedding each window. Returns the line positions where adjacent windows diverge most — useful for splitting overgrown files or finding logical sections.
 
 **Input:**
 ```json
-{
-  "uris": [
-    "file:///src/auth.rs",
-    "file:///src/session.rs",
-    "file:///src/payments.rs",
-    "file:///src/invoices.rs"
-  ],
-  "radius": 0.85
-}
+{ "uri": "file:///src/giant_module.rs", "window_lines": 60, "top_k": 3 }
 ```
-
-**Output:**
-```
-Group 1: file:///src/auth.rs  file:///src/session.rs
-Group 2: file:///src/payments.rs  file:///src/invoices.rs
-```
-
-`radius` is the cosine-similarity threshold. Two URIs land in the same group when their similarity is ≥ the radius. URIs without a cached embedding are silently excluded.
 
 ---
 
-### lip_export_embeddings
+### lip_explain_match
 
-Return the raw stored embedding vectors for a list of URIs. Useful for passing to external re-ranking, custom clustering, or visualization tools.
+Explain *why* a result was a strong semantic match for a query. Chunks the result file into windows, embeds each, and returns the top-scoring chunks with their line ranges.
 
 **Input:**
 ```json
-{ "uris": ["file:///src/auth.rs", "file:///src/session.rs"] }
+{ "query": "rate limiter token bucket", "result_uri": "file:///src/middleware/throttle.rs", "top_k": 3 }
 ```
 
-**Output:**
+---
+
+### lip_coverage
+
+Report embedding coverage under a filesystem path: how many indexed files have embeddings, how many don't. Useful as a CI gate or before running semantic queries.
+
+**Input:**
 ```json
-{
-  "file:///src/auth.rs":    [0.021, -0.044, 0.117, ...],
-  "file:///src/session.rs": [0.019, -0.051, 0.109, ...]
-}
+{ "root": "file:///repo/src" }
 ```
 
-URIs with no cached embedding are omitted from the result. Safe inside `lip_batch_query`.
+---
+
+### lip_prune_deleted
+
+Remove index entries for files that no longer exist on disk. On long-running daemons in repos with high churn, ghost embeddings accumulate and pollute nearest-neighbour searches.
+
+**Input:** `{}` (no arguments)
 
 ---
 
@@ -503,8 +498,8 @@ lip_file_status(target_uri) # confirm specific file is indexed and fresh
 | `findReferences` | `lip_references` | Same semantics |
 | `getCallGraph` | `lip_references` + CPG edges | LIP CPG via Tier 2 |
 | `prepareChange` | `lip_blast_radius` + `lip_annotation_get` | LIP adds annotation check |
-| `batchSearch` | `lip_query_expansion` + `lip_workspace_symbols` | Expand → search replaces compound text scan |
-| `explore` | `lip_cluster` + `lip_nearest_by_text` | Group and navigate by semantic proximity |
-| `recentlyRelevant` | `lip_similarity` + `lip_export_embeddings` | Feed raw vectors into CKB's re-ranking tier |
+| `batchSearch` | `lip_nearest_by_text` + `lip_workspace_symbols` | Semantic top-K → name search replaces compound text scan |
+| `explore` | `lip_find_boundaries` + `lip_nearest_by_text` | Navigate by semantic proximity and section boundaries |
+| `recentlyRelevant` | `lip_similarity_matrix` + `lip_get_centroid` | Feed pairwise scores or centroid into CKB's re-ranking tier |
 
 With LIP as CKB's backend, `analyzeImpact` and `prepareChange` are always current — no more `ckb index` needed.
